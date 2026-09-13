@@ -36,6 +36,18 @@ SIBLING (ATTR start_line > 100)
 CHILD (PSEUDO 'leaf', WHERE child_count > 2) AS y
 FOLLOWING
 
+# an unknown step field refuses, naming it: the cast to the fixed step shape drops it silently
+statement error
+SELECT tree_steps([{type: 'x', typo: 'y'}]);
+----
+unknown step field typo
+
+# an ATTR clause the operator regex cannot parse refuses instead of yielding empty name/op/arg
+statement error
+SELECT tree_steps([{attr: 'start_line IN (1,2)'}]);
+----
+cannot parse ATTR clause
+
 # a step with no combinator after the first defaults to DESCENDANT
 query I
 SELECT tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}]));

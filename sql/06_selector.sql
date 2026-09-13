@@ -1,10 +1,24 @@
 -- sql/06_selector.sql
 
 -- Normalize any list of step structs to one fixed shape so missing fields read as NULL.
+-- Two refusals guard the normalization: the cast to the fixed shape drops fields the shape
+-- does not name (a typo would silently do nothing), so the keys are enumerated first with
+-- json_keys and checked against the allowed set; and an ATTR text the operator regex cannot
+-- parse would yield empty name/op/arg, so it refuses naming the text.
+-- 1.5.5 note: a list literal of structs unifies its element types, filling missing fields
+-- with NULL, so json_keys(to_json(s)) returns the same unified key set for every step -- which
+-- is what the check wants: one unknown field anywhere in the list is caught.
 CREATE OR REPLACE MACRO tree_steps(steps) AS (
   WITH st AS (
     SELECT generate_subscripts(steps, 1) AS i,
            unnest(steps::STRUCT(comb VARCHAR, type VARCHAR, id VARCHAR, class VARCHAR, attr VARCHAR, pseudo VARCHAR, "where" VARCHAR, "as" VARCHAR)[]) AS s),
+  raw AS (SELECT unnest(steps) AS s0),
+  bad_key AS (
+    SELECT min(k) AS k FROM (SELECT unnest(json_keys(to_json(s0))) AS k FROM raw)
+    WHERE k NOT IN ('comb', 'type', 'id', 'class', 'attr', 'pseudo', 'where', 'as')),
+  bad_attr AS (
+    SELECT min(s.attr) AS a FROM st WHERE s.attr IS NOT NULL
+      AND NOT regexp_matches(s.attr, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|<>|<=|>=|<|>|LIKE|ILIKE|NOT LIKE)\s*(.+?)\s*$')),
   nodes AS (
     SELECT 0 AS i, 0 AS sub, 'selector' AS kind, NULL::VARCHAR AS value, NULL::VARCHAR AS op, NULL::VARCHAR AS arg, NULL::VARCHAR AS alias
     UNION ALL SELECT i, 0, 'step', NULL, CASE WHEN i = 1 THEN NULL ELSE COALESCE(s.comb, 'desc') END, NULL, s."as" FROM st
@@ -23,7 +37,11 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
            CASE n.kind WHEN 'selector' THEN NULL WHEN 'step' THEN 0 ELSE (SELECT p.node_id FROM numbered p WHERE p.kind = 'step' AND p.i = n.i) END AS parent_id,
            n.kind, n.value, n.op, n.arg, n.alias
     FROM numbered n)
-  SELECT list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR FROM parented);
+  SELECT CASE
+    WHEN (SELECT k FROM bad_key) IS NOT NULL THEN error('tree_steps: unknown step field ' || (SELECT k FROM bad_key))
+    WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN error('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
+    ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
+  FROM parented);
 
 CREATE OR REPLACE MACRO tree_treeql_comb(op) AS
   CASE op WHEN 'desc' THEN 'DESCENDANT' WHEN 'child' THEN 'CHILD' WHEN 'next' THEN 'SIBLING' WHEN 'after' THEN 'FOLLOWING' ELSE NULL END;

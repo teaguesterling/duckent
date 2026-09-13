@@ -126,6 +126,28 @@ CALL tree_ddl_create('main', 'bad8', tree_spec(tree_shape("order" := 'node_id', 
 ----
 S-coherence
 
+# NULL storage refuses: three-valued logic used to let it through the NOT IN check, and the
+# trees INSERT (whose text interpolates storage) then compiled to NULL and was filtered out,
+# leaving a table, a macro and partitions with no catalog row (I3)
+statement error
+CALL tree_ddl_create('main', 'bad9', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')', storage := NULL));
+----
+storage must be
+
+query IIII
+SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'bad9'),
+       (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name = 'bad9'),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'bad9'),
+       (SELECT count(*) FROM duckdb_functions() WHERE function_name = 'proj_main_bad9');
+----
+0	0	0	0
+
+# identity is required
+statement error
+CALL tree_ddl_create('main', NULL, tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+schema and name are required
+
 # parent basis, sibling-free profile recorded
 statement ok
 CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));

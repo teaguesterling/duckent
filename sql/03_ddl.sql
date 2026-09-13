@@ -61,11 +61,14 @@ derived AS (
 checked AS (
   SELECT *,
     CASE
+      -- NULL in any value interpolated into a generated statement would compile that whole
+      -- statement to NULL and drop it from the list, so identity and storage are checked first.
+      WHEN sch IS NULL OR nm IS NULL THEN error('tree_ddl_create: schema and name are required')
       WHEN exists_already THEN error('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
       WHEN like_missing THEN error('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
       WHEN abstract AND source IS NOT NULL THEN error('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
       WHEN NOT abstract AND source IS NULL THEN error('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
-      WHEN storage NOT IN ('materialized', 'projection') THEN error('tree_ddl_create: storage must be materialized or projection')
+      WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN error('tree_ddl_create: storage must be materialized or projection')
       WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN error('tree_ddl_create: declare LEVEL or PARENT (R2)')
       WHEN (shape).level IS NULL AND (shape).key IS NULL THEN error('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
       WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN error('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
