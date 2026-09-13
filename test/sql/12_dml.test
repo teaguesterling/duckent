@@ -1,0 +1,98 @@
+# name: test/sql/12_dml.test
+# description: tree-granular DML by ROOT, P13 on ingest, check
+
+statement ok
+CREATE TABLE src AS SELECT * FROM 'test/data/scripts.parquet';
+
+statement ok
+CREATE TABLE first_file AS SELECT * FROM src WHERE file_path = (SELECT min(file_path) FROM src);
+
+statement ok
+CREATE TABLE other_files AS SELECT * FROM src WHERE file_path <> (SELECT min(file_path) FROM src);
+
+statement ok
+CALL tree_ddl_create('main', 'scripts', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'first_file'));
+
+query I
+SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts';
+----
+1
+
+# append trees
+statement ok
+CALL tree_insert('main', 'scripts', 'other_files');
+
+query II
+SELECT (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src);
+----
+true	true
+
+# re-inserting an existing ROOT is refused
+statement error
+CALL tree_insert('main', 'scripts', 'first_file');
+----
+already present
+
+# replace re-derives one tree and bumps its epoch
+statement ok
+CALL tree_replace('main', 'scripts', 'first_file');
+
+query I
+SELECT epoch FROM tree_state.partitions WHERE tree_name = 'scripts' AND root_key = (SELECT {file_path: min(file_path)}::VARCHAR FROM src);
+----
+2
+
+# delete by ROOT
+statement ok
+CALL tree_delete('main', 'scripts', 'file_path = (SELECT min(file_path) FROM src)');
+
+query I
+SELECT count(*) FROM tree_project('main', 'scripts') WHERE file_path = (SELECT min(file_path) FROM src);
+----
+0
+
+# delete by a non-ROOT column is ill-typed (P21 / MN17)
+statement error
+CALL tree_delete('main', 'scripts', 'node_id = 3');
+----
+node_id
+
+# P13 on ingest: a partition that descends two levels at once is rejected with the ROOT hint absent (ROOT declared)
+statement ok
+CREATE TABLE bad_levels(file_path VARCHAR, node_id INT, depth INT, descendant_count INT);
+
+statement ok
+INSERT INTO bad_levels VALUES ('x.py', 0, 0, 2), ('x.py', 1, 2, 0), ('x.py', 2, 1, 0);
+
+statement error
+CALL tree_insert('main', 'scripts', 'bad_levels');
+----
+P13 violated
+
+# P13 with no ROOT declared names the hint
+statement ok
+CREATE TABLE two_trees(node_id INT, depth INT);
+
+statement ok
+INSERT INTO two_trees VALUES (0, 0), (1, 1), (0, 0), (1, 1), (2, 2), (5, 5);
+
+statement error
+CALL tree_ddl_create('main', 'unrooted', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'two_trees'));
+----
+declare ROOT
+
+# the failed create left nothing behind
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'unrooted';
+----
+0
+
+# check records a P13 assertion
+statement ok
+CALL tree_check('main', 'scripts');
+
+query II
+SELECT artifact, status FROM tree_catalog_assertions() WHERE tree_name = 'scripts';
+----
+assert_p13	ok

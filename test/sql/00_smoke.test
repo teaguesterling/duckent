@@ -22,7 +22,7 @@ does not exist
 
 # executor emulation: a compile macro that returns statements
 statement ok
-CREATE MACRO tree_compile_check(sch, nm) AS ['BEGIN TRANSACTION', 'CREATE TABLE ' || nm || '(x INT)', 'INSERT INTO ' || nm || ' VALUES (1)', 'COMMIT'];
+CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS ['BEGIN TRANSACTION', 'CREATE TABLE ' || nm || '(x INT)', 'INSERT INTO ' || nm || ' VALUES (1)', 'COMMIT'];
 
 statement ok
 CALL tree_check('main', 'emulated');
