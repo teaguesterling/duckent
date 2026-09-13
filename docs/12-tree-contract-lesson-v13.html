@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Tree Contract — from grep to CREATE TREE</title>
+<style>
+:root{
+  --paper:#F7F8F6; --ink:#1A1D21; --panel:#EEF0EC; --line:#C9CDC5;
+  --sel:#2F5FA8; --prop:#A63D2F; --ok:#2E7D4F; --dim:#6B7069; --hl:#FFF4D6;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --serif:Charter,Georgia,"Times New Roman",serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.62 var(--serif)}
+a{color:var(--sel);text-decoration:none;border-bottom:1px solid var(--line)}
+a:hover{border-bottom-color:var(--sel)}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+header.site{border-bottom:1px solid var(--line);padding:1rem 1.4rem;
+  display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.6rem}
+.wordmark{font:600 1rem var(--mono)} .wordmark span{color:var(--dim);font-weight:400}
+nav.toc{font:.85rem var(--mono);display:flex;gap:1rem;flex-wrap:wrap}
+.hero{max-width:1160px;margin:0 auto;padding:3rem 1.4rem 1.6rem}
+.hero h1{font:600 clamp(1.9rem,4vw,2.9rem)/1.15 var(--mono);margin:0 0 .8rem;letter-spacing:-.01em}
+.hero .sub{max-width:52ch;font-size:1.08rem}
+.hero .keys{font:.85rem var(--mono);color:var(--dim);margin-top:1rem}
+main{max-width:1160px;margin:0 auto;padding:0 1.4rem 4rem}
+.part{margin-top:3.4rem;border-top:3px solid var(--ink);padding-top:.6rem}
+.part-label{font:600 .85rem var(--mono);color:var(--dim);letter-spacing:.06em}
+.part h2{font:600 1.7rem var(--mono);margin:.2rem 0 0}
+.part .part-sub{color:var(--dim);max-width:60ch;margin:.4rem 0 0}
+.chapter{margin-top:2.6rem;padding-top:1.4rem;border-top:1px solid var(--line)}
+.ch-head{display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap}
+.ch-num{font:600 .8rem var(--mono);color:var(--dim)}
+.chapter h3{font:600 1.25rem var(--mono);margin:0}
+.badge{font:600 .68rem var(--mono);letter-spacing:.05em;padding:.1rem .45rem;border:1.5px solid}
+.badge.dep{color:var(--ok);border-color:var(--ok)}
+.badge.exp{color:var(--prop);border-color:var(--prop)}
+.row{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(240px,1fr);gap:2.2rem;margin-top:1rem}
+.narr p{margin:.85rem 0;max-width:62ch}
+.narr p:first-child{margin-top:0}
+.lead::first-letter{font-size:2.6em;float:left;line-height:.85;padding:.06em .08em 0 0;font-family:var(--mono);font-weight:600}
+aside .fig{border:1px solid var(--line);background:var(--panel);margin:0 0 1.1rem;position:relative}
+.fig .cap{font:.78rem/1.45 var(--mono);color:var(--dim);padding:.5rem .65rem;border-top:1px solid var(--line)}
+.fig .body{padding:.7rem .75rem}
+.fig pre{margin:0;font:.74rem/1.55 var(--mono);overflow-x:auto;white-space:pre}
+.fig .seed{position:absolute;top:-1px;right:-1px;font:.62rem var(--mono);color:var(--dim);
+  border:1px solid var(--line);border-top:0;border-right:0;background:var(--paper);padding:0 .35rem}
+.k{color:var(--sel)} .s{color:var(--ok)} .c{color:var(--dim)} .p{color:var(--prop)}
+.portrait{display:flex;gap:.7rem;align-items:center;padding:.7rem .75rem}
+.medal{flex:0 0 54px;width:54px;height:54px;border-radius:50%;border:1.5px solid var(--ink);
+  display:flex;align-items:center;justify-content:center;font:600 1.1rem var(--mono);background:var(--paper)}
+.portrait .who{font:.8rem/1.4 var(--mono)}
+.portrait .who b{display:block;font-size:.85rem}
+.datatable{width:100%;border-collapse:collapse;font:.74rem var(--mono)}
+.datatable th,.datatable td{border-bottom:1px solid var(--line);padding:.3rem .45rem;text-align:left}
+.datatable th{color:var(--dim);font-weight:500}
+.ph{border:1.5px dashed var(--prop);background:var(--paper);color:var(--prop);
+  font:.78rem/1.5 var(--mono);padding:.6rem .7rem;margin:0 0 1.1rem}
+.ph b{letter-spacing:.05em}
+.callout{border-left:3px solid var(--sel);background:var(--panel);padding:.7rem .9rem;margin:1rem 0;max-width:62ch}
+.callout.warn{border-left-color:var(--prop)}
+.callout .t{font:600 .75rem var(--mono);color:var(--dim);letter-spacing:.05em}
+code{font:.86em var(--mono);background:var(--panel);padding:.05em .3em}
+pre.block{border:1px solid var(--line);background:var(--panel);padding:.75rem .85rem;
+  font:.8rem/1.6 var(--mono);overflow-x:auto;max-width:62ch;position:relative}
+/* Ascent interactive */
+.ascent{border:1px solid var(--ink);margin:1.4rem 0}
+.rungs{display:flex;flex-wrap:wrap;border-bottom:1px solid var(--line);background:var(--panel)}
+.rungs button{font:600 .8rem var(--mono);padding:.5rem .7rem;border:0;border-right:1px solid var(--line);
+  background:none;cursor:pointer;color:var(--ink)}
+.rungs button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.rungs button:hover{background:var(--hl)}
+.rungs button[aria-pressed="true"]:hover{background:var(--ink)}
+.ascent .stage{padding:.9rem 1rem}
+.ascent .adds{font:.78rem var(--mono);color:var(--dim);margin-bottom:.5rem}
+.ascent .adds b{color:var(--ok)}
+.ascent pre{margin:.4rem 0 .7rem;font:.78rem/1.55 var(--mono);overflow-x:auto;
+  background:var(--panel);border:1px solid var(--line);padding:.6rem .7rem}
+.ascent .verdict{font-size:.95rem;max-width:70ch}
+footer{border-top:1px solid var(--line);padding:1.4rem;max-width:1160px;margin:2rem auto 0}
+.sources{columns:2;column-gap:2.5rem;font:.82rem/1.7 var(--serif)}
+.sources li{margin-bottom:.4rem;break-inside:avoid}
+@media(max-width:900px){
+  .row{grid-template-columns:1fr}
+  .sources{columns:1}
+  .hero{padding-top:2rem}
+}
+@media print{ .rungs, nav.toc{display:none} }
+.slots{width:100%;border-collapse:collapse;margin:1rem 0 .4rem;font-size:.82rem;line-height:1.45}
+.slots th{text-align:left;font-weight:600;color:#8a8577;text-transform:uppercase;font-size:.68rem;letter-spacing:.06em;padding:.3rem .5rem;border-bottom:1px solid #d8d2c4}
+.slots td{padding:.35rem .5rem;border-bottom:1px solid #eae5d9;vertical-align:top}
+.slots td:first-child{white-space:nowrap;font-family:ui-monospace,monospace;font-size:.78rem}
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wordmark">the tree contract <span>/ a lesson, grep → CREATE TREE</span></div>
+  <nav class="toc">
+    <a href="#l0">0 · Prelude</a><a href="#l1">1 · Ascent</a><a href="#l2">2 · sitting_duck</a><a href="#l3">3 · Encoding</a>
+    <a href="#l4">4 · ROWS</a><a href="#l5">5 · Ecosystem</a><a href="#l6">6 · CREATE</a><a href="#l7">7 · MATCH</a><a href="#l8">8 · Into SQL</a><a href="#l9">9 · Forests+</a><a href="#l10">10 · Two doors</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h1>Your ASTs were rows all along.</h1>
+  <p class="sub">A hands-on lesson: query source code with CSS selectors in DuckDB today, understand the row contract underneath, and see where it's headed — <code>CREATE TREE</code>. Everything badged <span class="badge dep">DEPLOYED</span> runs in your CLI right now:</p>
+  <pre class="block" style="margin-top:1rem">INSTALL sitting_duck FROM community;  LOAD sitting_duck;</pre>
+  <p class="keys"><span class="badge dep">DEPLOYED</span> shipped · <span class="badge exp">EXPERIMENTAL</span> designed, assertion-planned · companion deep-end: <em>The Substrate</em> field guide</p>
+</div>
+
+<main>
+
+<section class="part" id="l0">
+  <div class="part-label">PRELUDE</div>
+  <h2>Two tables you already have</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge dep">DEPLOYED</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead">A family of extensions loads hierarchical data into <em>ordinary DuckDB tables</em>: sitting_duck (ASTs, 27 grammars), webbed (XML/HTML), panduck &amp; duck_block_utils (Markdown, DOCX, PDF). No pointers, no nested types, no document store — rows. Here's the same trick from two very different producers.</p>
+        <p>A Markdown file through duck_block_utils becomes a <em>block</em> per row: type, nesting level, source order, content. A Python file through sitting_duck becomes a <em>node</em> per row: type, depth, DFS order — plus native extras like <code>descendant_count</code>. Squint at the two schemas and the same skeleton is standing in both: <b>rows in traversal order, a nesting column, a type column</b>. Everything else — ids, attributes, counts — varies by producer. That shared skeleton is not a coincidence, and taking it seriously is what the rest of this lesson does: first by hand (Lessons 1–3), then as a contract (Lesson 4), then as syntax (Lessons 6–8).</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- README.md → blocks (abridged)</span>
+FROM read_markdown_blocks(<span class="s">'README.md'</span>);
+<span class="c">┌ level ┬ block_type ┬ content     ┐
+│ 1     │ heading    │ # Install   │
+│ 2     │ paragraph  │ To begin…   │
+│ 2     │ code_block │ pip install │
+│ 1     │ heading    │ # Usage     │
+└───────┴────────────┴─────────────┘</span></pre></div>
+          <div class="cap">Order + level + type: a document as rows. (Columns abridged.)</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- app.py → nodes</span>
+FROM read_ast(<span class="s">'app.py'</span>);
+<span class="c">┌ node_id ┬ depth ┬ type       ┬ … ┐
+│ 0       │ 0     │ module     │   │
+│ 1       │ 1     │ function…  │   │
+│ 2       │ 2     │ identifier │   │
+└─────────┴───────┴────────────┴───┘</span></pre></div>
+          <div class="cap">Same skeleton, different producer — plus parent_id and descendant_count, which Lesson 4 will name O.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l1">
+  <div class="part-label">LESSON 1</div>
+  <h2>The Ascent, compressed</h2>
+  <p class="part-sub">One task — <em>find every Python function missing a docstring</em> — seven ways. Click the rungs; each adds exactly one thing.</p>
+  <div class="ascent" id="ascent">
+    <div class="rungs" role="tablist" aria-label="ascent rungs"></div>
+    <div class="stage"><div class="adds" id="a-adds"></div><pre id="a-code"></pre><div class="verdict" id="a-verdict"></div></div>
+  </div>
+</section>
+
+<section class="part" id="l2">
+  <div class="part-label">LESSON 2</div>
+  <h2>sitting_duck, as it ships</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p class="lead"><code>read_ast('src/**/*.py')</code> returns your codebase as rows — <code>node_id</code>, <code>parent_id</code>, <code>type</code>, <code>depth</code>, <code>descendant_count</code>, <code>semantic_type</code> — across 27 tree-sitter grammars. The taxonomy is the point: <code>semantic_type_to_string(semantic_type) = 'DEFINITION_FUNCTION'</code> means function-definition however your grammar spells it, so one query spans Python, Rust, and JavaScript without editing a type name.</p>
+        <p>And <code>ast_select</code> puts thirty years of muscle memory on top: <code>.fn</code> is a semantic class, <code>#name</code> an id, <code>:not</code>/<code>:has</code> what you already know from CSS. Custom pseudo-classes are SQL macros — <code>:docblock</code> is a macro whose body is itself a selector, so grammar-specific structure hides behind one portable name.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>FROM read_ast(<span class="s">'src/**/*.py'</span>)
+SELECT name, start_line
+WHERE ast_select(node,
+  <span class="s">'.fn:not(:has(:docblock))'</span>);</pre></div>
+          <div class="cap">Runs today. Same selector in Python (<code>squackit.pluck</code>) and the shell (<code>duckeye -Q</code>): one selector, three surfaces.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l3">
+  <div class="part-label">LESSON 3</div>
+  <h2>The encoding: a tree as its own traversal</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p>Node IDs are depth-first order, so structure is <em>adjacency</em>: anchored at a body block, a documented function is three consecutive rows — <code>block</code>, <code>expression_statement</code>, <code>string</code> — and DuckDB's window machinery reads it (with parentage verified, not just position). First-child is an aggregate: <code>min(node_id)</code> per parent; <code>arg_min(type, node_id)</code> reads its type.</p>
+        <p>This encoding has a name and a history: <b>pre/size/level</b>, from the XML-database era — Grust's XPath accelerator, MonetDB/XQuery's Pathfinder. sitting_duck's <code>node_id / descendant_count / depth</code> is that table column for column, converged on independently. We are archaeologists with a columnar engine, and the estate pays interest: DuckDB's recently optimized recursive CTEs (<code>USING KEY</code>, same Tübingen lineage) are about to matter below.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>QUALIFY (type,
+  lead(type) OVER w,
+  lead(type,2) OVER w)
+= (<span class="s">'block'</span>,<span class="s">'expression_statement'</span>,
+   <span class="s">'string'</span>)
+AND lead(parent_id) OVER w = node_id</pre></div>
+          <div class="cap">The pattern as a row value. Grep scanned adjacent lines; this scans adjacent rows with types — and everything joins.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l4">
+  <div class="part-label">LESSON 4 · R</div>
+  <h2>Required: what makes rows selectable</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p class="lead">The selector engine never needed pointer-linked trees. The tree is real; the pointers were optional — what it consumes is rows under three requirements. <b>R1</b>: order matters. <b>R2</b>: a structural basis of <code>level | parent</code> — either one, each derivable from the other. A level column obeys <code>level[n+1] ≤ level[n]+1</code> (descend at most one, pop freely — that invariant alone characterizes a forest); a parent column derives (order, level) via one recursive CTE, needing only a sibling sort key — without one the source conforms to the <em>sibling-free profile</em>: <code>+</code>, <code>~</code>, <code>:first-child</code> refused legibly, everything else intact. That's the whole of it: <b>R1 + R2 are the minimal treeness set</b> — everything else in the contract is about what you can <em>say</em> or how fast you can say it. A type accessor isn't required for trees at all, only for CSS-style selection — so it lives in S (as S0°, defaulting every node to type <code>node</code>), and a typeless tree still matches structurally. And <b>R0°</b>, spelled <code>ROOT (col, …)</code>, is required <em>iff the relation holds more than one tree</em>: tree-identity columns, constant per tree — delimiting forests, keying <em>tree-granular DML</em> (<code>INSERT OR REPLACE</code> by ROOT = re-derivation; never row surgery), feeding ATTACH. Absent, the relation is one tree; per-tree order resets without ROOT are rejected outright. Accessors may be bare column reads.</p>
+      <table class="slots"><tr><th>slot</th><th>declares</th><th>example</th><th>status</th><th>unlocks</th></tr>
+<tr><td>R0°</td><td>tree identity</td><td><code>ROOT (file_path)</code></td><td>required iff &gt;1 tree</td><td>forests · tree-granular DML · ATTACH coordinate · safe pre-MATCH pruning</td></tr>
+<tr><td>R1</td><td>row order</td><td><code>node_id</code> — DFS emit order, per tree</td><td>required</td><td>document order; the ground adjacency stands on</td></tr>
+<tr><td>R2</td><td>structural basis</td><td><code>LEVEL depth</code> · <code>PARENT manager_id</code></td><td>required (either)</td><td>treeness itself: descent, containment, every combinator; P13 checkable</td></tr></table>
+</div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- parent-basis? one CTE derives the rest</span>
+WITH RECURSIVE nums AS (…DFS numbering
+  over parent_id, by the sort key…)
+<span class="c">-- and USING KEY just made this fast</span></pre></div>
+          <div class="cap">Every adjacency list in your warehouse conforms via one recursive CTE. R2's invariant is the whole forest.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l4s">
+  <div class="part-label">LESSON 4 · S</div>
+  <h2>Semantics: what selectors can say</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p class="lead">First, the base slot: <b>S0°</b>, the type accessor — total, defaulting every node to type <code>node</code>, because selection needs a type dimension even when trees don't; declare <code>TYPE</code> and type selectors light up. S is the expressive surface: id accessors (<code>#main</code>), classes (<code>.fn</code>), and attributes in <b>two tiers</b> — <em>named accessors</em>, declared per attribute and typed (numeric and date operators live here; <code>[start_line&gt;100]</code> needs a real INT), and a <em>map catch-all</em> for the long tail, string ops only. Named wins; the map serves undeclared names; neither declared → refused legibly. Rule of thumb: hot attributes earn names; the map is for the tail, not the hot path. And the extension mechanism: custom pseudo-classes as pure SQL macros — the macro <em>is</em> the semantics — with <b>per-tree binding</b>: a tree declares its pseudo map (or a prefix), shadowing a shared <code>sel_*</code> library tier, so <code>:docblock</code> can mean the right structure per grammar without collision. The pseudo name is the method, the tree is the type, the macro is the instance — and ambiguity is refused at registration, not discovered at match time. Some predicates are just named selectors: <code>:docblock</code> is a macro whose body is itself a selector, which is where grammar-specific structure goes to hide behind one portable name.</p>
+        
+      <table class="slots"><tr><th>slot</th><th>declares</th><th>example</th><th>status</th><th>unlocks</th></tr>
+<tr><td>S0°</td><td>type accessor</td><td><code>TYPE kind</code> → <code>fn</code></td><td>default: <code>'node'</code></td><td>type selectors (<code>fn</code>, <code>"select"</code>)</td></tr>
+<tr><td>S1°</td><td>id accessor</td><td><code>ID name</code> → <code>#parse_ast</code></td><td>optional</td><td><code>#id</code> · ATTACH join inference</td></tr>
+<tr><td>S2°</td><td>classes accessor</td><td><code>CLASSES tags</code> → <code>.fn</code></td><td>optional</td><td><code>.class</code></td></tr>
+<tr><td>S3°</td><td>attrs: named tier over map</td><td><code>ATTR (start_line := start_line)</code> → <code>[start_line&gt;100]</code></td><td>open on concrete · closed on abstracts</td><td><code>[attr op v]</code> typed + vectorized · <code>[WHERE]</code> escapes see exactly this view</td></tr>
+<tr><td>S4</td><td>pseudo-classes, per-tree bound</td><td><code>PSEUDO (leaf := descendant_count = 0)</code> → <code>:leaf</code></td><td>optional</td><td><code>:docblock</code> · shared <code>sel_*</code> library · domain predicates</td></tr></table>
+</div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>CREATE MACRO sel_docblock(n) AS
+  ast_select(n, <span class="s">'block:has(>
+    expression_statement:first-child
+    > string:first-child)'</span>);
+<span class="c">-- :docblock — a predicate that is
+-- itself a selector</span></pre></div>
+          <div class="cap">Pseudo-classes in two flavors: expression-bodied and selector-bodied. Conformance = parsing the macro's own body.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+
+<section class="part" id="l4o">
+  <div class="part-label">LESSON 4 · O</div>
+  <h2>Optimizations: cost only, never results</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p class="lead">O accessors buy speed: the non-native basis member, subtree size, child count, next sibling (<code>pre+size+1</code>). Each has a default derivable from (order, level); native columns register as overrides — and every override must <em>test-equal</em> its default. An override that changes a match set is not a fast path; it is a corrupted encoding, flagged at that severity.</p>
+        <p>The refinement that turns this from rule into theory: the R/O split has a <em>criterion</em>. Type, id, classes are <b>row-local</b> — they depend on nothing but the row. Every O member is <b>row-transcendent</b>: its value summarizes <em>other rows</em>, and that dependence is exactly what scopes it. O values are namespaced to <b>(taxon, load-watermark)</b> — valid within their own tree's materialized extent, never across an attachment splice (a parent tree's <code>descendant_count</code> cannot see attached forests), never above an unloaded frontier. A namespace-checked read yields a <em>Bound</em>; a mismatched read yields an <em>Estimate</em> — estimates may inform join order, never results. The XML era fought this as the dynamic-update problem and answered with renumbering; the contract answers with locality.</p>
+        <div class="callout"><span class="t">CASE STUDY · WHY duck_blocks SHIPS NO O</span><br>sitting_duck stores parent ids and descendant counts natively; duck_block_utils stores neither — and both are right. ASTs are deep (one function can be hundreds of nodes) and queried structurally, so O pays daily. Document blocks are bigger, flatter, and <em>spliced constantly</em> — assembled, sliced, concatenated — and id-free, O-free rows compose by concatenation; O columns would be perpetually stale under that splice rate. Omitting O isn't a gap. It's the correct point on the depth × splice-rate tradeoff, and the contract holds both ends.</div>
+      <table class="slots"><tr><th>slot</th><th>declares</th><th>example</th><th>status</th><th>unlocks</th></tr>
+<tr><td>O1°</td><td>the non-native basis member</td><td><code>PARENT parent_id OPTIMIZE</code></td><td>optional override</td><td>skips the derivation CTE</td></tr>
+<tr><td>O2°</td><td>descendant_count / size</td><td><code>SIZE descendant_count OPTIMIZE</code></td><td>optional</td><td>O(1) subtree extent · range pruning · :has acceleration</td></tr>
+<tr><td>O3°</td><td>child_count</td><td><code>CHILDREN kids OPTIMIZE</code></td><td>optional</td><td><code>:empty</code> and fan-out without scanning</td></tr>
+<tr><td>O4°</td><td>next_sibling</td><td><code>NEXT next_id OPTIMIZE</code></td><td>optional</td><td>sibling hop = pre + size + 1</td></tr></table>
+</div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><table class="datatable">
+            <tr><th>accessor</th><th>default from (order, level)</th></tr>
+            <tr><td>parent</td><td>prior row @ level−1</td></tr>
+            <tr><td>size</td><td>scan until level ≤ own</td></tr>
+            <tr><td>child_count</td><td>level+1 within subtree</td></tr>
+            <tr><td>next_sibling</td><td>pre + size + 1</td></tr>
+          </table></div>
+          <div class="cap">Overrides test-equal defaults; values carry (taxon, watermark). Bound vs Estimate is a type, not a convention.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l4w">
+  <div class="part-label">LESSON 4 · W</div>
+  <h2>World: linking trees without touching them</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p class="lead">Trees link to other trees, and the linkage has laws. <b>W1</b>: attachments are <em>root-restricted foreign keys</em> — child-tree roots reference parent-tree nodes, interior nodes never do (that restriction keeps ancestry a forest, not a graph), and the child root splices in at level(parent)+1. <b>W2</b>: loaders — demand materialization with a tri-state frontier (loaded / unloaded / <em>absent</em>; the distinction matters). Both are <b>parent-parameterized</b>: bindings are deterministic functions of the parent row's local columns — a code fence's <code>language</code> attr selecting the parser is the archetype. <b>W3</b>: epoch manifests, provenance keyed by (parent, params), refresh by selector.</p>
+        <p>The governing law, <b>W-locality</b>: within-tree match sets are invariant under any change to W. Attach, detach, load, refresh — a single tree's answers never move. W belongs to binding, planning, and provenance; never to semantics. And dangling references are drift telemetry, not errors: absence at a frontier is a <em>fact</em>.</p>
+      <table class="slots"><tr><th>slot</th><th>declares</th><th>example</th><th>status</th><th>unlocks</th></tr>
+<tr><td>W1°</td><td>attachments: root FK + level splice</td><td><code>ATTACH ledger TO coa.account USING (account_id)</code></td><td>optional</td><td>cross-taxon selection · ontology mapping · hierarchy × facts</td></tr>
+<tr><td>W2°</td><td>loaders: tri-state frontier</td><td><code>LOAD FROM fs_scan(:parent)</code></td><td>optional</td><td>virtual trees · demand loading (as-if-materialized)</td></tr>
+<tr><td>W3°</td><td>epoch manifests</td><td><code>REFRESH TREE fs BRANCH 'dir#var'</code></td><td>optional</td><td>refresh-by-selector · provenance</td></tr></table>
+<p>Now read the four block letters back. We taught them in dependency order — <b>R</b> structure, <b>S</b> speech, <b>O</b> speed, <b>W</b> world — because each stratum leans only on the ones before it. Rearrange the initials and they spell the contract's name: <b>ROWS</b> — <b>R</b>equired, <b>O</b>ptimizations, <b>W</b>orld, <b>S</b>emantics. Nobody planned the acronym; it was found — which is how you know the factoring is right.</p>
+</div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>ATTACH ast TO doc.code
+  WITH (grammar := parent.language);
+
+CREATE VIRTUAL TREE fs (…)
+  MATERIALIZE TO DEPTH 2
+  LOAD FROM nfs_ls(:parent);</pre></div>
+          <div class="cap">Root FK + splice; parent-fed loader; epochs underneath. A standalone tree needs none of it.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l5">
+  <div class="part-label">LESSON 5</div>
+  <h2>Who conforms already</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p><b>sitting_duck v2</b> is splitting into a pluggable stack — languages as packages over a <b>sitting_duckling</b> core — and the contract sits a level below even that, as its own extension (working names: <b>duck_nest</b> / <b>duckent</b>) that sitting_duck and <b>duck_block_utils</b> both build on. Documents conform by construction: blocks already ship as ordered, leveled rows, so <code>section h2 + table</code> is the same machinery pointed at markdown. And the parent-basis relaxation opens the third door: <b>every adjacency list in your warehouse</b> — org charts, category trees, BOMs, parent-pointer file hierarchies — conforms via one recursive CTE, which <code>USING KEY</code> just made fast.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>sitting_duck_languages   duck_block_utils
+        \                  |        adjacency shims
+         sitting_duckling  |       (CMDB, LDAP, SBOM)
+                \          |          /
+              duck_nest / duckent  ← the contract
+                        |
+                     DuckDB</pre></div>
+          <div class="cap">The stack after the split: tree semantics below every parser.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l6">
+  <div class="part-label">LESSON 6</div>
+  <h2>duckent I — CREATE TREE: speaking Tree, fluently</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge exp">EXPERIMENTAL</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead">DuckDB 2.0's runtime-extensible PEG parser lets extensions add syntax and reuse the rest of SQL — so the ROWS contract becomes <em>DDL</em>. The shape specification is the contract, slot for slot, and it scales from two lines to full dress. Minimal: one slot makes rows a tree — type defaults to <code>node</code>, so <code>*</code> and every structural combinator already work. Typical: an <b>abstract tree</b> (<code>SHAPE ONLY</code> — required whenever there's no <code>AS</code>, so sourcelessness is declared intent, never an accident) instantiated with <code>LIKE</code>, which copies <em>semantics, never source</em> — the universal LIKE contract. Full dress adds the S tiers and O declarations.</p>
+        <p>Read the full-dress figure as a tour of the blocks: <code>ROOT</code> is tree identity (R0); <code>LEVEL</code>/<code>TYPE</code> the required basis; <code>ATTR</code> the named/typed tier (bulk-bindable via <code>COLUMNS('a_(.*)') AS '\1'</code>) over an <code>ATTRS MAP</code> catch-all; <code>PSEUDO</code> binds pseudo-classes per tree — the value is an ordinary <em>expression in the tree's row scope</em>, exactly like a generated column or CHECK constraint, so calling a macro is just calling it: <code>docblock := has_docblock(file_path, node_id)</code>. No lambda syntax, no binding machinery — SQL already knows how to evaluate an expression per row. A <code>PSEUDO PREFIX</code> pulls in a whole shared library, shadowed by anything tree-local. And every <code>OPTIMIZE</code> annotation auto-generates its conformance assertion: an O override that diverges from its derivable default is flagged as corruption, not speed. Miss a capability and the refusal is legible at bind time: <em>"tree org declares no CLASSES accessor."</em></p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- minimal: one slot makes a tree</span>
+CREATE TREE toy (LEVEL depth)
+  AS FROM read_csv(<span class="s">'toy.csv'</span>);
+
+<span class="c">-- typical: abstract shape + instance</span>
+CREATE TREE sitting_duck_ast (
+  SHAPE ONLY,
+  ROOT (file_path),
+  LEVEL depth,
+  TYPE  semantic_type_to_string(
+          semantic_type),
+  ATTR  (name := name,
+         start_line := start_line),
+  PSEUDO PREFIX <span class="s">'sel_ast_'</span>
+);
+CREATE TREE code LIKE sitting_duck_ast
+  AS FROM read_ast(<span class="s">'src/**/*.py'</span>);</pre></div>
+          <div class="cap">SHAPE ONLY declares abstractness; LIKE instantiates. Semantics copy; source never does.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- full dress: the whole contract</span>
+CREATE TREE full (
+  SHAPE ONLY, ROOT (file_path),
+  LEVEL depth, TYPE t, ID name,
+  CLASSES classes,
+  ATTR (COLUMNS(<span class="s">'a_(.*)'</span>) AS <span class="s">'\1'</span>),
+  ATTRS MAP extra,
+  PSEUDO (leaf := descendant_count = 0,
+  docblock := has_docblock(
+    file_path, node_id)),
+  PARENT parent_id       OPTIMIZE,
+  SIZE descendant_count  OPTIMIZE
+);</pre></div>
+          <div class="cap">Every OPTIMIZE ships its own conformance test. Named attrs are typed; the map speaks string only.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l7">
+  <div class="part-label">LESSON 7</div>
+  <h2>duckent II — MATCH, and the query it abstracts</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge exp">EXPERIMENTAL</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead"><code>MATCH</code> is Lesson 3, automated. The selector compiles into exactly the machinery you hand-wrote there — the QUALIFY windows, the grouped firsts, the anti-joins — generated against whatever a tree's shape declares. That's what "abstracts sitting_duck" means precisely: sitting_duck's <code>ast_select</code> is the special case where the basis is level, the O columns are native, and the vocabulary is the code taxonomy; MATCH is the same compilation, parameterized by any shape. Semantics consult <em>declarations</em> — R, S, and attachments — never state, so the answers can't depend on caches or load timing.</p>
+        <p>And the two bases earn their existence here. <b>Level basis</b> is what a producer emits when it already walks the structure — a parser streams DFS order and depth for free, which is why sitting_duck stores <code>node_id/depth/descendant_count</code> natively (pre/size/level: deep trees, structural queries daily, O pays rent). <b>Parent basis</b> is how the world's data already sits — every org chart and category table is an adjacency list — and the recursive CTE that DFS-numbers it (fast under <code>USING KEY</code>) is the <em>encoder</em>. You can write it once to understand it; then the DDL internalizes it and you never write it again.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>FROM code
+MATCH <span class="s">'.fn:not(:has(:docblock))'</span>
+SELECT name, start_line;
+<span class="c">-- compiles to rung 0's shape:
+-- windows, firsts, ANTI JOIN</span>
+
+<span class="c">-- ad hoc, no CREATE needed:</span>
+FROM <span class="s">'code.parquet'</span>
+USING TREE sitting_duck_ast
+MATCH <span class="s">'.fn:not(:has(:docblock))'</span>;</pre></div>
+          <div class="cap">MATCH over a created tree, or USING TREE over a bare source — same compiler, USING SAMPLE-style modifier.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- adjacency, by hand (the encoder):</span>
+WITH RECURSIVE org AS (
+  …DFS numbering over manager_id,
+   ordered by hire_date… )
+<span class="c">-- adjacency, internalized:</span>
+CREATE TREE org (
+  PARENT manager_id,
+  SIBLING ORDER (hire_date),
+  TYPE role, ID email
+) AS FROM employees;
+
+FROM org
+MATCH <span class="s">'manager:has(> engineer)'</span>
+SELECT id;</pre></div>
+          <div class="cap">The recursive CTE vanishes into the DDL. Level when the producer walks; parent when the data already sits that way; each derives the other.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l8">
+  <div class="part-label">LESSON 8</div>
+  <h2>duckent III — MATCH ∘ SQL: one pipeline, two doors</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge exp">EXPERIMENTAL</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead">MATCH is a <em>clause</em>, not a function. Bare, it flows straight into the pipeline you already know — <code>FROM … USING TREE … MATCH … SELECT … WHERE … GROUP BY</code> — terminated by the next clause keyword, scanned outside balanced brackets. No outer string literal, so quote-doubling dissolves. And because the shape projection is the <em>matcher's</em> view, not the result type, MATCH emits raw rows: the <code>WHERE</code> after it is ordinary SQL filtering on everything the source knows, no attribute macros required.</p>
+        <p>When attribute operators run out — subqueries, <code>BETWEEN</code>, real expression trees — the selector opens a door back into SQL: <code>[WHERE …]</code>, a full host predicate at any node position, compiled against that node's <em>projection</em> (closed shapes still refuse undeclared columns — power added, visibility unchanged). Two rules keep the doors honest. Escapes require an explicit head — <code>*[WHERE …]</code>, never bare — so the stray-space accident (<code>a[WHERE…]</code> filters the node; <code>a [WHERE…]</code> smuggles in an anonymous descendant) becomes a <em>parse error</em> instead of a different query: SQL never floats; it hangs off a node. And once an escape appears, <code>$( )</code> becomes mandatory: if you open the inner door, close the outer one. Selectors containing <code>[WHERE]</code> are host-bound — they trade portability for power, and the parser flags the trade.</p>
+        <p>One last collision, from our own shelf: the taxonomy's 28th grammar is SQL itself, whose trees contain <code>select</code> nodes. Keyword-typed selectors quote like identifiers — <code>MATCH "select" > "from"</code> — and the pipeline keeps flowing.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- bare MATCH, in the pipeline</span>
+FROM code USING TREE sitting_duck_ast
+MATCH .fn:not(:has(:docblock))
+SELECT name, start_line
+WHERE  file_path LIKE <span class="s">'src/%'</span>
+GROUP  BY ALL;</pre></div>
+          <div class="cap">The next clause keyword ends the pattern. WHERE after MATCH filters matched rows — raw columns, typed, macro-free.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- host escapes: $( ) required</span>
+FROM code MATCH $(
+  .fn[WHERE name IN
+      (SELECT f FROM flagged)]
+  .comment[WHERE peek LIKE <span class="s">'TODO:%'</span>]
+  + .if
+)
+SELECT *;</pre></div>
+          <div class="cap">$( ) enters selector-land; [WHERE ] exits back to SQL. Escapes see the projection, never the raw relation.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>a *[WHERE x BETWEEN 2 AND 6] c  <span class="c">-- ✓</span>
+a  [WHERE x BETWEEN 2 AND 6] c  <span class="c">-- ✗ refuses</span>
+
+MATCH <span class="s">"select"</span> > <span class="s">"from"</span>  <span class="c">-- 28th grammar</span></pre></div>
+          <div class="cap">Heads are mandatory for SQL brackets — the near-miss is ill-formed, not a surprise. Keyword types quote like identifiers.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l9">
+  <div class="part-label">LESSON 9</div>
+  <h2>duckent IV — forests, attachments, virtual worlds</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge exp">EXPERIMENTAL</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead"><b>Forests and DML.</b> <code>ROOT</code> makes DML tree-granular: append trees, drop trees by key, and <code>INSERT OR REPLACE</code> <em>is</em> re-derivation — re-parse a file, replace its tree, epoch bumps. Within-tree row surgery doesn't exist; the 2004 renumbering tarpit is answered by granularity: renumbering never crosses a partition you didn't wholly replace.</p>
+        <p><b>Attachments.</b> Trees link by root-restricted foreign key — child roots reference parent nodes, interior nodes structurally can't (their only cross-tree coordinate is ROOT, constant per tree) — splicing in at level(parent)+1, with bindings that are deterministic functions of the parent row: a code fence's <code>language</code> attr selecting the parser is the archetype. The first thing attachments buy is <b>ontology mapping</b>: shared reference trees — NCBI's tree of life, WordNet, HS tariff codes — attached many-to-one, every row that names a concept keying into one taxonomy, with subtree membership as a pseudo-class; if you've ever shipped a closure table, you already built that tree's O-block. The second is the analytics workhorse, <b>hierarchy × facts</b>: every subtree rollup today is the same three-part boilerplate — recursively collect descendant ids, semi-join the fact table, aggregate — rewritten per hierarchy, per question. Attach the facts to the tree once and the ritual becomes one selector plus one aggregate. (Chains extend arbitrarily far — network to service to file to AST — each boundary a loader; the deep end lives in the field guide.)</p>
+        <p><b>Virtual trees.</b> Worlds too big to hold: materialize two levels, load branches on demand — selector pushdown decides <em>which</em> branches, unloaded is distinct from absent, and matching must equal the fully-materialized ideal within the selector's scope (so demand loading is an evaluation strategy, never a semantics change). Refresh is by selector; every load carries an epoch manifest.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- forest DML, by ROOT</span>
+INSERT INTO code
+  FROM read_ast(<span class="s">'new.py'</span>);
+DELETE FROM code
+  WHERE file_path = <span class="s">'old.py'</span>;
+INSERT OR REPLACE INTO code
+  FROM read_ast(<span class="s">'mod.py'</span>);</pre></div>
+          <div class="cap">Tree-granular; OR REPLACE = re-derivation by key. Never row surgery.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- example 1: ontology mapping</span>
+ATTACH ncbi_taxa TO samples.organism
+  USING (taxon_id);
+
+FROM samples
+MATCH <span class="s">'sample[tissue="liver"]
+       organism:isa("Mammalia")'</span>
+SELECT sample_id;
+<span class="c">-- :isa = closure-table lookup:
+-- the reference tree's O, precomputed</span></pre></div>
+          <div class="cap">Example 1 — a shared taxonomy, attached many-to-one; the selector crosses from your rows into the ontology and back.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- example 2: subtree rollup
+-- (today: recursive CTE + join + agg,
+--  rewritten per hierarchy, per question)</span>
+ATTACH ledger TO coa.account
+  USING (account_id);
+
+FROM ledger
+MATCH <span class="s">'account#opex *
+       entry[fy="2026"]'</span>
+SELECT sum(amount);</pre></div>
+          <div class="cap">Example 2 — chart-of-accounts × ledger: "spend under opex" as one selector. Works identically for categories × sales, org × headcount, BOM × costs — the community's canonical clunky-CTE cases.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>CREATE VIRTUAL TREE fs (…)
+  MATERIALIZE TO DEPTH 2
+  LOAD FROM fs_scan(:parent);
+
+REFRESH TREE fs BRANCH <span class="s">'dir#var'</span>;</pre></div>
+          <div class="cap">Two levels resident, branches on demand, refresh by selector. Unloaded ≠ absent.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l10">
+  <div class="part-label">LESSON 10</div>
+  <h2>Two doors we're leaving open</h2>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="row">
+      <div class="narr">
+        <p><b>Text-to-ASTCSS.</b> Text-to-SQL is a twenty-year benchmark field because SQL had the corpus; Text-to-XPath died with XML. Selectors arguably out-corpus SQL — every frontend tutorial since 2006 — and they fit in a grammar file, so a small local model can be constrained-decoded: it <em>cannot</em> emit an invalid selector, and spends its whole budget on <em>which</em> one. “Which functions are missing docstrings?” → <code>.fn:not(:has(:docblock))</code>. An execution-verified corpus (the engine as the verifier) is in progress.</p>
+        <p><b>CSS is a policy engine.</b> We've been using half of CSS: selectors are the address system, but CSS is selectors <em>plus declarations plus a cascade</em> — rules about what they select, conflicts resolved by specificity. Two lines make a permission system for code edits (see aside). The deep end — worlds, audits-as-anti-joins, delegation — lives in the companion field guide; this lesson just leaves the door propped.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre>file[path^=<span class="s">"src/auth/"</span>] ast .fn
+      { <span class="k">modify: allow;</span> }
+file ast .fn[name=<span class="s">"authenticate"</span>]
+      { <span class="p">modify: deny;</span> }</pre></div>
+          <div class="cap">Specificities tie; source order — <em>lex posterior</em> — freezes <code>authenticate</code>. Yes, that's your stylesheet muscle memory doing access control.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+</main>
+
+<footer id="sources">
+  <h3 style="font:600 1.1rem var(--mono)">Sources &amp; repos</h3>
+  <ul class="sources">
+    <li>T. Grust, "Accelerating XPath Location Steps," SIGMOD 2002; "Accelerating XPath Evaluation in Any RDBMS" (pre/size/level), TODS 2004.</li>
+    <li>Boncz et al., "MonetDB/XQuery," SIGMOD 2006 — the pre/size/level table sitting_duck independently rebuilt.</li>
+    <li>D. ten Wolde, "DuckDB v2.0: Your Database Deserves a Better Parser," duckdb.org, Aug 2026; D. Hirn, "How DuckDB Runs Recursive CTEs Faster," duckdb.org, Aug 2026.</li>
+    <li>SQL:2023 property graph queries (GRAPH_TABLE … MATCH); duckpgq.</li>
+    <li>Repos: sitting_duck · pluckit · squackit · duck_block_utils · fledgling — github.com/teaguesterling.</li>
+    <li>Companion: <em>The Substrate</em> interactive field guide (policy, umwelt, delegation — the deep end).</li>
+  </ul>
+</footer>
+
+<script>
+const RUNGS=[
+ {k:"−3",adds:"nothing yet — a discovery tool doing structure's job",
+  code:`grep -rn "def " src/ -A1 | grep -B1 -v '"""' | grep "def "`,
+  v:"Almost works — which is worse than failing, because almost-working ships. Multiline signatures, decorators, and first-line strings all defeat it."},
+ {k:"−2",adds:"adds: STRUCTURE (imperative, per-language)",
+  code:`import ast, pathlib
+for p in pathlib.Path("src").rglob("*.py"):
+    for n in ast.walk(ast.parse(p.read_text())):
+        if isinstance(n, ast.FunctionDef) and not ast.get_docstring(n):
+            print(p, n.lineno, n.name)`,
+  v:"Correct! One language, one question, and your next question is another script. A frozen query — like tokei, like half of ~/bin."},
+ {k:"−1",adds:"adds: DECLARATIVITY (per-grammar, no algebra)",
+  code:`(function_definition
+  name: (identifier) @name
+  body: (block . (expression_statement (string)) @doc))`,
+  v:"The ecosystem's frontier, standing alone — and it captures the OPPOSITE set; negation lives outside the language. A pattern language, not an algebra."},
+ {k:"0",adds:"adds: THE ALGEBRA (joins, negation, composition)",
+  code:`WITH ast AS (FROM read_ast('src/**/*.py')),
+docblocks AS (
+  FROM ast
+  QUALIFY (type, lead(type) OVER w, lead(type,2) OVER w)
+        = ('block','expression_statement','string')
+    AND lead(parent_id) OVER w = node_id
+    AND lead(parent_id,2) OVER w = lead(node_id) OVER w
+  WINDOW w AS (ORDER BY file_path, node_id))
+FROM ast f ANTI JOIN docblocks d ON d.parent_id = f.node_id
+SELECT f.name, f.start_line
+WHERE f.type = 'function_definition';`,
+  v:"Pre-order makes a node's first child the next row — anchor at the body block (a .fn leads with name and params), verify parentage in the window. The pattern appears as a row value. One problem left: those are Python's names."},
+ {k:"½",adds:"adds: NAMES (macros + semantic types)",
+  code:`CREATE MACRO is_function(t) AS
+  semantic_type_to_string(t) = 'DEFINITION_FUNCTION';
+CREATE MACRO docblocks(g) AS TABLE
+  (…rung 0's three-row pattern, packaged…);
+CREATE MACRO has_docblock(g, id) AS
+  EXISTS (FROM docblocks(g) WHERE parent_id = id);
+
+FROM read_ast('src/**/*.py')
+SELECT name, start_line
+WHERE is_function(semantic_type)\n  AND NOT has_docblock('src/**/*.py', node_id);`,
+  v:"The query collapses to a sentence, and is_function quietly switches vocabularies: DEFINITION_FUNCTION spans all 27 grammars."},
+ {k:"1",adds:"adds: THE GRAMMAR (30 years of muscle memory)",
+  code:`FROM read_ast('src/**/*.py')
+SELECT name, start_line
+WHERE ast_select(node, '.fn:not(:has(:docblock))');`,
+  v:"The macros became grammar: is_function is .fn, has_docblock is :has(:docblock). Yes, that's CSS in a WHERE clause; yes, it's load-bearing."},
+ {k:"1.5",adds:"adds: THE SURFACE (chains — and a training corpus)",
+  code:`from squackit import pluck
+for node in pluck("**/*.py", ".fn:not(:has(:docblock))"): ...
+
+$ duckeye -Q ".fn:not(:has(:docblock))" **/*.py`,
+  v:"One selector, three surfaces — WHERE clause, Python iterator, shell one-liner. Surfaces are cheap because the selector is the invariant; small models can be grammar-constrained to speak it perfectly."}
+];
+const bar=document.querySelector('.rungs');
+RUNGS.forEach((r,i)=>{
+  const b=document.createElement('button');
+  b.textContent="Level "+r.k; b.setAttribute('aria-pressed', i===3);
+  b.onclick=()=>{document.querySelectorAll('.rungs button').forEach((x,j)=>x.setAttribute('aria-pressed', x===b)); show(i);}
+  bar.appendChild(b);
+});
+function show(i){
+  document.getElementById('a-adds').innerHTML=RUNGS[i].adds.replace(/adds: ([A-Z ()+,—-]+)/,'adds: <b>$1</b>');
+  document.getElementById('a-code').textContent=RUNGS[i].code;
+  document.getElementById('a-verdict').textContent=RUNGS[i].v;
+}
+show(3);
+</script>
+</body>
+</html>

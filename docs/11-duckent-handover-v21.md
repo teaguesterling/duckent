@@ -1,0 +1,86 @@
+# duckent — Build Prompt for the Tree-Semantics Core
+*Master prompt: serves as an engineer brief or a Claude Code session prompt, verbatim. Name is a candidate (crystallization gate): __duck_nest__ (the thing every sitting duck sits on) or __duckent__ (Ents speak Tree; Treebeard's policy — never say anything unless it's worth taking a long time to say — is bind-time checking's motto). duckent pairs best if the TREE DDL ships from this repo; duck_nest if DDL lands separately. Teague's call.*
+
+---
+
+## Identity & mission
+
+You are building **duck_nest**: a DuckDB extension implementing tree semantics over ordered relations — the layer *below* every parser. sitting_duckling (grammar engines), duck_block_utils (document trees), and adjacency-list shims (org charts, CMDBs, SBOMs) all become *vocabularies over your contract*. You own: what "selectable" means, how bases derive, how optimizations stay honest, and what a selector *does*. You do not own: any grammar, any parser of source code or documents, any taxonomy, any policy semantics.
+
+The stack you are the bottom of:
+
+```
+sitting_duck_languages   duck_block_utils   adjacency shims (CMDB, LDAP, SBOM)
+        \                       |                     /
+         sitting_duckling  (parse engines → conforming relations)
+                                |
+                            duck_nest  ← you: contract + selector semantics
+                                |
+                             DuckDB
+```
+
+## Doctrine (non-negotiable, inherited from the project)
+
+1. **One semantics, N surfaces.** There is exactly one matcher semantics. Parsers, planners, and future PEG-native syntax are front-ends bound to it by differential test. A second matcher anywhere is an orphan instance.
+2. **Semantics consult declarations, never state (P14′).** Matching is a function of R, S, and — cross-tree only — W1 *declarations*. O caches, W2 load status, and W3 epochs are state: visible to planning and evaluation strategy alone, never to answers (P20: virtual matching ≡ as-if-materialized, so demand loading must load what the selector reaches). Architectural, not stylistic: module boundaries such that semantics-path functions *cannot* see O accessors or load state.
+3. **Every claim is a test or is marked open.** Suites before features where possible; planted mutants must die; a suite no mutant can fail tests nothing. FINDINGS.md records what first contact showed, especially when the design was wrong.
+4. **Fail legibly.** A selector needing a capability the tree doesn't declare fails at registration/bind with the missing slot named ("tree `org` declares no CLASSES accessor"), never with an empty result.
+5. **Unknowns are preserved, excluded, reported** — unknown pseudo-classes parse, match nothing, and are counted; never fatal, never silent.
+
+## The contract you implement (normative) — the ROWS contract
+Four blocks, defined and taught in dependency order — **R** structure, **S** speech, **O** speed, **W** world — each stratum leaning only on earlier ones (one honest wrinkle: O's staleness namespace cites W2's load watermark; the layering is pedagogical, not a strict DAG). The initials, rearranged, spell **ROWS**: a contract for rows that names what it governs. (Unplanned; the acronym was load-bearing all along.)
+
+**R — required (structure).** The minimal treeness set is **R1 + R2**; a type accessor is not required for trees, only for selection — it is now **S0°** (total, default constant `'node'`; a typeless tree still matches `*` and every structural combinator). All of R is scoped by **R0°, spelled `ROOT (col, …)`** — required *iff* the relation holds more than one tree: the tree-identity columns, constant on every row of a tree, which simultaneously delimit independent trees, key tree-granular DML, and serve as W1's attachment coordinate. Default when absent: the relation is **one tree** (multiple roots legal — R2 permits level returning to 0); sources whose order column resets per tree MUST declare ROOT (unpartitioned resets are non-monotone order; P13 rejects them). Constancy-per-tree is checked, makes W1's root-restriction *structural* (interior nodes have nowhere to carry a divergent FK), and lets ATTACH infer its join from ROOT ↔ parent-ID. R1: row order is significant, per partition. R2: structural basis `level | parent` — either; each derives the other (level→parent: nearest prior row at level−1; parent→(order,level): DFS numbering via recursive CTE, requiring a **sibling ordering key**, else the **sibling-free profile**: `+`, `~`, `:first-child` refused legibly). (R3 → moved to S0°.)
+
+**S — semantics (what selectors can say).** S0° type accessor, total, default constant `'node'` (selection needs a type dimension; trees don't). S1° id accessor. S2° classes accessor (VARCHAR[] or one fixed class). S3° attributes, **two-tier**: (a) named per-attribute accessors — typed, vectorizable; typed operators require this tier; declarable in bulk via `ATTR (COLUMNS('a_(.*)') AS '\\1')` — and (b) a map catch-all for the long tail, string ops only; named wins, map serves undeclared names, neither ⇒ legible refusal naming the attribute. **Openness default**: concrete trees auto-bind every column unclaimed by R/O as a named attr (bare-column accessor); `SHAPE ONLY` abstracts are closed — the declared interface is the type. MATCH emits raw rows (projection = matcher's view, not result type); post-match WHERE is the raw filter. Structural positions get the **host-escape bracket** `[WHERE <sql>]` — full SQL predicates (subqueries, BETWEEN, functions) per node, compiled against the node's *projection view* (never the raw relation: P14 enforcement survives; closed abstracts still refuse). Delimiter forms: `MATCH '<sel>'` (string, pre-2.0) and `MATCH $( <sel> )` (2.0; required feel-good form once escapes appear — `$( )` enters selector-land, `[WHERE ]` exits back to SQL). Host-bound selectors are excluded from the portable fragment. Escapes require an explicit head (`*[WHERE…]`/`type[WHERE…]`; bare `[WHERE]` refuses — stray-space near-miss becomes a parse error). Bare MATCH (no delimiter) is legal for the portable fragment, terminated by the next top-level clause keyword outside balanced brackets; keyword-typed selectors use host identifier quoting (`MATCH "select" > "from"`); `$( )` becomes mandatory the moment a host escape appears. S4 pseudo-classes with **per-tree instance binding**: tree-bound map whose values are ordinary *expressions in the tree's row scope* (generated-column precedent; macro use is a plain call expression — `has_docblock(file_path, node_id)`; no lambdas) → tree prefix → shared `sel_*` tier → refusal; one instance per (tree, name), ambiguity refused at registration (**S-coherence**). The pseudo name is the method, the tree is the type, the macro is the instance.
+
+**O — optimizations (cost only, never results).** O1° the non-native basis member. O2° descendant_count/size (default: level scan). O3° child_count. O4° next_sibling (default: pre + size + 1). Law: every O override test-equals its default over every conforming source; a divergence is a corrupted encoding — surfaced at that severity, never treated as a permissible fast path.
+
+## Selector semantics, v0 scope
+
+Grammar subset (semantics first, parser minimal): type, `.class`, `#id`, `[attr]` with `=`, `^=`, `$=`, `*=` (the extended operator set `/=`, `?=`, `[]=`, struct access is v1 — leave the seam), compound selectors, descendant and `>` combinators, `+` and `~` (full profile only), `:not(...)`, `:has(...)` (descendant-only v0; relative-anchor `:has(> ...)` v0.1), `:first-child`, registered pseudo-classes via S4 dispatch. Match set semantics are CSS's, transplanted: a selector yields the set of rows whose element (as presented by R ∪ S accessors) satisfies it, ancestry evaluated against the basis.
+
+**Where CSS parsing lives — the resolved question:** the core owns the selector **AST and matching semantics**; parsing is **pluggable**. Ship a built-in minimal parser (hand-rolled, zero dependencies, covering exactly the v0 grammar). tree-sitter-css (via sitting_duck) and a future DuckDB-2.0 PEG-native front-end register as alternate parsers, each bound by a **parser differential suite**: identical ASTs (or documented canonical mapping) for a shared selector corpus. The reflection path — selectors as queryable data — remains upstream in sitting_duck; you never depend on it.
+
+## API surface (capabilities normative, mechanism yours)
+
+- **DDL family (settled — 14-shape-syntax-options-v6.md §2b–§2d)**: `CREATE TREE ast (SHAPE ONLY, ROOT (…), LEVEL …, TYPE …, ATTR …, ATTRS MAP …, PSEUDO …)`; `CREATE TREE t LIKE ast AS FROM …` (LIKE copies semantics, never source; SHAPE ONLY required when sourceless); ad hoc `FROM src USING TREE <name|(rules)> MATCH '<sel>'`; DML tree-granular by ROOT — `INSERT INTO` appends trees, `DELETE` drops by key, `INSERT OR REPLACE` = re-derivation; within-tree mutation only via re-derivation. Pre-2.0 all of this compiles to the macro bridge; post-2.0 it is thin PEG sugar over the same compiler.
+- **Registration**: bind a name to (relation, slot mapping) — slots as expressions, per the contract. Registration validates R, records profile (full / sibling-free), records declared S capabilities and O overrides, and *generates the conformance assertions* for every O override and for P13 well-formedness, queryable as `assert_*` views.
+- **Matching**: `FROM tree_match('name', '<selector>')` (or equivalent) returning the matched rows plus match provenance (which selector, tree, profile). Selector errors and capability misses are bind-time-shaped: positioned, named, actionable.
+- **Introspection**: `duck_nest_trees()` (name, basis, profile, S capabilities, O overrides, conformance status), `duck_nest_pseudo_classes()` (name, macro, purity status). The cheatsheet's promise — docs as catalog queries — starts here.
+- **Encoder**: parent-basis registration internally materializes/derives (order, level) via the recursive-CTE lemma; the user never writes the CTE. (`USING KEY` where available; portable fallback otherwise.)
+- **Forward shape**: design the matcher as *selector-AST → SQL/exec plan* (transformer-shaped), so the DuckDB 2.0 route — `CREATE TREE` DDL, native `MATCH` — is a front-end swap, not a rewrite. Do not build against the preview API; leave the seam.
+
+## Milestones (each gated by its suite)
+
+- **M0 — SHAPE/tree registry + projection compiler + P13-per-partition.** SHAPE ONLY, LIKE, ROOT; a SHAPE compiles to a **projection macro** to canonical columns (mechanism verified in shipped DuckDB — 14-…-v6.md §3–§4 — and it mechanically enforces P14: MATCH cannot see columns the projection didn't emit). P13 per ROOT partition; property tests over generated level sequences. *Oracle fixture:* sitting_duck output for a pinned small repo — its per-file node_id resets exercise the ROOT-required rule.
+- **M1 — Basis derivations + P17.** Both lemmas; round-trip identities (`level→parent→level`, `parent→(order,level)→parent` given sibling key); parent-basis registration incl. the internal encoder; sibling-free profile refusals, legible.
+- **M2 — Matcher core (R ∪ S) + P14.** v0 grammar semantics; **differential oracle: sitting_duck's shipped `ast_select`** on shared fixtures for the selector subset both support — byte-identical match sets or a filed divergence FINDING with adjudication. Second differential: two conforming sources equal on R ∪ S but wildly different O columns ⇒ identical matches.
+- **M3 — O layer + P16.** Override registration; auto-generated conformance assertions; planner-side use of O (subtree ranges via size, sibling jumps) with the module boundary from Doctrine 2 enforced in code review and by a planted mutant.
+- **M4 — S4 dispatch, profiles, docs.** Pseudo-class registry with purity lint (parse the macro body; reject volatile functions); unknown-pseudo GP-1 behavior; introspection functions; a one-page cheatsheet generated *from* the introspection queries.
+
+## Planted mutants (minimum set — all must die)
+
+MN1 reverse the source-order tiebreak in DFS derivation · MN2 derive parent as nearest prior at level (not level−1) · MN3 let a semantics-path function read an O accessor (must be caught by boundary test, not review luck) · MN4 O2 override returns size+1 (conformance must flag as corruption) · MN5 `:has` implemented as child-only · MN6 sibling combinators silently no-op under sibling-free profile (must refuse, not empty-match) · MN7 unknown pseudo-class raises instead of preserving · MN8 built-in parser and alternate parser disagree on `a > b c` grouping · MN9 adding an attachment changes a single-tree match set (P18 must catch it) · MN10 planner uses parent-tree descendant_count to prune a cross-taxon descendant walk — attached matches vanish (P19 must catch it) · MN11 O-derived prune above an unloaded frontier using stale size (P19 + tri-state must catch it) · MN12 a pseudo-class bound both tree-locally and in the shared tier resolves to the shared macro — tree-local must shadow (S-coherence must catch it) · MN13 a typed comparison (`[start_line>100]`) silently served via the string map — must refuse or route to the named accessor · MN14 an adjacency or subtree computation crossing forest-key partitions — must be ill-typed, not guarded · MN15 INSERT of a partition violating P13 accepted — ingest validation must reject; DML is tree-granular, within-tree mutation only via re-derivation (INSERT OR REPLACE by key) · MN16 matcher skips an unloaded branch instead of loading it — unloaded silently becomes absent (P20 must catch it). · MN17 pre-MATCH row filter on a non-ROOT column accepted — interior rows vanish, level sequences corrupt (P21 must refuse or route post-match) · MN18 a closed abstract silently serves an undeclared attr via the underlying column — must refuse; openness belongs to concrete trees only. · MN19 a `[WHERE]` host escape compiled against the raw relation instead of the projection view — undeclared columns leak through on closed shapes (must die). · MN20 bare `[WHERE]` (no head) accepted — must refuse with the head hint; the stray-space accident must be ill-formed, not a different query. · MN21 an S-empty tree fails structural matching — `* > *` and P13 must work with zero S declared; S0's default must actually engage.
+
+## Out of scope, stated so you don't drift
+
+Grammars and parsing of *content* (sitting_duckling's job) · taxonomies and semantic_type (vocabulary layer) · duck_blocks schemas · unparse · umwelt/policy semantics · TREE DDL syntax (design transformer-shaped; build nothing against the preview API) · the extended operator set · selector equivalence/idiomizer (consumes your AST later; leave it clean).
+
+## Open decisions you surface, not settle (D-numbered, with your lean)
+
+D-N1: attrs accessor as MAP vs per-attribute expressions (lean: MAP for v0, expressions as v1 override). D-N2: match provenance shape (lean: minimal now — tree, selector, profile — specificity traces belong to the policy layer above). D-N3: whether sibling-free profile should *warn once* or *refuse per query* (lean: refuse per query; warnings decay into wallpaper). D-N4: cross-tree attachment (root-restricted FK + level splice) — in-core v1 or the layer above? (lean: define the *interface* in core — attachment metadata + spliced-level semantics in the matcher — but no registry UI; declaring/managing attachments belongs to the vocabulary layer. Root-restriction is normative either way: interior-node FKs are refused.) D-N5: incremental materialization (VIRTUAL TREE) — the matcher must distinguish **unloaded** from **absent** at frontier nodes (tri-state), or both frontier semantics and O-inertness silently break; so frontier markers + the loader *interface* belong in core, while caching, TTLs, and load scheduling belong above. (lean: core ships the tri-state and a demand-load callback slot in v1, nothing more.)
+
+## Cadence
+
+Decision log + FINDINGS from day one, quay house style. When a design survives contact, note it; when it doesn't, the FINDINGS entry is the deliverable. The repo's first README sentence: *"Tree semantics for ordered relations: the contract every duck sits on."*
+
+
+## Companion documents (final versions, read in order)
+1. `14-shape-syntax-options-v6.md` — settled DDL/DML family + the experiment log (every ingredient verified on shipped DuckDB).
+2. `04-assertion-plan-v7.md` — laws P13–P19 + canonical (taxon, watermark) namespace form; the paper's evaluation section.
+3. `13-trees-to-rows-paper-v3.md` — the paper this extension is the artifact for; its instances are your integration targets.
+4. `12-tree-contract-lesson-v5.html` — public teaching layer; keep the README consistent with it.
+5. `9-verification-pass-v3.md` — what's real in sitting_duck today; the M2 differential oracle.
+
+*Handover note: v13 supersedes v10–v12, which were byte-identical — two edit passes silently no-opped on mismatched anchors (caught in review by md5). This file is escape-repaired and content-verified: R0/ROOT, two-tier S, S-coherence all present below by grep, not by intention.*
