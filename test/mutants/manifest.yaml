@@ -8,6 +8,7 @@
   file: MN02_parent_same_level.sql
   what: derive parent as nearest prior row at the same level, not level - 1
   expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+  also_kills: parent join without root equality (no id reserved; see FINDINGS)
 - id: MN06
   file: MN06_sibling_free_silent.sql
   what: sibling combinators silently no-op under the sibling-free profile

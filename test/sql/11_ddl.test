@@ -114,6 +114,34 @@ CALL tree_ddl_create('main', 'bad6', tree_spec(tree_shape(level := 'depth'), sou
 ----
 ORDER
 
+# frozen order (no ORDER declared) is refused while preserve_insertion_order is off, because
+# the scan sequence _pre would be taken from is not the source's order (T6)
+statement ok
+SET preserve_insertion_order = false;
+
+statement error
+CALL tree_ddl_create('main', 'bad12', tree_spec(tree_shape(root := 'file_path', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+preserve_insertion_order
+
+statement ok
+SET preserve_insertion_order = true;
+
+# the same shape is accepted once the setting is back on
+statement ok
+CALL tree_ddl_create('main', 'frozen', tree_spec(tree_shape(root := 'file_path', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT order_source FROM tree_catalog_trees() WHERE tree_name = 'frozen';
+----
+frozen
+
+# a parent-basis KEY must be a plain column name, not an expression the encoder cannot qualify (T6)
+statement error
+CALL tree_ddl_create('main', 'bad13', tree_spec(tree_shape(key := 'lower(email)', parent := 'manager_email'), source := 'read_csv(''test/data/employees.csv'')'));
+----
+plain column names
+
 # ATTR alias colliding with the canonical prefix refused
 statement error
 CALL tree_ddl_create('main', 'bad7', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(attr := 'name AS _pre')), source := 'read_parquet(''test/data/app.parquet'')'));

@@ -108,7 +108,7 @@ DML semantics: `tree_insert` appends whole partitions and refuses an existing RO
 | column | from |
 |---|---|
 | `_root` | STRUCT of the ROOT expressions, fields named after the columns when they are identifiers and `r<i>` otherwise; the constant `{r0: 0}` when ROOT is absent |
-| `_pre` | ORDER expression; or the encoder; or, for `order_source = frozen`, `row_number() OVER (PARTITION BY _root)` taken once at ingest. Cast to BIGINT, as is `_level`, since producers emit unsigned types and the derivations subtract |
+| `_pre` | ORDER expression; or the encoder; or, for `order_source = frozen`, the scan sequence captured with `row_number() OVER ()` and then numbered per root, taken once at ingest (§2.1; the partitioned form alone does not preserve scan order on 1.5.5). Cast to BIGINT, as is `_level`, since producers emit unsigned types and the derivations subtract |
 | `_level` | LEVEL expression, or the encoder |
 | `_parent` | PARENT expression when declared, else derived: nearest prior row at `_level − 1` within `_root` |
 | `_size` | SIZE expression when declared, else derived: distance to the next row at the same or higher level within `_root` |

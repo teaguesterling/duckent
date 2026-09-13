@@ -4,15 +4,18 @@
 -- Returns a statement that raises when violated. MN15 mutates tree_sql_p13_pred.
 CREATE OR REPLACE MACRO tree_sql_p13_pred() AS 'd > 1 OR (rn = 1 AND _level <> 0)';
 
+-- `label` lands inside a single-quoted literal of the generated statement, so its own quotes
+-- are doubled; a tree named it's would otherwise compile to a syntax error.
 CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root) AS
-  'SELECT CASE WHEN count(*) > 0 THEN error(''P13 violated in tree ' || label || ': '' || count(*) || '' rows descend more than one level or start above level 0'
+  'SELECT CASE WHEN count(*) > 0 THEN error(''P13 violated in tree ' || replace(label, '''', '''''') || ': '' || count(*) || '' rows descend more than one level or start above level 0'
   || CASE WHEN has_root THEN '' ELSE '. If the relation holds more than one tree, declare ROOT' END
   || ''') END FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ') WHERE ' || tree_sql_p13_pred();
 
 -- helper: the tree row and its shape, or an error
 CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
   SELECT CASE WHEN count(*) = 0 THEN error(verb || ': tree ' || sch || '.' || nm || ' not found')
-              WHEN max(storage) <> 'materialized' THEN error(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; DML needs storage := materialized')
+              WHEN max(storage) <> 'materialized' THEN error(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; '
+                                                             || CASE WHEN verb = 'tree_check' THEN 'assertions need' ELSE 'DML needs' END || ' storage := materialized')
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
                     attr: (SELECT expression FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ATTR'),
                     has_root: bool_or(EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ROOT')),
@@ -24,7 +27,7 @@ CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
   p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
   SELECT ['BEGIN TRANSACTION',
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
-    'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || sch || '.' || nm || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
+    'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || replace(sch || '.' || nm, '''', '''''') || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root),
     'INSERT INTO ' || x.tbl || ' SELECT * FROM __duckent_new',
     'INSERT INTO tree_state.partitions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', _root::VARCHAR, 1, count(*), true, now() FROM __duckent_new GROUP BY _root',

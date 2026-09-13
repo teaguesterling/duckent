@@ -20,21 +20,18 @@ SELECT value, op, arg FROM (SELECT unnest(tree_steps([{attr: 'start_line > 100'}
 ----
 start_line	>	100
 
+# the printer emits one line per step; the newlines are folded to " | " so the expected value
+# stays one record line (the runner compares one line per row, like DuckDB's own)
 query I
-SELECT tree_selector_to_treeql(tree_steps([
+SELECT replace(tree_selector_to_treeql(tree_steps([
   {type: 'node'},
   {comb: 'child', id: 'parse_ast'},
   {comb: 'desc', class: 'fn'},
   {comb: 'next', attr: 'start_line > 100'},
   {comb: 'child', pseudo: 'leaf', "where": 'child_count > 2', "as": 'y'},
-  {comb: 'after'}]));
+  {comb: 'after'}])), chr(10), ' | ');
 ----
-(TYPE 'node')
-CHILD (ID 'parse_ast')
-DESCENDANT (CLASS 'fn')
-SIBLING (ATTR start_line > 100)
-CHILD (PSEUDO 'leaf', WHERE child_count > 2) AS y
-FOLLOWING
+(TYPE 'node') | CHILD (ID 'parse_ast') | DESCENDANT (CLASS 'fn') | SIBLING (ATTR start_line > 100) | CHILD (PSEUDO 'leaf', WHERE child_count > 2) AS y | FOLLOWING
 
 # an unknown step field refuses, naming it: the cast to the fixed step shape drops it silently
 statement error
@@ -50,7 +47,6 @@ cannot parse ATTR clause
 
 # a step with no combinator after the first defaults to DESCENDANT
 query I
-SELECT tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}]));
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}])), chr(10), ' | ');
 ----
-(TYPE 'a')
-DESCENDANT (TYPE 'b')
+(TYPE 'a') | DESCENDANT (TYPE 'b')

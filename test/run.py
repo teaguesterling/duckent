@@ -181,17 +181,7 @@ def run_file(path, mutant=None):
                 cur = sess.execute(body)
                 rows = [[fmt(v) for v in r] for r in cur.fetchall()]
                 if "rowsort" in words: rows.sort()
-                got = []
-                for r in rows:
-                    # Single-column values may embed newlines (e.g. the TREEQL printer's
-                    # multi-line output) and are split into separate lines; multi-column
-                    # rows stay tab-joined as one line so an embedded newline in a
-                    # non-final column can't desync column alignment. Revisit if
-                    # DuckDB's own runner needs this too.
-                    if len(r) == 1:
-                        got.extend(r[0].split("\n"))
-                    else:
-                        got.append("\t".join(r))
+                got = ["\t".join(r) for r in rows]
                 if got != expected:
                     failures.append((lineno, f"result mismatch\n    got:  {got}\n    want: {expected}", body))
             else:

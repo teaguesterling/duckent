@@ -36,6 +36,21 @@ SELECT fn.name, b._pre WHERE fn.start_line > 1;
 greet	14
 shout	38
 
+# multiplicity: one output row per embedding, not per subject or per capture, so a capture
+# that anchors several matches repeats (spec 7: captures and multiplicity)
+query III
+FROM tree_match('main', 'app', tree_steps([{type: 'block', "as": 'b'}, {comb: 'desc', type: 'identifier'}]))
+SELECT count(*), count(DISTINCT b._pre), count(*) > count(DISTINCT b._pre);
+----
+4	2	true
+
+# an unknown attribute name refuses, naming it (the binder does; a compile-time refusal
+# against _attr_map is M2)
+statement error
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', attr: 'nosuchcol = 1'}]));
+----
+nosuchcol
+
 # a capture is not in the output unless selected
 query I
 SELECT count(*) FROM (DESCRIBE FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'fn'}, {comb: 'child', type: 'block'}]))) WHERE column_name = 'fn';
@@ -101,6 +116,18 @@ statement error
 FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]));
 ----
 SEMANTIC
+
+# so does a bare pseudo clause: an unknown pseudo is only tolerated once the tree has an S group (T10)
+statement error
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'leaf'}]));
+----
+SEMANTIC
+
+# an unknown tree refuses and says so (T10)
+statement error
+FROM tree_match('main', 'nope', tree_steps([{type: 'function_definition'}]));
+----
+not found
 
 # WHERE-only matching works on the R-only tree, and TYPE defaults to node (MN21)
 query II

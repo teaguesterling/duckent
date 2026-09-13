@@ -42,6 +42,24 @@ SELECT min(_pre), count(*) FILTER (WHERE _pre <> node_id) FROM p;
 ----
 0	0
 
+# an undeclared ATTR MAP is a typed NULL, not an untyped one (M8)
+query II
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '')))
+SELECT column_name, column_type FROM (DESCRIBE FROM p) WHERE column_name = '_attr_map';
+----
+_attr_map	VARCHAR
+
+# derived _parent and _size are scoped to the ROOT partition: the same check as the first
+# query, over the multi-tree fixture where node_id and depth restart per file
+query III
+WITH p AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/scripts.parquet'')', '*')))
+SELECT count(*),
+       count(*) FILTER (WHERE _parent IS DISTINCT FROM parent_id),
+       count(*) FILTER (WHERE _size <> descendant_count)
+FROM p;
+----
+14265	0	0
+
 # parent basis: encoder yields pre-order by sibling key, level from depth of chain
 query IIII
 WITH p AS (FROM query(tree_compile_projection(tree_shape(key := 'email', parent := 'manager_email', sibling_order := 'hire_date',

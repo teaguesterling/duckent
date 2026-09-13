@@ -111,3 +111,32 @@ query II
 SELECT artifact, status FROM tree_catalog_assertions() WHERE tree_name = 'scripts';
 ----
 assert_p13	ok
+
+# a projection-mode tree refuses DML, and tree_check says assertions rather than DML (M13)
+statement ok
+CALL tree_ddl_create('main', 'live', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src', storage := 'projection'));
+
+statement error
+CALL tree_check('main', 'live');
+----
+is projection-mode; assertions need storage := materialized
+
+statement error
+CALL tree_insert('main', 'live', 'first_file');
+----
+is projection-mode; DML needs storage := materialized
+
+# a quote in the tree name is escaped where it lands inside a generated error literal (M9):
+# create compiles the P13 check, tree_insert compiles the already-present message
+statement ok
+CALL tree_ddl_create('main', 'it''s', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'first_file'));
+
+statement error
+CALL tree_insert('main', 'it''s', 'first_file');
+----
+already present
+
+statement error
+CALL tree_insert('main', 'it''s', 'bad_levels');
+----
+P13 violated in tree main.it's

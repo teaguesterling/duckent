@@ -68,7 +68,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || COALESCE((shape)."order", 'row_number() OVER (PARTITION BY ' || tree_sql_root((shape).root, '') || ' ORDER BY __seq) - 1')
      || ' AS BIGINT) AS _pre, CAST(' || (shape).level || ' AS BIGINT) AS _level, '
      || COALESCE((shape).semantic.type, '''node''') || ' AS _type, ' || COALESCE((shape).semantic.id, 'NULL::VARCHAR') || ' AS _id, '
-     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL') || ' AS _attr_map, '
+     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL::VARCHAR') || ' AS _attr_map, '
      || tree_sql_pseudo_map((shape).semantic) || ' AS _pseudo'
      || (CASE WHEN (shape).parent IS NOT NULL THEN ', ' || (shape).parent || ' AS __parent_raw' ELSE '' END)
      || (CASE WHEN (shape).size IS NOT NULL THEN ', ' || (shape).size || ' AS __size_raw' ELSE '' END)
@@ -91,7 +91,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || 'w._root, CAST(row_number() OVER (PARTITION BY w._root ORDER BY w.__path) - 1 AS BIGINT) AS _pre, '
      || 'CAST(w._level AS BIGINT) AS _level, s.' || (shape).key || ' AS __key, s.' || (shape).parent || ' AS __pkey, '
      || COALESCE((shape).semantic.type, '''node''') || ' AS _type, ' || COALESCE((shape).semantic.id, 'NULL::VARCHAR') || ' AS _id, '
-     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL') || ' AS _attr_map, '
+     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL::VARCHAR') || ' AS _attr_map, '
      || tree_sql_pseudo_map((shape).semantic) || ' AS _pseudo'
      || (CASE WHEN (shape).size IS NOT NULL THEN ', s.' || (shape).size || ' AS __size_raw' ELSE '' END)
      || (CASE WHEN (shape).children IS NOT NULL THEN ', s.' || (shape).children || ' AS __children_raw' ELSE '' END)
