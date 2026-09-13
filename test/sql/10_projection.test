@@ -1,0 +1,61 @@
+# name: test/sql/10_projection.test
+# description: projection compiler emits canonical columns; derivations equal sitting_duck's native columns
+
+# level basis, ORDER declared, no O declared: derived _parent and _size must equal native columns
+query III
+WITH p AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT count(*),
+       count(*) FILTER (WHERE _parent IS DISTINCT FROM parent_id),
+       count(*) FILTER (WHERE _size <> descendant_count)
+FROM p;
+----
+54	0	0
+
+# _children equals native children_count, _next is pre + size + 1, _type defaults to 'node'
+query III
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT count(*) FILTER (WHERE _children <> children_count), count(*) FILTER (WHERE _next <> _pre + _size + 1), min(_type) FROM p;
+----
+0	0	node
+
+# declared O columns are used verbatim; TYPE, ID, pseudo map compile
+query IIII
+WITH p AS (FROM query(tree_compile_projection(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', parent := 'parent_id', size := 'descendant_count', children := 'children_count',
+             semantic := tree_semantic(type := 'type', id := 'name', pseudo := [{name: 'leaf', body: 'descendant_count = 0'}])),
+  'read_parquet(''test/data/app.parquet'')', 'name, start_line')))
+SELECT _type, _id, _pseudo['leaf'], start_line FROM p WHERE _pre = 6;
+----
+function_definition	greet	false	4
+
+# closed attribute list: no source columns survive
+query I
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '')))
+SELECT count(*) FROM (DESCRIBE FROM p) WHERE column_name NOT LIKE '\_%' ESCAPE '\';
+----
+0
+
+# frozen order: no ORDER, pre derived from scan order within root
+query II
+WITH p AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT min(_pre), count(*) FILTER (WHERE _pre <> node_id) FROM p;
+----
+0	0
+
+# parent basis: encoder yields pre-order by sibling key, level from depth of chain
+query IIII
+WITH p AS (FROM query(tree_compile_projection(tree_shape(key := 'email', parent := 'manager_email', sibling_order := 'hire_date',
+             semantic := tree_semantic(type := 'role', id := 'email')), 'read_csv(''test/data/employees.csv'')', '*')))
+SELECT _pre, _level, _id, _parent FROM p ORDER BY _pre LIMIT 4;
+----
+0	0	ada@co	NULL
+1	1	cy@co	0
+2	2	fay@co	1
+3	3	gus@co	2
+
+# parent basis sizes: cto has 6 descendants, bo has 2
+query II
+WITH p AS (FROM query(tree_compile_projection(tree_shape(key := 'email', parent := 'manager_email', sibling_order := 'hire_date'), 'read_csv(''test/data/employees.csv'')', '*')))
+SELECT (SELECT _size FROM p WHERE email = 'ada@co'), (SELECT _size FROM p WHERE email = 'bo@co');
+----
+6	2
