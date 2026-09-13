@@ -127,3 +127,18 @@ statement error
 FROM tree_match('main', 'closed', tree_steps([{type: 'function_definition', "where": 'peek LIKE ''def%'''}]));
 ----
 peek
+
+# structural combinators do not cross ROOT partitions (MN14): node_id resets per file, so every
+# module has _pre = 0; without the root equality every module would collect every file's functions
+statement ok
+CALL tree_ddl_create('main', 'scripts', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count', semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/scripts.parquet'')'));
+
+query I
+SELECT (SELECT count(*) FROM tree_match('main', 'scripts', tree_steps([{type: 'module'}, {comb: 'child', type: 'function_definition'}]))) = (SELECT count(*) FROM 'test/data/scripts.parquet' WHERE parent_id = 0 AND type = 'function_definition');
+----
+true
+
+query I
+SELECT (SELECT count(*) FROM tree_match('main', 'scripts', tree_steps([{type: 'module'}, {comb: 'desc', type: 'function_definition'}]))) = (SELECT count(*) FROM 'test/data/scripts.parquet' WHERE type = 'function_definition');
+----
+true
