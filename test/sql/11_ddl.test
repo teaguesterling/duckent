@@ -1,0 +1,179 @@
+# name: test/sql/11_ddl.test
+# description: create, LIKE, SHAPE ONLY, storage modes, refusals, drop, alter
+
+# materialized concrete tree over the app fixture
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name', pseudo := [{name: 'leaf', body: 'descendant_count = 0'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query IIIIII
+SELECT is_abstract, basis, profile, storage, order_source, has_semantic FROM tree_catalog_trees() WHERE tree_name = 'app';
+----
+false	level	full	materialized	declared	true
+
+query II rowsort
+SELECT block, slot FROM tree_catalog_slots() WHERE tree_name = 'app';
+----
+O	SIZE
+R	LEVEL
+R	ORDER
+R	ROOT
+S	ATTR
+S	ID
+S	TYPE
+
+query I
+SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'ATTR';
+----
+*
+
+query II
+SELECT count(*), max(_pre) FROM tree_project('main', 'app');
+----
+54	53
+
+query III
+SELECT root_key, epoch, row_count FROM tree_state.partitions WHERE tree_name = 'app';
+----
+{'file_path': app.py}	1	54
+
+query I
+SELECT artifact FROM tree_catalog.compiled WHERE tree_name = 'app';
+----
+projection
+
+# classes introspection is empty for a tree without CLASSES
+query I
+SELECT count(*) FROM tree_catalog_classes('main', 'app');
+----
+0
+
+# duplicate name refused
+statement error
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+already exists
+
+# abstract shape, closed by default
+statement ok
+CALL tree_ddl_create('main', 'ast_shape', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type')), abstract := true));
+
+query II
+SELECT is_abstract, (SELECT expression FROM tree_catalog_slots() s WHERE s.tree_name = 'ast_shape' AND slot = 'ATTR') FROM tree_catalog_trees() WHERE tree_name = 'ast_shape';
+----
+true	(empty)
+
+# abstract with a source refused; concrete without a source refused
+statement error
+CALL tree_ddl_create('main', 'bad1', tree_spec(tree_shape(level := 'depth'), abstract := true, source := 'read_parquet(''test/data/app.parquet'')'));
+----
+SHAPE ONLY
+
+statement error
+CALL tree_ddl_create('main', 'bad2', tree_spec(tree_shape(level := 'depth')));
+----
+SHAPE ONLY
+
+# LIKE copies semantics, never source; instance stays closed
+statement ok
+CALL tree_ddl_create('main', 'code', tree_spec(tree_shape(), "like" := 'ast_shape', source := 'read_parquet(''test/data/app.parquet'')', storage := 'projection'));
+
+query III
+SELECT like_tree, storage, (SELECT expression FROM tree_catalog_slots() s WHERE s.tree_name = 'code' AND slot = 'TYPE') FROM tree_catalog_trees() WHERE tree_name = 'code';
+----
+ast_shape	projection	type
+
+query I
+SELECT count(*) FROM (DESCRIBE FROM tree_project('main', 'code')) WHERE column_name = 'peek';
+----
+0
+
+# LIKE of an unknown tree refused, naming it
+statement error
+CALL tree_ddl_create('main', 'bad3', tree_spec(tree_shape(), "like" := 'nope', source := 'read_parquet(''test/data/app.parquet'')'));
+----
+nope
+
+# R2: LEVEL or PARENT required
+statement error
+CALL tree_ddl_create('main', 'bad4', tree_spec(tree_shape("order" := 'node_id'), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+LEVEL or PARENT
+
+# parent basis requires KEY
+statement error
+CALL tree_ddl_create('main', 'bad5', tree_spec(tree_shape(parent := 'manager_email'), source := 'read_csv(''test/data/employees.csv'')'));
+----
+KEY
+
+# projection mode requires ORDER
+statement error
+CALL tree_ddl_create('main', 'bad6', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')', storage := 'projection'));
+----
+ORDER
+
+# ATTR alias colliding with the canonical prefix refused
+statement error
+CALL tree_ddl_create('main', 'bad7', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(attr := 'name AS _pre')), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+_pre
+
+# duplicate pseudo names refused (S-coherence)
+statement error
+CALL tree_ddl_create('main', 'bad8', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(pseudo := [{name: 'x', body: 'true'}, {name: 'x', body: 'false'}])), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+S-coherence
+
+# parent basis, sibling-free profile recorded
+statement ok
+CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
+
+query II
+SELECT basis, profile FROM tree_catalog_trees() WHERE tree_name = 'cats';
+----
+parent	sibling_free
+
+# R-only tree: no SEMANTIC group, type defaults to node
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT has_semantic, (SELECT min(_type) FROM tree_project('main', 'bare')) FROM tree_catalog_trees() WHERE tree_name = 'bare';
+----
+false	node
+
+# alter adds the SEMANTIC group later and rebuilds
+statement ok
+CALL tree_ddl_alter('main', 'bare', tree_semantic(type := 'type', classes := '[type]'));
+
+query II
+SELECT has_semantic, (SELECT _type FROM tree_project('main', 'bare') WHERE _pre = 6) FROM tree_catalog_trees() WHERE tree_name = 'bare';
+----
+true	function_definition
+
+query II
+SELECT class, row_count FROM tree_catalog_classes('main', 'bare') WHERE class = 'function_definition';
+----
+function_definition	2
+
+# ad hoc application of a shape to a bare source
+query I
+SELECT count(*) FROM tree_apply(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')');
+----
+54
+
+# drop removes everything
+statement ok
+CALL tree_ddl_drop('main', 'app');
+
+query III
+SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'app'), (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name = 'app'), (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'app');
+----
+0	0	0
+
+statement error
+SELECT * FROM tree_project('main', 'app');
+----
+proj_main_app

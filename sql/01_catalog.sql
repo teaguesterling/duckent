@@ -40,5 +40,3 @@ CREATE OR REPLACE MACRO tree_catalog_slots() AS TABLE SELECT * FROM tree_catalog
 CREATE OR REPLACE MACRO tree_catalog_pseudo_classes() AS TABLE SELECT * FROM tree_catalog.pseudo_classes;
 CREATE OR REPLACE MACRO tree_catalog_assertions() AS TABLE SELECT * FROM tree_state.assertions;
 CREATE OR REPLACE MACRO tree_catalog_languages() AS TABLE SELECT * FROM tree_catalog.selector_languages;
--- filled in by Task 6 once projections exist
-CREATE OR REPLACE MACRO tree_catalog_classes(sch, nm) AS TABLE SELECT NULL::VARCHAR AS class, 0::BIGINT AS row_count WHERE false;
