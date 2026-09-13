@@ -19,7 +19,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg) AS
     WHEN 'class'  THEN 'COALESCE(list_contains(§._classes, ' || tree_sql_lit(value) || '), false)'
     WHEN 'pseudo' THEN 'COALESCE(§._pseudo[' || tree_sql_lit(value) || '], false)'
     WHEN 'attr'   THEN 'COALESCE(§.' || tree_sql_ident(value) || ' ' || op || ' ' || arg || ', false)'
-    WHEN 'where'  THEN 'EXISTS (SELECT 1 FROM (SELECT unnest(§, recursive := true)) __w WHERE ' || value || ')'
+    -- One level only: recursive := true flattens _root's struct into its component columns, so
+    -- _root itself stops being addressable and falls through to an enclosing step alias
+    -- (ambiguous, or worse, silently the wrong row). Unqualified names resolve to this step's
+    -- own row first; another step's alias is legal when qualified (spec 6.2).
+    WHEN 'where'  THEN 'EXISTS (SELECT 1 FROM (SELECT unnest(§, recursive := false)) __w WHERE ' || value || ')'
     WHEN 'pseudo_unknown' THEN 'false'
     ELSE error('tree_match: unknown clause kind ' || kind) END;
 

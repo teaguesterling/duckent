@@ -60,6 +60,21 @@ FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo:
 ----
 greet
 
+# a step WHERE resolves unqualified names against its own projection row, canonical columns
+# included: _root stays addressable because the row is unnested one level only (I5)
+query I
+SELECT (SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'a'}, {comb: 'child', type: 'block', "where": '_root IS NOT NULL'}])))
+     = (SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'a'}, {comb: 'child', type: 'block'}])));
+----
+true
+
+# another step's alias is legal in a step WHERE when it is qualified (spec 6.2): every alias
+# is a projection of the same tree, so P14 still holds on columns
+query I
+SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'a'}, {comb: 'child', type: 'block', "where": 'a._pre = 6'}]));
+----
+1
+
 # unknown pseudo-class is preserved and matches nothing
 query I
 SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'nope'}]));
