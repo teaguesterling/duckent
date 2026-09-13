@@ -48,7 +48,7 @@ does not exist
 
 # tree_match rewriting
 statement ok
-CREATE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS 'SELECT i FROM t WHERE i >= ' || sel;
+CREATE OR REPLACE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS 'SELECT i FROM t WHERE i >= ' || sel;
 
 query I rowsort
 FROM tree_match('main', 't', 3) SELECT i;

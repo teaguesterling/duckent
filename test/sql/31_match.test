@@ -1,0 +1,129 @@
+# name: test/sql/31_match.test
+# description: TREEQL matching over projections; captures; refusals; NULL-definite semantics
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name', classes := '[CAST(semantic_type AS VARCHAR)]',
+                                       pseudo := [{name: 'leaf', body: 'descendant_count = 0'}, {name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the flagship: functions with no string anywhere in their body (the shipped-ast_select spelling), as a linear TREEQL chain is not expressible
+# without NOT (M2), so first the positive form: functions that contain a string
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f'}, {comb: 'desc', type: 'string'}])) SELECT DISTINCT f.name, f.start_line;
+----
+greet	4
+
+# subject row is the last step and carries source columns, not canonical ones
+query I
+SELECT count(*) FROM (DESCRIBE FROM tree_match('main', 'app', tree_steps([{type: 'function_definition'}]))) WHERE column_name LIKE '\_%' ESCAPE '\' AND column_name NOT LIKE '\_match\_%' ESCAPE '\';
+----
+0
+
+# type + class + pseudo compound, child combinator
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}, {comb: 'child', type: 'identifier'}])) SELECT name;
+----
+greet
+shout
+
+# captures: one row per embedding; alias is a struct usable in WHERE and SELECT
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'fn'}, {comb: 'child', type: 'block', "as": 'b'}, {comb: 'child', type: 'return_statement'}]))
+SELECT fn.name, b._pre WHERE fn.start_line > 1;
+----
+greet	14
+shout	38
+
+# a capture is not in the output unless selected
+query I
+SELECT count(*) FROM (DESCRIBE FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'fn'}, {comb: 'child', type: 'block'}]))) WHERE column_name = 'fn';
+----
+1
+
+# attr with a typed comparison against an attribute column
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', attr: 'start_line > 5'}])) SELECT name;
+----
+shout
+
+# NULL-definite: comparing a NULL column matches nothing
+query I
+SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', attr: 'signature_type = ''x'''}]));
+----
+0
+
+# step WHERE sees the projection row; SIBLING and FOLLOWING work on the full profile
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'a'}, {comb: 'next', type: 'function_definition', "where": '(flags & 6) = 6'}])) SELECT a.name;
+----
+greet
+
+# unknown pseudo-class is preserved and matches nothing
+query I
+SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'nope'}]));
+----
+0
+
+# a known pseudo-class does not count as unknown
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}])) SELECT _match_unknown_pseudos;
+----
+0
+0
+
+query I
+SELECT (tree_explain('main', 'app', tree_steps([{type: 'function_definition'}]))).treeql;
+----
+(TYPE 'function_definition')
+
+# an S clause against an R-only tree refuses and names SEMANTIC
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]));
+----
+SEMANTIC
+
+# WHERE-only matching works on the R-only tree, and TYPE defaults to node (MN21)
+query II
+FROM tree_match('main', 'bare', tree_steps([{"where": 'depth = 0'}, {comb: 'child', "where": 'type = ''function_definition'''}])) SELECT count(*), min(_match_tree);
+----
+2	main.bare
+
+# a per-query SEMANTIC overlay lights up TYPE on the bare tree
+query I rowsort
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]), semantic := tree_semantic(type := 'type')) SELECT name;
+----
+greet
+shout
+
+# sibling combinators refuse under the sibling-free profile, naming SIBLING_ORDER (MN6)
+statement ok
+CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
+
+statement error
+FROM tree_match('main', 'cats', tree_steps([{"where": 'name = ''tools'''}, {comb: 'next'}]));
+----
+SIBLING_ORDER
+
+# structural matching on a parent-basis tree
+statement ok
+CALL tree_ddl_create('main', 'org', tree_spec(tree_shape(key := 'email', parent := 'manager_email', sibling_order := 'hire_date', semantic := tree_semantic(type := 'role', id := 'email')), source := 'read_csv(''test/data/employees.csv'')'));
+
+query I rowsort
+FROM tree_match('main', 'org', tree_steps([{type: 'manager', "as": 'm'}, {comb: 'child', type: 'engineer'}])) SELECT DISTINCT m.email;
+----
+bo@co
+cy@co
+
+# step WHERE compiles against the projection only: a closed shape cannot see undeclared source columns (MN19)
+statement ok
+CALL tree_ddl_create('main', 'closed', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement error
+FROM tree_match('main', 'closed', tree_steps([{type: 'function_definition', "where": 'peek LIKE ''def%'''}]));
+----
+peek
