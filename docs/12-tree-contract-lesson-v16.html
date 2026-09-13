@@ -68,6 +68,15 @@ dialog.full table.data th,dialog.full table.data td{padding:.2rem .6rem;border-b
 dialog.full table.data td:hover{white-space:normal;overflow:visible;max-width:none}
 dialog.full table.data th{position:sticky;top:0;background:var(--panel);color:var(--dim);font-weight:600}
 dialog.full table.data td:first-child{color:var(--dim)}
+dialog.full .dlg-h{font:600 .95rem var(--mono);margin:1.3rem 0 .4rem;padding-top:.9rem;border-top:1px solid var(--line)}
+dialog.full .dlg-h:first-child{border-top:0;padding-top:.6rem;margin-top:0}
+dialog.full .dlg-p{max-width:78ch;margin:.4rem 0 .6rem;font-size:.98rem}
+dialog.full table.data.wrap{white-space:normal;font:.8rem/1.45 var(--serif)}
+dialog.full table.data.wrap th,dialog.full table.data.wrap td{max-width:none;min-width:8ch;font-family:inherit}
+dialog.full table.data.wrap td:first-child{font-family:var(--mono);color:var(--ink);white-space:nowrap}
+dialog.full table.data.wrap code{font:.78rem var(--mono);background:var(--panel);padding:0 .25rem}
+dialog.full .ok{color:var(--ok);font-weight:600} dialog.full .no{color:var(--prop);font-weight:600}
+dialog.full .two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}
 .fig .seed{position:absolute;top:-1px;right:-1px;font:.62rem var(--mono);color:var(--dim);
   border:1px solid var(--line);border-top:0;border-right:0;background:var(--paper);padding:0 .35rem}
 .k{color:var(--sel)} .s{color:var(--ok)} .c{color:var(--dim)} .p{color:var(--prop)}
@@ -123,7 +132,7 @@ footer{border-top:1px solid var(--line);padding:1.4rem;max-width:1160px;margin:2
   <div class="wordmark">the tree contract <span>/ a lesson, grep → CREATE TREE</span></div>
   <nav class="toc">
     <a href="#l0">0 · Prelude</a><a href="#l1">1 · Ascent</a><a href="#l2">2 · sitting_duck</a><a href="#l3">3 · Encoding</a>
-    <a href="#l4">4 · ROWS</a><a href="#l5">5 · Ecosystem</a><a href="#l6">6 · CREATE</a><a href="#l7">7 · MATCH</a><a href="#l8">8 · Into SQL</a><a href="#l9">9 · Forests+</a><a href="#l10">10 · Two doors</a>
+    <a href="#l4">4 · ROWS</a><a href="#l5">5 · Ecosystem</a><a href="#l6">6 · CREATE</a><a href="#l7">7 · MATCH</a><a href="#l8">8 · Into SQL</a><a href="#l9">9 · Forests+</a><a href="#l10">10 · Build</a> <a href="#l11">11 · Two doors</a>
   </nav>
 </header>
 
@@ -145,6 +154,7 @@ footer{border-top:1px solid var(--line);padding:1.4rem;max-width:1160px;margin:2
       <div class="narr">
         <p class="lead">A family of extensions loads hierarchical data into <em>ordinary DuckDB tables</em>: sitting_duck (ASTs, 27 grammars), webbed (XML/HTML), panduck &amp; duck_block_utils (Markdown, DOCX, PDF). No pointers, no nested types, no document store — rows. Here's the same trick from two very different producers.</p>
         <p>A Markdown file through <a href="https://duckdb-markdown.readthedocs.io/en/latest/markdown_doc_block/#reader-read_markdown_blocks"><code>read_markdown_blocks</code></a> becomes a <em>block</em> per row: type, nesting level, source order, content — the <a href="https://github.com/teaguesterling/duckdb_duck_block_utils/blob/main/docs/duck_blocks_spec.md">duck_block table format</a> that duck_block_utils, panduck, and the markdown extension all share. A Python file through sitting_duck becomes a <em>node</em> per row (<a href="https://sitting-duck.readthedocs.io/en/latest/reference/output-schema/">output schema</a>): type, depth, DFS order — plus native extras like <code>descendant_count</code> — and <a href="https://sitting-duck.readthedocs.io/en/latest/reference/css-selectors/">CSS selectors</a> already query it. Squint at the two schemas and the same skeleton is standing in both: <b>rows in traversal order, a nesting column, a type column</b>. Everything else — ids, attributes, counts — varies by producer. That shared skeleton is not a coincidence, and taking it seriously is what the rest of this lesson does: first by hand (Lessons 1–3), then as a contract (Lesson 4), then as syntax (Lessons 6–8).</p>
+        <p>That is also the order the work happened in, and the order is the argument. We <em>started</em> with ASTs and CSS: sitting_duck put selectors on source code, and it worked. Then we went <em>backwards</em>, to where CSS came from — HTML — and brought along everything already modeled as duck_blocks: Markdown, DOCX, PDF, not just HTML, with no conversion to or from HTML at any point. The duck_block tree handled it as it stood. Your documents were rows too. Only then did we ask the question this lesson is organized around: what do ASTs and duck_blocks <em>actually</em> need to be trees, what does CSS need on top of that to have anything to say, and what is there only to make it fast? Those three answers are R, S, and O.</p>
       </div>
       <aside>
         <div class="fig"><span class="seed">⧉</span>
@@ -404,6 +414,7 @@ CREATE TREE sitting_duck_ast (
 );
 CREATE TREE code LIKE sitting_duck_ast
   AS FROM read_ast(<span class="s">'src/**/*.py'</span>);</pre></div>
+          <button class="open-full" type="button" data-dialog="full4">duckent I — the DDL slot by slot, the design space, the experiment log (opens full screen)</button>
           <div class="cap">SHAPE ONLY declares abstractness; LIKE instantiates. Semantics copy; source never does.</div>
         </div>
         <div class="fig"><span class="seed">⧉</span>
@@ -449,6 +460,7 @@ SELECT name, start_line;
 FROM <span class="s">'code.parquet'</span>
 USING TREE sitting_duck_ast
 MATCH <span class="s">'.fn:not(:has(:docblock))'</span>;</pre></div>
+          <button class="open-full" type="button" data-dialog="full5">duckent II — the compiled query and the encoder, running on DuckDB today (opens full screen)</button>
           <div class="cap">MATCH over a created tree, or USING TREE over a bare source — same compiler, USING SAMPLE-style modifier.</div>
         </div>
         <div class="fig"><span class="seed">⧉</span>
@@ -492,6 +504,7 @@ MATCH .fn:not(:has(:docblock))
 SELECT name, start_line
 WHERE  file_path LIKE <span class="s">'src/%'</span>
 GROUP  BY ALL;</pre></div>
+          <button class="open-full" type="button" data-dialog="full6">duckent III — delimiters, escapes, and the rejected spellings (opens full screen)</button>
           <div class="cap">The next clause keyword ends the pattern. WHERE after MATCH filters matched rows — raw columns, typed, macro-free.</div>
         </div>
         <div class="fig"><span class="seed">⧉</span>
@@ -537,6 +550,7 @@ DELETE FROM code
   WHERE file_path = <span class="s">'old.py'</span>;
 INSERT OR REPLACE INTO code
   FROM read_ast(<span class="s">'mod.py'</span>);</pre></div>
+          <button class="open-full" type="button" data-dialog="full7">duckent IV — DML semantics, the W laws, and the ritual replaced (opens full screen)</button>
           <div class="cap">Tree-granular; OR REPLACE = re-derivation by key. Never row surgery.</div>
         </div>
         <div class="fig"><span class="seed">⧉</span>
@@ -580,12 +594,56 @@ REFRESH TREE fs BRANCH <span class="s">'dir#var'</span>;</pre></div>
 
 <section class="part" id="l10">
   <div class="part-label">LESSON 10</div>
+  <h2>duckent V — what's next: we need to build this</h2>
+  <p class="part-sub">Everything badged EXPERIMENTAL above is designed and assertion-planned, and none of it is code yet. Here is the plan, and the invitation.</p>
+  <article class="chapter" style="border-top:none;margin-top:1rem">
+    <div class="ch-head" style="margin-bottom:.6rem"><span class="badge exp">EXPERIMENTAL</span></div>
+    <div class="row">
+      <div class="narr">
+        <p class="lead">Nothing in Lessons 6–9 runs today except the macro bridge you saw compiled by hand. The <a href="https://github.com/teaguesterling/duckent">duckent repository</a> currently holds the design: a build handover usable verbatim as an engineering brief, the settled syntax reference with its experiment log, and this lesson. The first line of code is M0, and the suite for M0 comes first.</p>
+        <p>The build is gated by milestones, each closed by its own suite and by <b>planted mutants</b>: deliberate wrong implementations that the tests must catch. Twenty-one are named up front, from "derive parent as the nearest prior row at the same level" to "compile a <code>[WHERE]</code> escape against the raw relation". A milestone whose mutants survive is not done, whatever its feature list says.</p>
+        <p>Two things make this buildable now rather than someday. The <b>macro bridge</b> means M0 through M4 need no parser work at all: shapes are projection macros, MATCH is a generated query, and the DuckDB 2.0 PEG syntax is a front-end swap designed for from day one but built against nothing until it ships. And the <b>differential oracle</b> already exists: sitting_duck's shipped <code>ast_select</code> must agree, byte for byte, with duckent's matcher on every selector both support, or a FINDING gets filed and adjudicated.</p>
+        <p>If you want to help, the handover is the place to start, and the open decisions are where a second opinion is worth the most. Issues and pull requests on the repo are welcome; so is a note.</p>
+      </div>
+      <aside>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- milestones, each gated by its suite</span>
+M0  shape/tree registry + projection compiler
+    + P13 per ROOT partition
+    <span class="c">oracle: sitting_duck output for a pinned repo</span>
+M1  basis derivations, both lemmas, round trips
+    + sibling-free profile refusals
+M2  matcher core (R ∪ S) + P14
+    <span class="c">differential: shipped ast_select, byte-identical</span>
+M3  O layer + P16: auto-generated conformance,
+    planner-side ranges, module boundary enforced
+M4  S4 dispatch + purity lint, introspection,
+    a cheatsheet generated FROM the catalog</pre></div>
+          <button class="open-full" type="button" data-dialog="full3">duckent V — mutants, decisions, doctrine (opens full screen)</button>
+          <div class="cap">Five milestones, twenty-one mutants, eight open decisions. The suite for each milestone lands before its feature.</div>
+        </div>
+        <div class="fig"><span class="seed">⧉</span>
+          <div class="body"><pre><span class="c">-- what ships with M4, and what it looks like</span>
+FROM duckent_trees();
+<span class="c">┌ name ┬ basis ┬ profile ┬ S ┬ O ┬ conformance ┐</span>
+FROM duckent_pseudo_classes();
+<span class="c">┌ name ┬ macro ┬ purity ┐</span>
+FROM assert_o2_size_code;   <span class="c">-- one per OPTIMIZE</span></pre></div>
+          <div class="cap">Docs as catalog queries: the cheatsheet is generated from introspection, so it cannot drift from the code.</div>
+        </div>
+      </aside>
+    </div>
+  </article>
+</section>
+
+<section class="part" id="l11">
+  <div class="part-label">LESSON 11</div>
   <h2>Two doors we're leaving open</h2>
   <article class="chapter" style="border-top:none;margin-top:1rem">
     <div class="row">
       <div class="narr">
-        <p><b>Text-to-ASTCSS.</b> Text-to-SQL is a twenty-year benchmark field because SQL had the corpus; Text-to-XPath died with XML. Selectors arguably out-corpus SQL — every frontend tutorial since 2006 — and they fit in a grammar file, so a small local model can be constrained-decoded: it <em>cannot</em> emit an invalid selector, and spends its whole budget on <em>which</em> one. “Which functions are missing docstrings?” → <code>.fn:not(:has(:docblock))</code>. An execution-verified corpus (the engine as the verifier) is in progress.</p>
-        <p><b>CSS is a policy engine.</b> We've been using half of CSS: selectors are the address system, but CSS is selectors <em>plus declarations plus a cascade</em> — rules about what they select, conflicts resolved by specificity. Two lines make a permission system for code edits (see aside). The deep end — worlds, audits-as-anti-joins, delegation — lives in the companion field guide; this lesson just leaves the door propped.</p>
+        <p><b>Text-to-ASTCSS.</b> Text-to-SQL is a twenty-year benchmark field because SQL had the corpus; Text-to-XPath died with XML. Selectors arguably out-corpus SQL — every frontend tutorial since 2006 — and they fit in a grammar file, so a small local model can be constrained-decoded: it <em>cannot</em> emit an invalid selector, and spends its whole budget on <em>which</em> one. “Which functions are missing docstrings?” → <code>.fn:not(:has(:docblock))</code>. An execution-verified corpus (the engine as the verifier) is in progress. If you want to know more about Text-to-ASTCSS, message me: <a href="https://github.com/teaguesterling">github.com/teaguesterling</a>, or open an issue on <a href="https://github.com/teaguesterling/duckent/issues">duckent</a>.</p>
+        <p><b>CSS is a policy engine.</b> We've been using half of CSS: selectors are the address system, but CSS is selectors <em>plus declarations plus a cascade</em> — rules about what they select, conflicts resolved by specificity. Two lines make a permission system for code edits (see aside). The deep end — worlds, audits-as-anti-joins, delegation — lives in the companion field guide; this lesson just leaves the door propped. If you want to know more about CSS as a policy engine, look at <a href="https://github.com/teaguesterling/umwelt">umwelt</a>, and at the selector surfaces it rides on: <a href="https://github.com/teaguesterling/sitting_duck">sitting_duck</a>, <a href="https://github.com/teaguesterling/pluckit">pluckit</a>, <a href="https://github.com/teaguesterling/squackit">squackit</a>. Or send me a note.</p>
       </div>
       <aside>
         <div class="fig"><span class="seed">⧉</span>
@@ -712,6 +770,117 @@ SELECT name, start_line;
 └───────┴────────────┘</span></pre></div>
             <div class="rowcount">Lesson 1's spelling, <code>.fn:not(:has(:docblock))</code>, puts a custom pseudo-class inside <code>:has()</code>; today's ast_select accepts only a type, #id, or .class there. duckent's matcher lifts that limit.</div>
           </div>
+</dialog>
+<dialog class="full" id="full3" aria-labelledby="full3-t">
+  <div class="dlg-head"><span id="full3-t">duckent V — mutants, decisions, doctrine</span><button class="close" type="button" data-close>close ✕</button></div>
+  <div class="dlg-body"><h4 class="dlg-h">Planted mutants: all 21 must die</h4><p class="dlg-p">A suite no mutant can fail tests nothing. Each of these is a deliberate wrong implementation that the milestone's suite must detect; a mutant that survives is a missing test, filed as a FINDING.</p><div class="tw"><table class="data wrap"><thead><tr><th>mutant</th><th>the wrong implementation</th></tr></thead><tbody><tr><td>MN1</td><td>reverse the source-order tiebreak in DFS derivation</td></tr><tr><td>MN2</td><td>derive parent as nearest prior at level, not level − 1</td></tr><tr><td>MN3</td><td>let a semantics-path function read an O accessor (must be caught by a boundary test, not review luck)</td></tr><tr><td>MN4</td><td>an O2 override returns size + 1 (conformance must flag corruption)</td></tr><tr><td>MN5</td><td><code>:has</code> implemented as child-only</td></tr><tr><td>MN6</td><td>sibling combinators silently no-op under the sibling-free profile (must refuse, not empty-match)</td></tr><tr><td>MN7</td><td>an unknown pseudo-class raises instead of being preserved and counted</td></tr><tr><td>MN8</td><td>built-in parser and alternate parser disagree on <code>a &gt; b c</code> grouping</td></tr><tr><td>MN9</td><td>adding an attachment changes a single-tree match set</td></tr><tr><td>MN10</td><td>the planner uses a parent-tree descendant_count to prune a cross-taxon descendant walk</td></tr><tr><td>MN11</td><td>an O-derived prune above an unloaded frontier using stale size</td></tr><tr><td>MN12</td><td>a pseudo-class bound both tree-locally and in the shared tier resolves to the shared macro (tree-local must shadow)</td></tr><tr><td>MN13</td><td>a typed comparison <code>[start_line&gt;100]</code> silently served via the string map</td></tr><tr><td>MN14</td><td>an adjacency or subtree computation crossing ROOT partitions (must be ill-typed, not guarded)</td></tr><tr><td>MN15</td><td>INSERT of a partition violating P13 accepted</td></tr><tr><td>MN16</td><td>the matcher skips an unloaded branch instead of loading it</td></tr><tr><td>MN17</td><td>a pre-MATCH row filter on a non-ROOT column accepted</td></tr><tr><td>MN18</td><td>a closed abstract silently serves an undeclared attribute via the underlying column</td></tr><tr><td>MN19</td><td>a <code>[WHERE]</code> escape compiled against the raw relation instead of the projection view</td></tr><tr><td>MN20</td><td>bare <code>[WHERE]</code> (no head) accepted</td></tr><tr><td>MN21</td><td>an S-empty tree fails structural matching (<code>* &gt; *</code> and P13 must work with zero S declared)</td></tr></tbody></table></div><h4 class="dlg-h">Open decisions (surfaced, not settled)</h4><div class="tw"><table class="data wrap"><thead><tr><th>id</th><th>question</th><th>current lean</th></tr></thead><tbody><tr><td>D-N1</td><td>attrs accessor as MAP vs per-attribute expressions</td><td>MAP for v0, expressions as a v1 override (the two-tier S3 design later settled this as both)</td></tr><tr><td>D-N2</td><td>match provenance shape</td><td>minimal now: tree, selector, profile. Specificity traces belong to the policy layer above</td></tr><tr><td>D-N3</td><td>sibling-free profile: warn once or refuse per query</td><td>refuse per query</td></tr><tr><td>D-N4</td><td>cross-tree attachment in core or above</td><td>interface in core, registry above</td></tr><tr><td>D-N5</td><td>incremental materialization</td><td>tri-state + demand-load callback slot in core; caching above</td></tr><tr><td>D-N6</td><td>explicit <code>USING TREE AUTO</code> opt-in column sniffing</td><td>default no: sniffing misbinds silently</td></tr><tr><td>D-N7</td><td>spelling of the shape-registration API for producers (sitting_duck registering a default shape for <code>read_ast</code>)</td><td>open</td></tr><tr><td>D-N8</td><td>O3/O4 clause spellings <code>CHILDREN … OPTIMIZE</code>, <code>NEXT … OPTIMIZE</code></td><td>provisional, consistent with PARENT/SIZE</td></tr></tbody></table></div><h4 class="dlg-h">Doctrine the build inherits</h4><div class="tw"><table class="data wrap"><thead><tr><th>#</th><th>rule</th></tr></thead><tbody><tr><td>1</td><td><b>One semantics, N surfaces.</b> Exactly one matcher; every parser and future syntax is bound to it by differential test. A second matcher anywhere is an orphan instance.</td></tr><tr><td>2</td><td><b>Semantics consult declarations, never state.</b> Module boundaries such that semantics-path functions <i>cannot</i> see O accessors or load state.</td></tr><tr><td>3</td><td><b>Every claim is a test or is marked open.</b> Suites before features where possible; FINDINGS.md records what first contact showed, especially when the design was wrong.</td></tr><tr><td>4</td><td><b>Fail legibly.</b> Bind-time refusals with the missing slot named, never empty results.</td></tr><tr><td>5</td><td><b>Unknowns are preserved, excluded, reported.</b></td></tr></tbody></table></div></div>
+</dialog>
+<dialog class="full" id="full4" aria-labelledby="full4-t">
+  <div class="dlg-head"><span id="full4-t">duckent I — the DDL slot by slot, the design space, the experiment log</span><button class="close" type="button" data-close>close ✕</button></div>
+  <div class="dlg-body"><h4 class="dlg-h">The DDL, slot by slot</h4><p class="dlg-p">Every clause of <code>CREATE TREE</code> names one slot of the ROWS contract. Nothing in the grammar exists that the contract did not ask for.</p><div class="tw"><table class="data wrap"><thead><tr><th>clause</th><th>block</th><th>required?</th><th>declares</th><th>example</th></tr></thead><tbody><tr><td>ROOT (col, …)</td><td>R0°</td><td>iff the relation holds &gt;1 tree</td><td>tree identity, constant per tree: delimits forests, keys tree-granular DML, is the ATTACH coordinate</td><td><code>ROOT (file_path)</code></td></tr><tr><td>ORDER col</td><td>R1</td><td>yes (defaults to row order)</td><td>document order within a tree; the ground adjacency stands on</td><td><code>ORDER node_id</code></td></tr><tr><td>LEVEL col · PARENT col</td><td>R2</td><td>one of the two</td><td>the structural basis; each derives the other. PARENT needs <code>SIBLING ORDER (…)</code> for the full profile</td><td><code>LEVEL depth</code></td></tr><tr><td>TYPE expr</td><td>S0°</td><td>no (default <code>'node'</code>)</td><td>the type accessor, total; type selectors light up when declared</td><td><code>TYPE semantic_type_to_string(semantic_type)</code></td></tr><tr><td>ID expr</td><td>S1°</td><td>no</td><td><code>#id</code>; also ATTACH join inference</td><td><code>ID name</code></td></tr><tr><td>CLASSES expr</td><td>S2°</td><td>no</td><td><code>.class</code>; VARCHAR[] or one fixed class</td><td><code>CLASSES tags</code></td></tr><tr><td>ATTR (n := expr, …)</td><td>S3° named tier</td><td>no</td><td>typed, vectorizable attributes; typed operators require this tier; bulk-bindable</td><td><code>ATTR (COLUMNS('a_(.*)') AS '\1')</code></td></tr><tr><td>ATTRS MAP col</td><td>S3° map tier</td><td>no</td><td>string-only catch-all for the long tail; named wins, map serves undeclared names</td><td><code>ATTRS MAP extra</code></td></tr><tr><td>PSEUDO (n := expr, …) · PSEUDO PREFIX 'p'</td><td>S4</td><td>no</td><td>pseudo-classes as row-scope expressions (generated-column precedent); PREFIX imports a shared <code>sel_*</code> tier, shadowed by tree-local bindings</td><td><code>PSEUDO (leaf := descendant_count = 0)</code></td></tr><tr><td>PARENT col OPTIMIZE</td><td>O1°</td><td>no</td><td>the non-native basis member, natively stored; skips the derivation CTE</td><td><code>PARENT parent_id OPTIMIZE</code></td></tr><tr><td>SIZE col OPTIMIZE</td><td>O2°</td><td>no</td><td>subtree extent: O(1) ranges, <code>:has</code> acceleration</td><td><code>SIZE descendant_count OPTIMIZE</code></td></tr><tr><td>CHILDREN col OPTIMIZE</td><td>O3°</td><td>no · spelling provisional (D-N8)</td><td>fan-out without scanning; <code>:empty</code></td><td><code>CHILDREN kids OPTIMIZE</code></td></tr><tr><td>NEXT col OPTIMIZE</td><td>O4°</td><td>no · spelling provisional (D-N8)</td><td>sibling hop; default <code>pre + size + 1</code></td><td><code>NEXT next_id OPTIMIZE</code></td></tr></tbody></table></div><p class="dlg-p">Every <code>OPTIMIZE</code> auto-generates its conformance assertion: the override must test-equal its derivable default over the whole relation, queryable as an <code>assert_*</code> view. A divergence is flagged as a corrupted encoding, never accepted as a fast path.</p><h4 class="dlg-h">Abstract trees, LIKE, and SHAPE ONLY</h4><div class="tw"><table class="data wrap"><thead><tr><th>rule</th><th>why</th></tr></thead><tbody><tr><td><b>Shapes are not a second catalog kind.</b> An abstract tree is a tree with <code>SHAPE ONLY</code> and no source.</td><td>One kind, existing keywords. The separate SHAPE catalog was designed, then superseded: the footnote defending its wrinkle deleted itself, which is how you know the second design won.</td></tr><tr><td><b><code>SHAPE ONLY</code> is required whenever there is no <code>AS</code> clause.</b></td><td>Sourcelessness must be declared intent, not an accident that surfaces three queries later. It also forces the ROOT slot to exist before any row does.</td></tr><tr><td><b><code>LIKE</code> copies semantics, never source.</b></td><td>The universal LIKE contract: structure, never data. <code>CREATE TREE t LIKE ast AS FROM …</code> instantiates; <code>CREATE TREE py LIKE ast (SHAPE ONLY, PSEUDO (…))</code> refines and stays abstract.</td></tr><tr><td><code>FROM &lt;shape-only tree&gt;</code> fails at bind: <i>"SHAPE ONLY; no source bound."</i></td><td>Fail legibly (doctrine 4).</td></tr><tr><td>Concrete trees are <b>open</b>: every column unclaimed by R/O is a named attribute. Abstract trees are <b>closed</b>: the declared interface is the type.</td><td>Openness makes <code>[start_line &gt; 100]</code> work with zero declaration; closedness is what the P14 differential test depends on. Escape on a closed shape is composition, not a hole: <code>USING TREE (LIKE shape, ATTR extra := col)</code>.</td></tr><tr><td>Reserved future syntax: <code>LIKE ast EXCLUDING O</code></td><td>Postgres's INCLUDING/EXCLUDING option family, over the four blocks.</td></tr></tbody></table></div><h4 class="dlg-h">Applying a shape ad hoc: the design space, with verdicts</h4><div class="tw"><table class="data wrap"><thead><tr><th>#</th><th>candidate</th><th>verdict</th></tr></thead><tbody><tr><td>A</td><td><code>FROM 'code.parquet' USING TREE ast MATCH '.fn'</code></td><td><span class="ok">Recommended.</span> A postfix modifier on a FROM item, exact precedent <code>USING SAMPLE</code>. Reads as the pipeline it is: source → semantics → query. Anonymous form: <code>USING TREE (LEVEL depth)</code>.</td></tr><tr><td>B</td><td><code>TREE 'code.parquet' SHAPE ast</code></td><td><span class="ok">Accepted as sugar.</span> Statement-level shorthand mirroring <code>TABLE src</code>; desugars to A.</td></tr><tr><td>C</td><td><code>TREE ast FROM 'code.parquet'</code></td><td><span class="no">Ranked down.</span> Semantics before source reverses the read order every other construct teaches; statement-initial TREE collides with B and crowds CREATE TREE.</td></tr><tr><td>D</td><td><code>FROM TREE 'code.parquet' (SHAPE ast …)</code></td><td><span class="no">Ranked down.</span> Reads as a function call that isn't one; everything it does, A does with less grammar.</td></tr><tr><td>E</td><td><code>FROM tree('code.parquet', shape := 'ast')</code></td><td><span class="ok">Kept as the compatibility spelling.</span> A real table function, no new grammar, works pre-2.0; A desugars to it.</td></tr></tbody></table></div><p class="dlg-p">Keyword order inside the modifier was its own decision: <code>USING TREE ast</code> over <code>USING SHAPE ast</code> (to a duckdb-spatial audience, SHAPE reads <i>shapefile</i>) and over <code>USING TREE SHAPE ast</code> (two keywords where one carries the meaning). PEG hygiene wants one unambiguous head token per extension's modifiers, and <code>TREE</code> is it.</p><h4 class="dlg-h">The experiment log, re-run today</h4><p class="dlg-p">The DDL was designed by prototyping on shipped DuckDB, not on paper. Every ingredient below was re-executed for this page on DuckDB 1.5.5.</p><div class="tw"><table class="data wrap"><thead><tr><th>ingredient</th><th>statement</th><th>result</th></tr></thead><tbody><tr><td>postfix modifier precedent</td><td><code>FROM range(100) USING SAMPLE 10 ROWS</code></td><td><span class="ok">✓</span> 10 rows: the USING-modifier chain is live syntax</td></tr><tr><td>statement shorthand precedent</td><td><code>TABLE src</code></td><td><span class="ok">✓</span> candidate B has a native twin</td></tr><tr><td>soft keywords</td><td>columns named <code>tree</code>, <code>shape</code>, <code>match</code></td><td><span class="ok">✓</span> all valid identifiers: zero reserved-word cost</td></tr><tr><td>bulk ATTR binding</td><td><code>SELECT COLUMNS('attr_(.*)') AS '\1' FROM src</code></td><td><span class="ok">✓</span> columns <code>lang</code>, <code>kind</code>: the star-expression machinery is the borrowed tool</td></tr><tr><td>name-to-relation indirection</td><td><code>query_table('src')</code></td><td><span class="ok">✓</span> the macro bridge's hinge</td></tr><tr><td>fast recursive CTEs</td><td><code>WITH RECURSIVE walk USING KEY (email) AS (…)</code></td><td><span class="ok">✓</span> the parent-basis encoder runs (see duckent II)</td></tr><tr><td>macro composition</td><td>shape macro over <code>query_table</code>, match macro nesting it</td><td><span class="ok">✓</span> the modifier chain already runs as macro composition (see duckent II)</td></tr></tbody></table></div></div>
+</dialog>
+<dialog class="full" id="full5" aria-labelledby="full5-t">
+  <div class="dlg-head"><span id="full5-t">duckent II — the compiled query and the encoder, running on DuckDB today</span><button class="close" type="button" data-close>close ✕</button></div>
+  <div class="dlg-body"><h4 class="dlg-h">The macro bridge: what MATCH compiles to, running today</h4><p class="dlg-p">Pre-2.0, the whole DDL compiles to two table macros. A shape is a <b>projection macro</b> onto canonical columns (<code>_root</code>, <code>_pre</code>, <code>_level</code>, <code>_type</code>, <code>_id</code>, <code>_size</code>, …). MATCH generates its query against those columns and nothing else. Below is the flagship selector compiled by hand exactly the way the compiler will emit it, run against the prelude's <code>app.py</code> on DuckDB 1.5.5 with sitting_duck.</p><div class="body"><pre>LOAD sitting_duck;
+CREATE TABLE app AS FROM read_ast(&#x27;app.py&#x27;);
+
+-- a SHAPE compiles to a projection macro onto canonical columns
+CREATE MACRO shape_ast(src) AS TABLE
+  SELECT file_path AS _root, node_id AS _pre, depth AS _level,
+         semantic_type_to_string(semantic_type) AS _type, name AS _id,
+         descendant_count AS _size, parent_id AS _parent,
+         (flags &amp; 6) = 6 AS is_def,          -- ATTR: binds a name as a DEFINITION
+         type AS node_type, start_line
+  FROM query_table(src);
+
+-- MATCH &#x27;.fn:not(:has(:docblock))&#x27; compiles against the canonical columns only
+CREATE MACRO match_fn_without_docblock(src) AS TABLE
+  WITH n AS (FROM shape_ast(src)),
+  docblock AS (   -- :docblock = block &gt; expression_statement:first-child &gt; string:first-child
+    SELECT b._pre, b._size FROM n b
+    JOIN n e ON e._parent = b._pre AND e._pre = b._pre + 1   -- first child: next row in pre-order
+    JOIN n s ON s._parent = e._pre AND s._pre = e._pre + 1
+    WHERE b.node_type = &#x27;block&#x27; AND e.node_type = &#x27;expression_statement&#x27; AND s.node_type = &#x27;string&#x27;)
+  SELECT f._id AS name, f.start_line
+  FROM n f
+  WHERE f._type = &#x27;DEFINITION_FUNCTION&#x27; AND f.is_def          -- .fn
+    AND NOT EXISTS (FROM docblock d                         -- :not(:has(…)) over the pre/size range
+                    WHERE d._pre BETWEEN f._pre + 1 AND f._pre + f._size);
+
+FROM match_fn_without_docblock(&#x27;app&#x27;);
+┌───────┬────────────┐
+│ name  │ start_line │
+│ shout │ 9          │
+└───────┴────────────┘</pre></div><p class="dlg-p">Two things to notice. The <code>:has</code> is a range test on <code>_pre</code> bounded by <code>_size</code>: that is O2 doing its job, and the default (scan forward until <code>_level</code> drops) gives the identical answer, which is the O law. And <code>.fn</code> needed one more predicate than the type alone: sitting_duck gives the <code>def</code> keyword the same semantic type as the function it opens, so the shape must declare which rows are <i>definitions</i>. That is what an S declaration is for: the compiler consulted a declaration, not a heuristic.</p><div class="body"><pre>SELECT _pre, _level, _type, is_def, node_type FROM shape_ast(&#x27;app&#x27;) WHERE _pre IN (6, 7, 30, 31);
+┌──────┬────────┬─────────────────────┬────────┬─────────────────────┐
+│ _pre │ _level │ _type               │ is_def │ node_type           │
+│ 6    │ 1      │ DEFINITION_FUNCTION │ true   │ function_definition │
+│ 7    │ 2      │ DEFINITION_FUNCTION │ false  │ def                 │
+│ 30   │ 1      │ DEFINITION_FUNCTION │ true   │ function_definition │
+│ 31   │ 2      │ DEFINITION_FUNCTION │ false  │ def                 │
+└──────┴────────┴─────────────────────┴────────┴─────────────────────┘</pre></div><p class="dlg-p">This is also P14 with teeth. <code>MATCH</code> physically cannot see a column the projection did not emit; on a closed shape, <code>[WHERE peek LIKE …]</code> refuses because <code>peek</code> is simply not there.</p><h4 class="dlg-h">The encoder: parent basis → (order, level), in full</h4><p class="dlg-p">The lesson figure elides the recursive CTE to three dots. Here it is whole, run on DuckDB 1.5.5 with <code>USING KEY</code>. Every adjacency list in your warehouse conforms through exactly this query, and <code>CREATE TREE org (PARENT manager_email, SIBLING ORDER (hire_date), …)</code> is the promise that you never write it again.</p><div class="body"><pre>CREATE TABLE employees(email VARCHAR, role VARCHAR, manager_email VARCHAR, hire_date DATE);
+INSERT INTO employees VALUES
+ (&#x27;ada@co&#x27;,&#x27;cto&#x27;,NULL,&#x27;2019-01-07&#x27;),
+ (&#x27;bo@co&#x27;,&#x27;manager&#x27;,&#x27;ada@co&#x27;,&#x27;2020-03-02&#x27;),
+ (&#x27;cy@co&#x27;,&#x27;manager&#x27;,&#x27;ada@co&#x27;,&#x27;2019-06-11&#x27;),
+ (&#x27;di@co&#x27;,&#x27;engineer&#x27;,&#x27;bo@co&#x27;,&#x27;2021-09-20&#x27;),
+ (&#x27;ed@co&#x27;,&#x27;engineer&#x27;,&#x27;bo@co&#x27;,&#x27;2020-11-16&#x27;),
+ (&#x27;fay@co&#x27;,&#x27;engineer&#x27;,&#x27;cy@co&#x27;,&#x27;2022-02-01&#x27;),
+ (&#x27;gus@co&#x27;,&#x27;intern&#x27;,&#x27;fay@co&#x27;,&#x27;2024-06-03&#x27;);
+
+-- the encoder: parent basis -&gt; (order, level); sibling key = hire_date
+WITH RECURSIVE walk USING KEY (email) AS (
+  SELECT email, role, manager_email, 0 AS level,
+         [row_number() OVER (ORDER BY hire_date, email)] AS path
+  FROM employees WHERE manager_email IS NULL
+  UNION ALL
+  SELECT e.email, e.role, e.manager_email, w.level + 1,
+         w.path || [row_number() OVER (PARTITION BY e.manager_email ORDER BY e.hire_date, e.email)]
+  FROM employees e JOIN walk w ON e.manager_email = w.email
+)
+SELECT row_number() OVER (ORDER BY path) - 1 AS node_id,
+       level, role AS type, email AS id, manager_email AS parent
+FROM walk ORDER BY node_id;
+┌─────────┬───────┬──────────┬─────────┬─────────┐
+│ node_id │ level │ type     │ id      │ parent  │
+│ 0       │ 0     │ cto      │ ada@co  │ NULL    │
+│ 1       │ 1     │ manager  │ cy@co   │ ada@co  │
+│ 2       │ 2     │ engineer │ fay@co  │ cy@co   │
+│ 3       │ 3     │ intern   │ gus@co  │ fay@co  │
+│ 4       │ 1     │ manager  │ bo@co   │ ada@co  │
+│ 5       │ 2     │ engineer │ ed@co   │ bo@co   │
+│ 6       │ 2     │ engineer │ di@co   │ bo@co   │
+└─────────┴───────┴──────────┴─────────┴─────────┘</pre></div><p class="dlg-p">Read the output as a tree: <code>cy@co</code> comes before <code>bo@co</code> because the sibling key is hire date, and the node ids are depth-first, so <code>manager:has(&gt; engineer)</code> is a range test again. Without a sibling key the derivation still yields a valid pre-order, but not a canonical one, so the tree conforms in the <b>sibling-free profile</b>: <code>+</code>, <code>~</code>, and <code>:first-child</code> are refused with the missing slot named; everything else works.</p><h4 class="dlg-h">The two lemmas (P17: round trips are identities)</h4><div class="tw"><table class="data wrap"><thead><tr><th>direction</th><th>derivation</th><th>needs</th><th>checked by</th></tr></thead><tbody><tr><td>level → parent</td><td>parent(n) = the nearest prior row at level(n) − 1, within the same ROOT partition</td><td>nothing beyond R1 + R2</td><td>level → parent → level is the identity</td></tr><tr><td>parent → (order, level)</td><td>DFS numbering: the recursive CTE above, path-ordered</td><td>a sibling ordering key for the full profile</td><td>parent → (order, level) → parent is the identity, given the key</td></tr><tr><td>well-formedness (P13)</td><td>level[n+1] ≤ level[n] + 1 per partition: descend at most one, pop freely</td><td>ROOT declared if the relation holds more than one tree</td><td>property tests over generated level sequences; ingest-time check on INSERT</td></tr></tbody></table></div></div>
+</dialog>
+<dialog class="full" id="full6" aria-labelledby="full6-t">
+  <div class="dlg-head"><span id="full6-t">duckent III — delimiters, escapes, and the rejected spellings</span><button class="close" type="button" data-close>close ✕</button></div>
+  <div class="dlg-body"><h4 class="dlg-h">MATCH delimiters and the pipeline: what was decided</h4><div class="tw"><table class="data wrap"><thead><tr><th>form</th><th>status</th><th>rule</th></tr></thead><tbody><tr><td><code>MATCH '.fn:not(:has(:docblock))'</code></td><td>string form, pre-2.0</td><td>A plain string literal; dollar-quote <code>$sel$ … $sel$</code> for gnarly cases. Stays legal after 2.0.</td></tr><tr><td><code>MATCH .fn:not(:has(:docblock)) SELECT …</code></td><td>bare form, 2.0</td><td>The portable fragment flows straight into the clause pipeline. The pattern ends at the <b>next top-level SQL clause keyword</b>, scanned outside balanced brackets. No outer string literal, so quote-doubling dissolves.</td></tr><tr><td><code>MATCH $( … )</code></td><td>delimited form, 2.0</td><td>Always permitted for certainty; <b>required the moment a host escape appears</b>. Balanced, PEG-trivial.</td></tr><tr><td><code>*[WHERE &lt;sql&gt;]</code> · <code>type[WHERE &lt;sql&gt;]</code></td><td>host escape</td><td>A full SQL predicate at any node position, including inside <code>:has(…)</code>. Compiled against the node's <b>projection view</b>, never the raw relation: concrete trees see everything, closed abstracts still refuse undeclared columns.</td></tr><tr><td><code>[WHERE …]</code> with no head</td><td>ill-formed</td><td>Refused with the head hint. The stray-space accident (<code>a[WHERE…]</code> filters the node, <code>a [WHERE…]</code> inserts an anonymous descendant) becomes a parse error instead of a different query. XPath precedent: <code>*[pred]</code> is its only spelling.</td></tr><tr><td><code>[x=3]</code>, <code>:docblock</code> bare</td><td>legal</td><td>Micro-language predicates keep CSS's implied universal; only SQL brackets need a head. <i>SQL never floats; it hangs off a node.</i></td></tr><tr><td><code>MATCH "select" &gt; "from"</code></td><td>legal</td><td>Keyword-typed selectors quote like identifiers. Certain to occur: the 28th grammar is SQL, and its ASTs contain <code>select</code> nodes. Clause-keyword exit wins by ordered choice.</td></tr><tr><td>selector containing <code>[WHERE]</code></td><td>host-bound dialect</td><td>Excluded from the portable fragment (eval corpus, GBNF grammar, cross-surface reuse, umwelt exact rules). Two dialects, one grammar, flagged at parse.</td></tr></tbody></table></div><h4 class="dlg-h">Rejected spellings, and why</h4><div class="tw"><table class="data wrap"><thead><tr><th>spelling</th><th>rejected because</th></tr></thead><tbody><tr><td><code>.fn (WHERE …)</code></td><td>Whitespace is the descendant combinator, and it is sacred.</td></tr><tr><td><code>.fn(FILTER …)</code></td><td>Collides visually with pseudo-class arguments.</td></tr><tr><td><code>[FILTER …]</code></td><td>WHERE over FILTER: it echoes SQL's own <code>FILTER (WHERE …)</code> inner shape and SQL:2023 <code>GRAPH_TABLE … MATCH … WHERE</code>.</td></tr><tr><td><code>MATCH … END</code></td><td>CASE…END is sui generis; two closers is one too many.</td></tr><tr><td><code>MATCH ( … )</code></td><td>Reads as a <code>match(…)</code> function call.</td></tr><tr><td>a separate FILTER clause</td><td>Dissolved: MATCH emits raw rows, so post-match <code>WHERE</code> already is the typed, macro-free filter; and pre-MATCH filtering is ROOT-granular only (P21), so a keyword would only invite the wrong kind.</td></tr></tbody></table></div><h4 class="dlg-h">Symmetry doctrine</h4><p class="dlg-p"><code>$( )</code> is the door from SQL into selector-land; <code>[WHERE ]</code> is the door back. If you open the inner door, close the outer one. Precedent for host SQL inside a pattern language: SQL:2023 property graph queries, where <code>GRAPH_TABLE</code> embeds host WHERE over pattern variables inside MATCH.</p><p class="dlg-p">Two planted mutants guard this lesson. <b>MN19</b>: a <code>[WHERE]</code> escape compiled against the raw relation instead of the projection view, so undeclared columns leak through a closed shape. <b>MN20</b>: bare <code>[WHERE]</code> accepted, so the stray-space accident becomes a different query. Both must die before M2 closes.</p></div>
+</dialog>
+<dialog class="full" id="full7" aria-labelledby="full7-t">
+  <div class="dlg-head"><span id="full7-t">duckent IV — DML semantics, the W laws, and the ritual replaced</span><button class="close" type="button" data-close>close ✕</button></div>
+  <div class="dlg-body"><h4 class="dlg-h">Forest DML: what each statement means</h4><div class="tw"><table class="data wrap"><thead><tr><th>statement</th><th>granularity</th><th>semantics</th></tr></thead><tbody><tr><td><code>INSERT INTO t FROM read_ast('new.py')</code></td><td>whole trees</td><td>Appends partitions with new ROOT values. P13 is checked per partition on ingest; a malformed level sequence is rejected, not stored (MN15).</td></tr><tr><td><code>DELETE FROM t WHERE file_path = 'old.py'</code></td><td>whole trees</td><td>Drops partitions by ROOT. Interior rows cannot be deleted individually; a non-ROOT predicate here is ill-typed.</td></tr><tr><td><code>INSERT OR REPLACE INTO t FROM read_ast('mod.py')</code></td><td>whole trees</td><td>Re-derivation spelled in shipped syntax: replace the partition, bump its epoch. Renumbering never crosses a partition you did not wholly replace, which is the answer to the 2004 dynamic-update tarpit.</td></tr><tr><td>within-tree row surgery</td><td>—</td><td>Does not exist. The ROOT key is a primary key at tree granularity.</td></tr><tr><td>pre-MATCH <code>WHERE</code> on a non-ROOT column</td><td>refused or routed</td><td>P21: removing interior rows before tree interpretation corrupts level sequences; only ROOT-granular pruning is safe before MATCH. Post-match WHERE is the raw filter (MN17).</td></tr><tr><td>adjacency across partitions</td><td>ill-typed</td><td>The whole R block (order, level invariant, derivations, O defaults) is scoped by ROOT; a window that crosses a partition is a type error, not a guarded edge case (MN14).</td></tr></tbody></table></div><h4 class="dlg-h">W: the laws of linking</h4><div class="tw"><table class="data wrap"><thead><tr><th>law</th><th>statement</th><th>consequence</th></tr></thead><tbody><tr><td>W1 — attachments</td><td>A child tree's <b>root</b> references a parent-tree node via a root-restricted foreign key and splices in at level(parent) + 1. Interior nodes structurally cannot: their only cross-tree coordinate is ROOT, constant per tree.</td><td>Ancestry stays a forest, not a graph. <code>ATTACH child TO parent.node</code> infers the join from ROOT ↔ the parent's ID accessor; <code>USING (…)</code> covers mismatches only.</td></tr><tr><td>W2 — loaders</td><td>Demand materialization with a <b>tri-state frontier</b>: loaded / unloaded / absent. Bindings are deterministic functions of the parent row's local columns (a code fence's language attribute selecting the parser is the archetype).</td><td>Matching must equal the fully-materialized ideal within the selector's scope (P20), so a loader is an evaluation strategy, never a semantics change.</td></tr><tr><td>W3 — epochs</td><td>Every load carries an epoch manifest; provenance is keyed by (parent, params); refresh is by selector.</td><td><code>REFRESH TREE fs BRANCH 'dir#var'</code> reloads exactly the branches the selector reaches.</td></tr><tr><td>W-locality</td><td><b>Within-tree match sets are invariant under any change to W.</b> Attach, detach, load, refresh: a single tree's answers never move.</td><td>W belongs to binding, planning, and provenance; never to semantics. MN9 (an attachment changes a single-tree match set) must die.</td></tr></tbody></table></div><h4 class="dlg-h">Frontier states and what the matcher does</h4><div class="tw"><table class="data wrap"><thead><tr><th>state</th><th>meaning</th><th>matcher behaviour</th><th>O accessors</th></tr></thead><tbody><tr><td>loaded</td><td>the branch is materialized at the current epoch</td><td>match normally</td><td>Bound (namespace matches)</td></tr><tr><td>unloaded</td><td>the branch exists but is not resident</td><td>the selector reaching it <b>must load it</b> (P20). Skipping it turns "unloaded" into "absent" silently (MN16).</td><td>Estimate only: may inform join order, never results (MN11)</td></tr><tr><td>absent</td><td>the reference dangles: nothing is there</td><td>a fact, reported as drift telemetry, not an error</td><td>n/a</td></tr></tbody></table></div><p class="dlg-p">O values are namespaced to (taxon, load-watermark). A parent tree's <code>descendant_count</code> cannot see an attached forest (MN10) or reach above an unloaded frontier. A namespace-checked read yields a <b>Bound</b>; a mismatched one yields an <b>Estimate</b>. Bound versus Estimate is a type, not a convention: the XML era fought this as the dynamic-update problem and answered with renumbering; the contract answers with locality.</p><h4 class="dlg-h">Example 2, run today: the ritual the attachment replaces</h4><p class="dlg-p">The chart-of-accounts rollup is the community's canonical clunky-CTE case. Below, the ritual as it stands on DuckDB 1.5.5, with real numbers, followed by the duckent IV spelling.</p><div class="body"><pre>CREATE TABLE coa(account_id INT, name VARCHAR, parent_id INT);
+INSERT INTO coa VALUES (1,&#x27;root&#x27;,NULL),(2,&#x27;opex&#x27;,1),(3,&#x27;salaries&#x27;,2),(4,&#x27;travel&#x27;,2),
+                       (5,&#x27;capex&#x27;,1),(6,&#x27;servers&#x27;,5),(7,&#x27;airfare&#x27;,4);
+CREATE TABLE ledger(entry_id INT, account_id INT, fy INT, amount DECIMAL(12,2));
+INSERT INTO ledger VALUES (1,3,2026,120000),(2,7,2026,4200),(3,6,2026,80000),
+                          (4,3,2025,110000),(5,4,2026,900);
+
+-- today: collect descendant ids, semi-join the facts, aggregate. Per hierarchy. Per question.
+WITH RECURSIVE under_opex AS (
+  SELECT account_id FROM coa WHERE name = &#x27;opex&#x27;
+  UNION ALL
+  SELECT c.account_id FROM coa c JOIN under_opex u ON c.parent_id = u.account_id)
+SELECT sum(amount) AS opex_2026
+FROM ledger
+WHERE fy = 2026 AND account_id IN (FROM under_opex);
+┌───────────┐
+│ opex_2026 │
+│ 125100.00 │
+└───────────┘
+
+-- duckent IV: attach the facts once, then one selector plus one aggregate
+ATTACH ledger TO coa.account USING (account_id);
+FROM ledger MATCH &#x27;account#opex * entry[fy=&quot;2026&quot;]&#x27; SELECT sum(amount);</pre></div><h4 class="dlg-h">Open decisions surfaced here</h4><div class="tw"><table class="data wrap"><thead><tr><th>id</th><th>question</th><th>lean</th></tr></thead><tbody><tr><td>D-N4</td><td>Cross-tree attachment: in-core v1, or the layer above?</td><td>Define the <i>interface</i> in core (attachment metadata, spliced-level semantics in the matcher) but no registry UI; declaring and managing attachments belongs to the vocabulary layer. Root-restriction is normative either way.</td></tr><tr><td>D-N5</td><td>Incremental materialization (VIRTUAL TREE)</td><td>Core ships the tri-state frontier and a demand-load callback slot in v1, nothing more. Caching, TTLs, and load scheduling live above.</td></tr><tr><td>D-N3</td><td>Sibling-free profile: warn once, or refuse per query?</td><td>Refuse per query; warnings decay into wallpaper.</td></tr></tbody></table></div></div>
 </dialog>
 <script>
 // full-screen data modals: <button data-dialog="id"> opens <dialog id="id">; backdrop click, ✕, or Esc closes
