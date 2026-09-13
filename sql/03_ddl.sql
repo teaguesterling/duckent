@@ -71,9 +71,7 @@ checked AS (
       WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN error('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
       WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN error('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
       WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN error('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
-      WHEN regexp_matches(attr_text, '(?i)\bAS\s+"?_') THEN error('tree_ddl_create: ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
-      WHEN len(list_distinct(list_transform(COALESCE((shape).semantic.pseudo, []), lambda x: (x).name))) <> len(COALESCE((shape).semantic.pseudo, [])) THEN error('tree_ddl_create: S-coherence: a pseudo-class is bound twice')
-      ELSE true END AS ok,
+      ELSE tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
     CASE WHEN abstract THEN NULL ELSE tree_compile_projection(shape, source, attr_text) END AS proj_sql
   FROM derived
 ),
@@ -120,6 +118,10 @@ CREATE OR REPLACE MACRO tree_compile_drop(sch, nm) AS (
     'COMMIT']);
 
 -- Replace the SEMANTIC group and rebuild the projection (and storage, when materialized).
+-- Two guards keep alter from being a back door: the S validation ladder is the same fragment
+-- create uses (so a closed tree stays closed and the `_` prefix stays reserved), and a
+-- materialized tree whose partitions no longer all come from source_sql refuses outright,
+-- because rebuilding with CREATE OR REPLACE TABLE would drop what tree_insert added.
 CREATE OR REPLACE MACRO tree_compile_alter(sch, nm, semantic) AS (
 WITH t AS (
   SELECT current_database() AS db, tr.storage, tr.source_sql, tr.is_abstract,
@@ -130,20 +132,27 @@ n AS (
   SELECT *,
     {root: (old_shape).root, "order": (old_shape)."order", key: (old_shape).key, level: (old_shape).level, parent: (old_shape).parent, sibling_order: (old_shape).sibling_order,
      size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: semantic}::TREE_SHAPE AS shape,
-    COALESCE((semantic).attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
+    COALESCE((semantic).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
     'tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) AS proj_name,
     'tree_catalog.' || tree_sql_ident('t_' || sch || '_' || nm) AS tbl_name
   FROM t
 ),
 c AS (
   SELECT *, CASE WHEN is_abstract THEN NULL ELSE tree_compile_projection(shape, source_sql, attr_text) END AS proj_sql,
+    tree_sql_check_semantic(semantic, attr_text, 'tree_ddl_alter') AS ok,
     list_filter([
       {b: 'S', s: 'TYPE', e: (semantic).type}, {b: 'S', s: 'ID', e: (semantic).id}, {b: 'S', s: 'CLASSES', e: (semantic).classes},
       {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (semantic).attr_map}], lambda x: (x).e IS NOT NULL) AS rows
   FROM n
 )
-SELECT CASE WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_ddl_alter: tree ' || sch || '.' || nm || ' not found') ELSE
+SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; nothing to alter')
+  WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_ddl_alter: tree ' || sch || '.' || nm || ' not found') ELSE
   list_filter(['BEGIN TRANSACTION',
+   CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE
+   'SELECT CASE WHEN count(*) > 0 THEN error(''tree_ddl_alter: tree ' || replace(sch || '.' || nm, '''', '''''')
+     || ' holds '' || count(*) || '' partition(s) ingested after create; altering would drop them. tree_delete them or re-ingest with tree_replace after altering'') END'
+     || ' FROM tree_state.partitions p WHERE p.database_name = ' || tree_sql_lit(db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm)
+     || ' AND p.root_key NOT IN (SELECT DISTINCT _root::VARCHAR FROM (' || proj_sql || '))' END,
    'DELETE FROM tree_catalog.slots WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND block = ''S''',
    'DELETE FROM tree_catalog.pseudo_classes WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
@@ -157,7 +166,7 @@ SELECT CASE WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_ddl_alter: tree '
         ELSE 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE ' || proj_sql END,
    CASE WHEN is_abstract THEN NULL ELSE 'UPDATE tree_catalog.compiled SET sql_text = ' || tree_sql_lit(proj_sql) || ' WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''projection''' END,
    'COMMIT'], lambda x: x IS NOT NULL) END
-FROM c);
+FROM c WHERE ok);
 
 -- The canonical projection of a registered tree. query() folds the concatenated literal to a constant.
 CREATE OR REPLACE MACRO tree_project(sch, nm) AS TABLE

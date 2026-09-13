@@ -158,6 +158,35 @@ SELECT class, row_count FROM tree_catalog_classes('main', 'bare') WHERE class = 
 ----
 function_definition	2
 
+# alter runs the same S validation ladder as create (C2)
+statement error
+CALL tree_ddl_alter('main', 'bare', tree_semantic(attr := 'node_id AS _pre'));
+----
+_pre
+
+statement error
+CALL tree_ddl_alter('main', 'bare', tree_semantic(pseudo := [{name: 'x', body: 'true'}, {name: 'x', body: 'false'}]));
+----
+S-coherence
+
+statement error
+CALL tree_ddl_alter('main', 'bare', NULL);
+----
+nothing to alter
+
+# a closed tree stays closed across alter: ATTR defaults to the slot it already has, never to *
+statement ok
+CALL tree_ddl_create('main', 'shut', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement ok
+CALL tree_ddl_alter('main', 'shut', tree_semantic(type := 'type', id := 'name'));
+
+query II
+SELECT (SELECT expression FROM tree_catalog_slots() s WHERE s.tree_name = 'shut' AND slot = 'ATTR'),
+       (SELECT count(*) FROM (DESCRIBE FROM tree_project('main', 'shut')) WHERE column_name NOT LIKE '\_%' ESCAPE '\');
+----
+name	1
+
 # ad hoc application of a shape to a bare source
 query I
 SELECT count(*) FROM tree_apply(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')');

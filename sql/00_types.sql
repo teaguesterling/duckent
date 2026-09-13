@@ -29,3 +29,14 @@ CREATE OR REPLACE MACRO tree_sql_lit(s) AS '''' || replace(s, '''', '''''') || '
 CREATE OR REPLACE MACRO tree_sql_ident(s) AS '"' || replace(s, '"', '""') || '"';
 CREATE OR REPLACE MACRO tree_sql_list(csv) AS list_transform(string_split(csv, ','), lambda x: trim(x));
 CREATE OR REPLACE MACRO tree_sql_is_ident(s) AS regexp_matches(s, '^[A-Za-z_][A-Za-z0-9_]*$');
+
+-- The validation ladder for the S group, shared by tree_compile_create and tree_compile_alter
+-- so that altering a tree cannot bypass a check create enforces. `verb` prefixes the message.
+-- Returns true when the semantic is acceptable; raises otherwise.
+CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
+  CASE
+    WHEN regexp_matches(COALESCE(attr_text, ''), '(?i)\bAS\s+"?_')
+      THEN error(verb || ': ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
+    WHEN len(list_distinct(list_transform(COALESCE((sem).pseudo, []), lambda x: (x).name))) <> len(COALESCE((sem).pseudo, []))
+      THEN error(verb || ': S-coherence: a pseudo-class is bound twice')
+    ELSE true END;

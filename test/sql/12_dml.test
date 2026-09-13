@@ -28,6 +28,21 @@ SELECT (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') 
 ----
 true	true
 
+# alter refuses while partitions ingested after create are present (C1): the projection is
+# rebuilt from source_sql alone, which would silently drop everything tree_insert added
+statement error
+CALL tree_ddl_alter('main', 'scripts', tree_semantic(type := 'type'));
+----
+ingested after create
+
+# the refused alter left the tree untouched: rows, partitions and the S group as before
+query III
+SELECT (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'scripts');
+----
+true	true	false
+
 # re-inserting an existing ROOT is refused
 statement error
 CALL tree_insert('main', 'scripts', 'first_file');
