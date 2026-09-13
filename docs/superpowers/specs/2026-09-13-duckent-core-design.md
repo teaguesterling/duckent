@@ -23,8 +23,8 @@ Every tree row is identified by `(database_name, schema_name, tree_name)`. Sourc
 
 | table | one row per | columns |
 |---|---|---|
-| `trees` | abstract or concrete tree | identity; `is_abstract`; `like_tree` (three-part name of the LIKE parent, nullable); `source_sql` (null when abstract); `basis` (`level` or `parent`); `profile` (`full` or `sibling_free`); `storage` (`materialized` or `projection`); `description` |
-| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTRS`, `ATTRS_MAP`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTRS` holds a whole select list) |
+| `trees` | abstract or concrete tree | identity; `is_abstract`; `like_tree` (three-part name of the LIKE parent, nullable); `source_sql` (null when abstract); `basis` (`level` or `parent`); `profile` (`full` or `sibling_free`); `storage` (`materialized` or `projection`); `order_source` (`declared` or `frozen`); `description` |
+| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTR`, `ATTR_MAP`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTR` holds a whole select list). The S slots (`TYPE` through `ATTR_MAP`, plus `pseudo_classes`) together form the tree's `SEMANTIC` group, which may be absent |
 | `pseudo_classes` | one pseudo-class binding of one tree | identity; `name`; `kind` (`expression` or `selector`); `body`; `origin` (`local`, `prefix`, `shared`); `purity` (`pure`, `volatile`, `unknown`) |
 | `selector_languages` | one registered selector language | `language`; `parser` (function name: text to `TREE_SELECTOR`); `printer` (function name: `TREE_SELECTOR` to text, nullable); `bare_safe BOOLEAN` |
 | `attachments` | one W1 attachment | `child_tree`, `parent_tree` (three-part names); `join_sql`. Interface only, per D-N4 |
@@ -34,8 +34,9 @@ Rules encoded by the schema:
 
 - **`PARENT` is basis or override by derivation, not by flag.** If `LEVEL` is also declared, `PARENT` is the O1 override and `basis = level`; otherwise `basis = parent`. `SIZE`, `CHILDREN`, `NEXT` are O-only, so declaring them is declaring an override. No `optimize` column exists.
 - **Storage is explicit.** A tree created with a source and `storage = materialized` owns a canonical table `tree_catalog.t_<schema>_<name>`; forest DML applies. `storage = projection` is a macro over the live source; no storage, no DML.
-- **ORDER is optional.** With `preserve_insertion_order` on (the default), scan order is insertion order, and `_pre` is derived as `row_number() OVER (PARTITION BY <ROOT>)`. A materialized tree freezes that at ingest. A projection-mode tree over a live source is refused at create, legibly, only when `preserve_insertion_order` is off. Parent-basis sources get order from the encoder.
-- **ATTRS is a select list.** `ATTRS ( foo + 3 AS bar, COLUMNS(* EXCLUDE (baz)) )` is legal; output column names are attribute names; attributes are typed columns of the projection. Defaults: a concrete tree defaults to `ATTRS (*)`; a `SHAPE ONLY` tree defaults to `ATTRS ()` and must say `ATTRS (*)` to be open. `ATTRS MAP col` remains for the string-only long tail. Output names colliding with the canonical prefix are refused at create.
+- **Trees are ordered.** Pre-order traversal is the ground everything else stands on, so every tree has `_pre`. A level-basis tree declares `ORDER`, or, as the undesirable but supported case, is materialized from a source whose insertion order is taken as pre-order and frozen into `_pre` at ingest (`order_source = frozen`; requires `preserve_insertion_order` on at ingest, refused otherwise). A projection-mode tree over a live source must declare `ORDER`; without it, create refuses and names the slot. Parent-basis sources get `_pre` from the encoder, which is always `declared`.
+- **ATTR is a select list; ATTR MAP is a typed catch-all.** `ATTR ( foo + 3 AS bar, COLUMNS(* EXCLUDE (baz)) )` is legal; output column names are attribute names; attributes are typed columns of the projection. Defaults: a concrete tree defaults to `ATTR (*)`; a `SHAPE ONLY` tree defaults to `ATTR ()` and must say `ATTR (*)` to be open. `ATTR MAP <expr>` holds the long tail, and the compiler dispatches on the expression's type: `MAP(VARCHAR, V)` reads `map[name]` and compares in `V`; `JSON` reads `->> name` and casts to the literal's type; `VARIANT` reads the variant with its own type preserved; `STRUCT` reads the field. `ATTR JSON <expr>` is an explicit spelling of the JSON case. Named attributes win; the map serves undeclared names; neither yields a legible refusal naming the attribute. Output names colliding with the canonical prefix are refused at create.
+- **R first, S later.** A tree is complete with R alone: `tree_shape(order := 'node_id', level := 'depth')`. The `SEMANTIC` group can be added to the catalog afterwards with `tree_ddl_alter`, or overlaid per query. Against a tree with no `SEMANTIC` group, only structural combinators and `WHERE` clauses are legal in a match; a `TYPE`, `ID`, `CLASS`, `ATTR`, or `PSEUDO` clause refuses and names the `SEMANTIC` slot. `TYPE` still defaults to `'node'` so `*` and every combinator work (MN21).
 - **LIKE copies rows**, never source: `trees`, `slots`, `pseudo_classes` rows are copied under the new identity, then the new spec is merged over them.
 
 ### 2.2 `tree_state` (state)
@@ -54,13 +55,16 @@ Rules encoded by the schema:
 ### 3.1 `TREE_SHAPE`
 
 ```sql
+CREATE TYPE TREE_SEMANTIC AS STRUCT(
+  type VARCHAR, id VARCHAR, classes VARCHAR, attr VARCHAR, attr_map VARCHAR,
+  pseudo STRUCT(name VARCHAR, body VARCHAR, prefix VARCHAR)[]);
 CREATE TYPE TREE_SHAPE AS STRUCT(
   root VARCHAR, "order" VARCHAR, level VARCHAR, parent VARCHAR, sibling_order VARCHAR,
-  type VARCHAR, id VARCHAR, classes VARCHAR, attrs VARCHAR, attrs_map VARCHAR,
-  size VARCHAR, children VARCHAR, next VARCHAR);
+  size VARCHAR, children VARCHAR, next VARCHAR,
+  semantic TREE_SEMANTIC);
 ```
 
-Every field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructor is the macro `tree_shape(level := 'depth', size := 'descendant_count', …)` with named parameters, which refuses an unknown name at bind. The full spec passed to create is `{shape: TREE_SHAPE, abstract: BOOLEAN, like: VARCHAR, source: VARCHAR, storage: VARCHAR, pseudo: STRUCT(name VARCHAR, body VARCHAR, prefix VARCHAR)[]}`.
+R and O fields sit at the top level; the S block is the nested `semantic` group and may be NULL. Every text field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructors are the macros `tree_shape(order := 'node_id', level := 'depth', semantic := tree_semantic(type := 'kind', …))` with named parameters, which refuse an unknown name at bind. The full spec passed to create is `{shape: TREE_SHAPE, abstract: BOOLEAN, like: VARCHAR, source: VARCHAR, storage: VARCHAR}`.
 
 ### 3.2 `TREE_SELECTOR`
 
@@ -83,15 +87,15 @@ Rule: every mutating operation is a pure compiler plus a thin executor. Compiler
 
 | family | functions | touches |
 |---|---|---|
-| `tree_ddl_*` | `tree_ddl_create(schema, name, spec)`, `tree_ddl_drop(schema, name)` | the catalog |
+| `tree_ddl_*` | `tree_ddl_create(schema, name, spec)`, `tree_ddl_alter(schema, name, semantic := TREE_SEMANTIC)` (adds or replaces the S group and recompiles the projection), `tree_ddl_drop(schema, name)` | the catalog |
 | `tree_*` data | `tree_insert(schema, name, source)`, `tree_replace(schema, name, source)`, `tree_delete(schema, name, root_predicate)`, `tree_check(schema, name)` | a tree's storage and `tree_state` |
-| `tree_*` read | `tree_project(schema, name)`, `tree_apply(shape, source)`, `tree_match(schema, name, selector, language := <default>)`, `tree_explain(schema, name, selector, language)` | nothing |
+| `tree_*` read | `tree_project(schema, name)`, `tree_apply(shape, source)`, `tree_match(schema, name, selector, language := <default>, semantic := NULL)` (a non-NULL `semantic` overlays an S group for this query only), `tree_explain(schema, name, selector, language)` | nothing |
 | `tree_*` traversal | `tree_children`, `tree_descendants`, `tree_ancestors`, `tree_next_sibling`, `tree_first_child`, each over a projection by `_pre`, `_level`, `_size`, `_parent` | nothing |
 | `tree_*` derivation | `tree_encode(source, parent_expr, sibling_order)`, `tree_derive_parent(source)` | nothing |
 | `tree_compile_*` | `tree_compile_projection`, `tree_compile_encoder`, `tree_compile_ingest`, `tree_compile_assertions`, `tree_compile_match` | nothing; return SQL text |
 | selectors | `tree_steps(steps)` (TREEQL functional constructor), `tree_parse_selector(text, language)`, `tree_selector_to_treeql(selector)` | nothing |
 
-Validation at `tree_ddl_create`, all bind-time, each naming the missing or offending slot: `LEVEL` or `PARENT` required; `PARENT` without `SIBLING_ORDER` records `profile = sibling_free`; abstract with a source, or concrete without one, refused; `ATTRS` names colliding with the canonical prefix refused; a pseudo-class bound both locally and via prefix refused (S-coherence); `ORDER` absent on a projection-mode tree with `preserve_insertion_order` off refused. ROOT-absent-but-multiple-trees is not knowable at create; it surfaces as a P13 failure at ingest with the hint to declare `ROOT`.
+Validation at `tree_ddl_create`, all bind-time, each naming the missing or offending slot: `LEVEL` or `PARENT` required; `PARENT` without `SIBLING_ORDER` records `profile = sibling_free`; abstract with a source, or concrete without one, refused; `ATTR` names colliding with the canonical prefix refused; a pseudo-class bound both locally and via prefix refused (S-coherence); `ORDER` absent on a projection-mode tree refused; `ORDER` absent on a materialized tree with `preserve_insertion_order` off refused. ROOT-absent-but-multiple-trees is not knowable at create; it surfaces as a P13 failure at ingest with the hint to declare `ROOT`.
 
 DML semantics: `tree_insert` appends whole partitions and refuses an existing ROOT value; `tree_replace` drops matching partitions, re-ingests, bumps epoch; `tree_delete` accepts predicates over ROOT columns only; a predicate on a non-ROOT column is ill-typed (P21).
 
@@ -102,7 +106,7 @@ DML semantics: `tree_insert` appends whole partitions and refuses an existing RO
 | column | from |
 |---|---|
 | `_root` | STRUCT of ROOT expressions, or a constant when ROOT is absent |
-| `_pre` | ORDER expression, or `row_number() OVER (PARTITION BY _root)`, or the encoder |
+| `_pre` | ORDER expression; or the encoder; or, for `order_source = frozen`, `row_number() OVER (PARTITION BY _root)` taken once at ingest |
 | `_level` | LEVEL expression, or the encoder |
 | `_parent` | PARENT expression when declared, else derived: nearest prior row at `_level − 1` within `_root` |
 | `_size` | SIZE expression when declared, else derived: distance to the next row at the same or higher level within `_root` |
@@ -110,9 +114,9 @@ DML semantics: `tree_insert` appends whole partitions and refuses an existing RO
 | `_next` | NEXT when declared, else `_pre + _size + 1` |
 | `_type` | TYPE expression, default `'node'` |
 | `_id`, `_classes` | ID and CLASSES expressions, NULL when undeclared |
-| `_attrs_map` | ATTRS MAP column, NULL when undeclared |
+| `_attr_map` | ATTR MAP expression, NULL when undeclared; access compiled by its type (MAP, JSON, VARIANT, STRUCT) |
 | `_pseudo` | `MAP(VARCHAR, BOOLEAN)` of every expression-bodied pseudo-class, evaluated per row |
-| attribute columns | the ATTRS select list, verbatim |
+| attribute columns | the ATTR select list, verbatim |
 
 The O columns are present whether declared or derived, so the compiler never branches on which; the conformance assertion proves the two equal (handover O law). Derived `_size` is quadratic in the worst case; that is acceptable for the reference implementation and is exactly the tradeoff the O block names. The C++ port replaces all derivations and the P13 check with one stack walk over `(_pre, _level)` (§10).
 
@@ -124,7 +128,7 @@ MATCH physically cannot see a column the projection did not emit; that is the me
 
 `tree_compile_match(schema, name, selector)` is a bottom-up fold over the `TREE_SELECTOR` rows, implemented as a `WITH RECURSIVE … USING KEY` CTE whose rows are `(node_id, sql_fragment)`. Each iteration compiles the nodes whose children are all compiled. Emission per kind:
 
-- clauses become predicates on the step's alias: `_type = v`, `_id = v`, `list_contains(_classes, v)`, `<attr> <op> <literal>` against the attribute column (refused at compile if the projection has no such attribute), `_pseudo[v]` (refused if undeclared and not `pseudo_unknown`), and `where` text inlined against the step alias;
+- clauses become predicates on the step's alias: `_type = v`, `_id = v`, `list_contains(_classes, v)`, `<attr> <op> <literal>` against the attribute column, else against `_attr_map` by its type (refused at compile if neither serves the name), and any S clause refused when the tree has no `SEMANTIC` group, `_pseudo[v]` (refused if undeclared and not `pseudo_unknown`), and `where` text inlined against the step alias;
 - a step chain becomes a join chain over `tree_project(schema, name)` with structural predicates: `desc` as `b._root = a._root AND b._pre BETWEEN a._pre + 1 AND a._pre + a._size`; `child` as `b._parent = a._pre`; `next` as `b._parent = a._parent AND b._pre = a._pre + a._size + 1`; `after` as `b._parent = a._parent AND b._pre > a._pre`. `next` and `after` are refused when `trees.profile = sibling_free`, naming `SIBLING_ORDER`;
 - `has` and `not` become `EXISTS` and `NOT EXISTS` subqueries whose inner chain is anchored at the enclosing step's alias;
 - the final query joins the subject step and every captured alias back to source rows on `(_root, _pre)`, emitting the subject row's columns, one STRUCT column per capture, and provenance columns `_match_tree`, `_match_language`, `_match_unknown_pseudos`.
@@ -141,7 +145,7 @@ The IR is the semantic anchor: a language that cannot lower a construct refuses 
 
 ### 6.3 Captures
 
-`AS y` in TREEQL and `@y` in CSS name a step. Matching is a join, so a capture is a joined alias: one output row per full-pattern embedding; `SELECT y.name` reads dotted through the STRUCT column. Captures inside `has` or `not` refuse at parse: a negated or existential context has no row to bind.
+`(TYPE 'x') AS y` in TREEQL and `@y` in CSS name a step. Matching is a join, so a capture is a joined relation alias with statement scope, exactly like a table alias in FROM: usable in `WHERE`, `GROUP BY`, and `SELECT` after the match, and not part of the output unless selected. `SELECT *` is the subject row's columns; `SELECT *, z` adds the captured row as a STRUCT column named `z`; `WHERE baz IN y.ipsum` reads through the alias. One output row per full-pattern embedding. In the functional form, where a table function has a single output relation, `tree_match` returns the subject columns followed by one STRUCT column per alias; the grammar restores statement-scope aliasing when it arrives. Captures inside `has` or `not` refuse at parse: a negated or existential context has no row to bind.
 
 ## 7. Testing
 
@@ -155,7 +159,7 @@ Suites by milestone:
 
 | milestone | tests | mutants planted |
 |---|---|---|
-| M0 | create, LIKE, SHAPE ONLY, ATTRS defaults and collisions, P13 per partition on ingest, DML granularity, introspection | MN14, MN15, MN17, MN18, MN21 |
+| M0 | create, LIKE, SHAPE ONLY, ATTR defaults and collisions, R-only trees and `tree_ddl_alter` adding the S group later, S-clause refusals on S-less trees, ORDER rules (declared, frozen, refused), P13 per partition on ingest, DML granularity, introspection | MN14, MN15, MN17, MN18, MN21 |
 | M1 | `level → parent → level` and `parent → (order, level) → parent` identities on every fixture; sibling-free refusals | MN1, MN2, MN6 |
 | M1½ | `tree_steps` semantics on `app` and `employees`; printer round trip; captures and multiplicity; step WHERE against projection only; NULL-definite semantics; unknown attr refuses | MN19 (re-scoped) |
 | M2 | CSS front-end; differential versus `ast_select_from` on the `sitting_duck_supported` subset (key sets equal by `EXCEPT` both ways); second differential (`SIZE` declared versus derived); P22 normal-form equality; P23 representation swaps; unknown pseudo counted; S-coherence | MN3, MN5, MN7, MN8, MN12, MN13, MN22, MN24, MN25 |
@@ -193,7 +197,7 @@ Matching itself is joins with range predicates and never was recursive.
 
 ## 11. Open decisions carried
 
-D-N3 refuse per query (adopted). D-N4 attachment interface in core, registry above. D-N5 tri-state frontier and load callback slot in core. D-N8 O3/O4 spellings provisional. D-N9 capture residue: alias/table-name collisions. D-N10 language registration API. D-N12 no first-step keyword (adopted). D-N13 `FOLLOWING` for `~` (candidate). D-N14 nested `HAS`/`NOT` step groups in TREEQL (adopted here; to be reflected in the proposal).
+D-N3 refuse per query (adopted). D-N4 attachment interface in core, registry above. D-N5 tri-state frontier and load callback slot in core. D-N8 O3/O4 spellings provisional. D-N9 capture residue: alias/table-name collisions. D-N10 language registration API. D-N12 no first-step keyword (adopted). D-N13 `FOLLOWING` for `~` (candidate). D-N14 nested `HAS`/`NOT` step groups in TREEQL (adopted here; to be reflected in the proposal). D-N15 clause operands as bare identifiers (`TYPE foo`) versus string literals (`TYPE 'foo'`); the proposal's examples use both. D-N16 the `ATTR` / `ATTRS` spelling; this document uses `ATTR` for the list, `ATTR MAP`, and `ATTR JSON`.
 
 ## 12. Verified during design
 
