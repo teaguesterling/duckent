@@ -10,7 +10,7 @@
 | substrate | SQL macros first, as the executable reference; C++ extension later, from the DuckDB extension template | semantics must stop moving before they are ported; macros run today on DuckDB 1.5.5 |
 | surface | functional API first; grammar lowers to it later | DuckDB 1.5.5 has no runtime grammar API; DuckDB main has a preview `GrammarExtension` API (PR 24919, merged 2026-09-04) that is not in any tagged release |
 | default selector language | `treeql` initially, flipped to `css` by setting before first public release | TREEQL needs no parser to start and mirrors the S block; CSS lands as a translation into tested semantics |
-| evaluation | one compiler: selector IR to SQL text, run via `query()` | one matcher (doctrine 1); handles TREEQL step `WHERE`; DuckDB plans the whole query |
+| evaluation | one compiler: selector IR to SQL text, executed by the test runner now and by a bound table function in the extension | one matcher (doctrine 1); handles TREEQL step `WHERE`; DuckDB plans the whole query |
 | tests | sqllogictest `.test` files from day one | identical files run under the Python `duckdb` package now and under the extension's `unittest` binary later |
 
 ## 2. Information schema
@@ -23,8 +23,8 @@ Every tree row is identified by `(database_name, schema_name, tree_name)`. Sourc
 
 | table | one row per | columns |
 |---|---|---|
-| `trees` | abstract or concrete tree | identity; `is_abstract`; `like_tree` (three-part name of the LIKE parent, nullable); `source_sql` (null when abstract); `basis` (`level` or `parent`); `profile` (`full` or `sibling_free`); `storage` (`materialized` or `projection`); `order_source` (`declared` or `frozen`); `description` |
-| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTR`, `ATTR_MAP`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTR` holds a whole select list). The S slots (`TYPE` through `ATTR_MAP`, plus `pseudo_classes`) together form the tree's `SEMANTIC` group, which may be absent |
+| `trees` | abstract or concrete tree | identity; `is_abstract`; `like_tree` (three-part name of the LIKE parent, nullable); `source_sql` (null when abstract); `basis` (`level` or `parent`); `profile` (`full` or `sibling_free`); `storage` (`materialized` or `projection`); `order_source` (`declared` or `frozen`); `has_semantic` (true iff a SEMANTIC group was declared); `description` |
+| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `KEY`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTR`, `ATTR_MAP`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTR` holds a whole select list). The S slots (`TYPE` through `ATTR_MAP`, plus `pseudo_classes`) together form the tree's `SEMANTIC` group, which may be absent |
 | `pseudo_classes` | one pseudo-class binding of one tree | identity; `name`; `kind` (`expression` or `selector`); `body`; `origin` (`local`, `prefix`, `shared`); `purity` (`pure`, `volatile`, `unknown`) |
 | `selector_languages` | one registered selector language | `language`; `parser` (function name: text to `TREE_SELECTOR`); `printer` (function name: `TREE_SELECTOR` to text, nullable); `bare_safe BOOLEAN` |
 | `attachments` | one W1 attachment | `child_tree`, `parent_tree` (three-part names); `join_sql`. Interface only, per D-N4 |
@@ -32,6 +32,7 @@ Every tree row is identified by `(database_name, schema_name, tree_name)`. Sourc
 
 Rules encoded by the schema:
 
+- **`KEY` names the row identity a `PARENT` column refers to.** It is required for parent-basis trees, where `PARENT`, `KEY`, `ROOT`, and `SIBLING_ORDER` must be plain column names so the encoder can qualify them. Level-basis trees with a `PARENT` override refer to `ORDER` values and need no `KEY`.
 - **`PARENT` is basis or override by derivation, not by flag.** If `LEVEL` is also declared, `PARENT` is the O1 override and `basis = level`; otherwise `basis = parent`. `SIZE`, `CHILDREN`, `NEXT` are O-only, so declaring them is declaring an override. No `optimize` column exists.
 - **Storage is explicit.** A tree created with a source and `storage = materialized` owns a canonical table `tree_catalog.t_<schema>_<name>`; forest DML applies. `storage = projection` is a macro over the live source; no storage, no DML.
 - **Trees are ordered.** Pre-order traversal is the ground everything else stands on, so every tree has `_pre`. A level-basis tree declares `ORDER`, or, as the undesirable but supported case, is materialized from a source whose insertion order is taken as pre-order and frozen into `_pre` at ingest (`order_source = frozen`; requires `preserve_insertion_order` on at ingest, refused otherwise). A projection-mode tree over a live source must declare `ORDER`; without it, create refuses and names the slot. Parent-basis sources get `_pre` from the encoder, which is always `declared`.
@@ -59,12 +60,13 @@ CREATE TYPE TREE_SEMANTIC AS STRUCT(
   type VARCHAR, id VARCHAR, classes VARCHAR, attr VARCHAR, attr_map VARCHAR,
   pseudo STRUCT(name VARCHAR, body VARCHAR, prefix VARCHAR)[]);
 CREATE TYPE TREE_SHAPE AS STRUCT(
-  root VARCHAR, "order" VARCHAR, level VARCHAR, parent VARCHAR, sibling_order VARCHAR,
+  root VARCHAR, "order" VARCHAR, key VARCHAR, level VARCHAR, parent VARCHAR, sibling_order VARCHAR,
   size VARCHAR, children VARCHAR, next VARCHAR,
   semantic TREE_SEMANTIC);
+CREATE TYPE TREE_SPEC AS STRUCT(shape TREE_SHAPE, abstract BOOLEAN, "like" VARCHAR, source VARCHAR, storage VARCHAR);
 ```
 
-R and O fields sit at the top level; the S block is the nested `semantic` group and may be NULL. Every text field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructors are the macros `tree_shape(order := 'node_id', level := 'depth', semantic := tree_semantic(type := 'kind', …))` with named parameters, which refuse an unknown name at bind. The full spec passed to create is `{shape: TREE_SHAPE, abstract: BOOLEAN, like: VARCHAR, source: VARCHAR, storage: VARCHAR}`.
+R and O fields sit at the top level; the S block is the nested `semantic` group and may be NULL. Every text field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructors are the macros `tree_shape(order := 'node_id', level := 'depth', semantic := tree_semantic(type := 'kind', …))` with named parameters, which refuse an unknown name at bind. The full spec passed to create is a `TREE_SPEC`, built with `tree_spec(shape, abstract := false, like := NULL, source := NULL, storage := 'materialized')`; `source` is FROM-able SQL text such as `read_parquet('test/data/app.parquet')` or a table name.
 
 ### 3.2 `TREE_SELECTOR`
 
@@ -83,7 +85,7 @@ DuckDB structs cannot recurse; the flattened list is the one representation that
 
 ## 4. Operations
 
-Rule: every mutating operation is a pure compiler plus a thin executor. Compilers are macros returning SQL text; executors run the text and record it in `tree_catalog.compiled`. Macros cannot execute statements, so executors are the one place C++ is required; until then the test runner executes the compiled text.
+Rule: every mutating operation is a pure compiler plus a thin executor. Compilers are macros returning SQL text; executors run the text and record it in `tree_catalog.compiled`. Macros cannot execute statements, so executors are the one place C++ is required; until then the test runner executes the compiled text. The same applies to `tree_match`: `query()` refuses text produced by a macro that contains any subquery (verified on 1.5.5), and the match compiler must read the catalog, so in the macro phase the runner rewrites `tree_match(...)` to the compiled query and `CALL tree_ddl_*(...)` and the DML verbs to their compiled statement lists. Tests are written against the final call shapes and do not change when the C++ executors arrive.
 
 | family | functions | touches |
 |---|---|---|
@@ -105,8 +107,8 @@ DML semantics: `tree_insert` appends whole partitions and refuses an existing RO
 
 | column | from |
 |---|---|
-| `_root` | STRUCT of ROOT expressions, or a constant when ROOT is absent |
-| `_pre` | ORDER expression; or the encoder; or, for `order_source = frozen`, `row_number() OVER (PARTITION BY _root)` taken once at ingest |
+| `_root` | STRUCT of the ROOT expressions, fields named after the columns when they are identifiers and `r<i>` otherwise; the constant `{r0: 0}` when ROOT is absent |
+| `_pre` | ORDER expression; or the encoder; or, for `order_source = frozen`, `row_number() OVER (PARTITION BY _root)` taken once at ingest. Cast to BIGINT, as is `_level`, since producers emit unsigned types and the derivations subtract |
 | `_level` | LEVEL expression, or the encoder |
 | `_parent` | PARENT expression when declared, else derived: nearest prior row at `_level − 1` within `_root` |
 | `_size` | SIZE expression when declared, else derived: distance to the next row at the same or higher level within `_root` |
@@ -133,7 +135,7 @@ MATCH physically cannot see a column the projection did not emit; that is the me
 - `has` and `not` become `EXISTS` and `NOT EXISTS` subqueries whose inner chain is anchored at the enclosing step's alias;
 - the final query joins the subject step and every captured alias back to source rows on `(_root, _pre)`, emitting the subject row's columns, one STRUCT column per capture, and provenance columns `_match_tree`, `_match_language`, `_match_unknown_pseudos`.
 
-`tree_match` is `FROM query(tree_compile_match(...))`. `query()` accepts macro-produced text when the macro's arguments are literals (verified on 1.5.5); column-valued selectors are out of scope for v0.
+`tree_match` is the compiled query executed: by the runner in the macro phase, by a bound table function in the extension. Column-valued selectors are out of scope for v0.
 
 Semantics inherited from sitting_duck and adopted into the contract: attribute filters and pseudo-classes are NULL-definite, so a comparison over NULL matches nothing and its `NOT` matches the node. Unknown attribute names refuse; unknown pseudo-classes are preserved and counted.
 
