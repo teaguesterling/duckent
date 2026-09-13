@@ -1,0 +1,62 @@
+# name: test/sql/01_types.test
+# description: TREE_SHAPE family and constructors
+
+query I
+SELECT (tree_shape(level := 'depth')).level;
+----
+depth
+
+query I
+SELECT (tree_shape(level := 'depth')).root IS NULL;
+----
+true
+
+query I
+SELECT (tree_shape(level := 'depth', semantic := tree_semantic(type := 'kind'))).semantic.type;
+----
+kind
+
+query I
+SELECT (tree_semantic(pseudo := [{name: 'leaf', body: 'descendant_count = 0'}])).pseudo[1].prefix IS NULL;
+----
+true
+
+query I
+SELECT (tree_spec(tree_shape(level := 'depth'))).storage;
+----
+materialized
+
+query I
+SELECT (tree_spec(tree_shape(level := 'depth'), "like" := 'ast', abstract := true))."like";
+----
+ast
+
+statement error
+SELECT tree_shape(levl := 'depth');
+----
+levl
+
+query I
+SELECT tree_sql_lit('it''s');
+----
+'it''s'
+
+query I
+SELECT tree_sql_ident('a"b');
+----
+"a""b"
+
+query I
+SELECT tree_sql_list(' a , b ');
+----
+[a, b]
+
+query II
+SELECT tree_sql_is_ident('file_path'), tree_sql_is_ident('lower(x)');
+----
+true	false
+
+query I
+SELECT typeof([{node_id: 0, parent_id: NULL, kind: 'selector'}]::TREE_SELECTOR) LIKE 'STRUCT(node_id INTEGER%';
+----
+true
