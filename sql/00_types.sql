@@ -27,5 +27,5 @@ CREATE OR REPLACE MACRO tree_spec(shape, abstract := false, "like" := NULL, sour
 -- string helpers used by every compiler
 CREATE OR REPLACE MACRO tree_sql_lit(s) AS '''' || replace(s, '''', '''''') || '''';
 CREATE OR REPLACE MACRO tree_sql_ident(s) AS '"' || replace(s, '"', '""') || '"';
-CREATE OR REPLACE MACRO tree_sql_list(csv) AS '[' || (SELECT string_agg(trim(item), ', ') FROM (SELECT unnest(string_split(csv, ',')) as item)) || ']';
+CREATE OR REPLACE MACRO tree_sql_list(csv) AS list_transform(string_split(csv, ','), lambda x: trim(x));
 CREATE OR REPLACE MACRO tree_sql_is_ident(s) AS regexp_matches(s, '^[A-Za-z_][A-Za-z0-9_]*$');

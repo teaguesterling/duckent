@@ -123,6 +123,10 @@ class Session:
 def fmt(v):
     if v is None: return "NULL"
     if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, (list, tuple)):
+        return '[' + ', '.join(fmt(x) for x in v) + ']'
+    if isinstance(v, dict):
+        return '{' + ', '.join(f"'{k}': {fmt(val)}" for k, val in v.items()) + '}'
     if isinstance(v, float):
         return str(int(v)) if v == int(v) else repr(v)
     if v == "": return "(empty)"
