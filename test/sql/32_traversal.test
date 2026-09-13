@@ -1,0 +1,30 @@
+# name: test/sql/32_traversal.test
+# description: traversal building blocks by pre, size, level, parent
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_children('main', 'app', '{''file_path'': app.py}', 6);
+----
+[7, 8, 9, 13, 14]
+
+query I
+SELECT count(*) FROM tree_descendants('main', 'app', '{''file_path'': app.py}', 6);
+----
+23
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_ancestors('main', 'app', '{''file_path'': app.py}', 18);
+----
+[0, 6, 14, 15, 16]
+
+query I
+SELECT _pre FROM tree_next_sibling('main', 'app', '{''file_path'': app.py}', 6);
+----
+30
+
+query I
+SELECT _pre FROM tree_first_child('main', 'app', '{''file_path'': app.py}', 6);
+----
+7
