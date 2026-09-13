@@ -1,0 +1,27 @@
+# name: test/sql/03_fixtures.test
+# description: pinned fixtures load with the expected shape
+
+query II
+SELECT count(*), max(node_id) FROM 'test/data/app.parquet';
+----
+54	53
+
+query I
+SELECT count(DISTINCT file_path) FROM 'test/data/scripts.parquet';
+----
+15
+
+query I
+SELECT count(*) FROM 'test/data/readme_blocks.parquet' WHERE kind = 'block' AND element_type = 'heading' AND content = 'duckent';
+----
+1
+
+query I
+SELECT count(*) FROM 'test/data/employees.csv';
+----
+7
+
+query I
+SELECT count(*) FROM 'test/data/categories.csv' WHERE parent_id IS NULL;
+----
+1

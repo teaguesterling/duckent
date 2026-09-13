@@ -1,0 +1,8 @@
+account_id,name,parent_id
+1,root,
+2,opex,1
+3,salaries,2
+4,travel,2
+5,capex,1
+6,servers,5
+7,airfare,4
