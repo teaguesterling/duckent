@@ -1,0 +1,44 @@
+# name: test/sql/30_selector.test
+# description: tree_steps builds the IR; the printer renders canonical TREEQL
+
+query I
+SELECT len(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]));
+----
+5
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]), recursive := true));
+----
+0	NULL	selector	NULL
+1	0	step	NULL
+2	1	type	function_definition
+3	0	step	child
+4	3	type	block
+
+query III
+SELECT value, op, arg FROM (SELECT unnest(tree_steps([{attr: 'start_line > 100'}]), recursive := true)) WHERE kind = 'attr';
+----
+start_line	>	100
+
+query I
+SELECT tree_selector_to_treeql(tree_steps([
+  {type: 'node'},
+  {comb: 'child', id: 'parse_ast'},
+  {comb: 'desc', class: 'fn'},
+  {comb: 'next', attr: 'start_line > 100'},
+  {comb: 'child', pseudo: 'leaf', "where": 'child_count > 2', "as": 'y'},
+  {comb: 'after'}]));
+----
+(TYPE 'node')
+CHILD (ID 'parse_ast')
+DESCENDANT (CLASS 'fn')
+SIBLING (ATTR start_line > 100)
+CHILD (PSEUDO 'leaf', WHERE child_count > 2) AS y
+FOLLOWING
+
+# a step with no combinator after the first defaults to DESCENDANT
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}]));
+----
+(TYPE 'a')
+DESCENDANT (TYPE 'b')

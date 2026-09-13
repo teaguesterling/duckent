@@ -181,7 +181,9 @@ def run_file(path, mutant=None):
                 cur = sess.execute(body)
                 rows = [[fmt(v) for v in r] for r in cur.fetchall()]
                 if "rowsort" in words: rows.sort()
-                got = ["\t".join(r) for r in rows]
+                got = []
+                for r in rows:
+                    got.extend("\t".join(r).split("\n"))
                 if got != expected:
                     failures.append((lineno, f"result mismatch\n    got:  {got}\n    want: {expected}", body))
             else:
