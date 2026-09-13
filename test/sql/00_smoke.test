@@ -1,0 +1,57 @@
+# name: test/sql/00_smoke.test
+# description: runner directives and executor emulation
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(5);
+
+query I
+SELECT count(*) FROM t;
+----
+5
+
+query II rowsort
+SELECT i, i * 2 FROM t WHERE i > 2;
+----
+3	6
+4	8
+
+statement error
+SELECT * FROM missing_table;
+----
+does not exist
+
+# executor emulation: a compile macro that returns statements
+statement ok
+CREATE MACRO tree_compile_check(sch, nm) AS ['BEGIN TRANSACTION', 'CREATE TABLE ' || nm || '(x INT)', 'INSERT INTO ' || nm || ' VALUES (1)', 'COMMIT'];
+
+statement ok
+CALL tree_check('main', 'emulated');
+
+query I
+SELECT x FROM emulated;
+----
+1
+
+# a failing compiled statement rolls back the transaction
+statement ok
+CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS ['BEGIN TRANSACTION', 'CREATE TABLE ' || nm || '(x INT)', 'SELECT error(''boom'')', 'COMMIT'];
+
+statement error
+CALL tree_check('main', 'rolled_back');
+----
+boom
+
+statement error
+SELECT * FROM rolled_back;
+----
+does not exist
+
+# tree_match rewriting
+statement ok
+CREATE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS 'SELECT i FROM t WHERE i >= ' || sel;
+
+query I rowsort
+FROM tree_match('main', 't', 3) SELECT i;
+----
+3
+4
