@@ -44,6 +44,19 @@ CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
   CASE
     WHEN regexp_matches(COALESCE(attr_text, ''), '(?i)\bAS\s+"?_')
       THEN error(verb || ': ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
+    -- A NULL name or body would compile the pseudo map, and the pseudo_classes INSERT,
+    -- to NULL; both would then be dropped from the statement list instead of refusing.
+    WHEN len(list_filter(COALESCE((sem).pseudo, []), lambda x: (x).name IS NULL OR (x).body IS NULL)) > 0
+      THEN error(verb || ': every PSEUDO needs a name and a body')
     WHEN len(list_distinct(list_transform(COALESCE((sem).pseudo, []), lambda x: (x).name))) <> len(COALESCE((sem).pseudo, []))
       THEN error(verb || ': S-coherence: a pseudo-class is bound twice')
     ELSE true END;
+
+-- Structural companion to the ATTR-alias regex above: the regex only sees an explicit
+-- "AS _x", so an implicit or quoted alias still reaches the projection. DESCRIBE the
+-- compiled relation instead -- DuckDB renames the displaced duplicate of a canonical
+-- column to _size_1 (etc.), so its presence is the proof that an attribute shadowed one.
+CREATE OR REPLACE MACRO tree_sql_shadow_check(rel_sql, verb) AS
+  'SELECT CASE WHEN count(*) > 0 THEN error(''' || verb || ': attribute column shadows a canonical column: '' || string_agg(DISTINCT regexp_replace(column_name, ''_[0-9]+$'', ''''), '', '')) END'
+  || ' FROM (DESCRIBE ' || rel_sql || ')'
+  || ' WHERE regexp_matches(column_name, ''^_(root|pre|level|parent|size|children|next|type|id|classes|attr_map|pseudo)_[0-9]+$'')';

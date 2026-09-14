@@ -176,6 +176,64 @@ CALL tree_ddl_create('main', NULL, tree_spec(tree_shape("order" := 'node_id', le
 ----
 schema and name are required
 
+# an implicit (AS-less) attribute alias cannot shadow a canonical column either: the regex
+# refusal only sees "AS _x", so the compiled projection is described and the displaced
+# duplicate (_size_1) is the proof
+statement error
+CALL tree_ddl_create('main', 'bad10', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(attr := 'CAST(depth AS BIGINT) _size, name')), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+shadows a canonical column: _size
+
+# NULL abstract refuses: it is interpolated into the trees INSERT, which would compile to NULL
+statement error
+CALL tree_ddl_create('main', 'bad14', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')', abstract := NULL));
+----
+abstract must be true or false
+
+# a PSEUDO with no body refuses: the pseudo map and the pseudo_classes INSERT both go NULL
+statement error
+CALL tree_ddl_create('main', 'bad15', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(pseudo := [{name: 'p', body: NULL}])), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+every PSEUDO needs a name and a body
+
+statement error
+CALL tree_ddl_create('main', 'bad16', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(pseudo := [{name: NULL, body: 'true'}])), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+every PSEUDO needs a name and a body
+
+# none of the three left a partial catalog behind
+query IIII
+SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
+       (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
+       (SELECT count(*) FROM tree_catalog.pseudo_classes WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
+       (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('proj_main_bad10', 'proj_main_bad14', 'proj_main_bad15', 'proj_main_bad16'));
+----
+0	0	0	0
+
+# altering a tree that does not exist refuses instead of compiling to NULL
+statement error
+CALL tree_ddl_alter('main', 'nope', tree_semantic(type := 'x'));
+----
+not found
+
+# a LIKE child inherits the parent's SEMANTIC group whatever slot the parent declared:
+# has_semantic follows the parent's own has_semantic, not just its TYPE
+statement ok
+CALL tree_ddl_create('main', 'id_shape', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', semantic := tree_semantic(id := 'name')), abstract := true));
+
+statement ok
+CALL tree_ddl_create('main', 'kid', tree_spec(tree_shape(), "like" := 'id_shape', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'kid';
+----
+true
+
+query I
+SELECT count(*) FROM tree_match('main', 'kid', tree_steps([{id: 'greet(name).upper'}]));
+----
+1
+
 # parent basis, sibling-free profile recorded
 statement ok
 CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
