@@ -1,0 +1,66 @@
+# name: test/sql/13_alter.test
+# description: tree_ddl_alter changes S only, never data: it refuses when the source has drifted from the stored partitions
+
+statement ok
+CREATE TABLE src AS SELECT * FROM 'test/data/app.parquet';
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src'));
+
+# with the source unchanged, alter recompiles the S group as before
+statement ok
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type'));
+
+query II
+SELECT has_semantic, (SELECT count(*) FROM tree_project('main', 'app')) FROM tree_catalog_trees() WHERE tree_name = 'app';
+----
+true	54
+
+# a root that appears in the source but not in the stored partitions is drift: alter rebuilds
+# from source_sql alone, so it would silently ingest the new partition as a side effect
+statement ok
+INSERT INTO src SELECT * REPLACE ('other.py' AS file_path) FROM 'test/data/app.parquet' WHERE node_id < 3;
+
+statement error
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', id := 'name'));
+----
+drifted
+
+statement ok
+DELETE FROM src WHERE file_path = 'other.py';
+
+# rows removed from a stored root are drift too: the row counts no longer agree
+statement ok
+DELETE FROM src WHERE node_id > 10;
+
+statement error
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', id := 'name'));
+----
+drifted
+
+# both refusals left the tree exactly as the first alter set it
+query III
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'TYPE'),
+       (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'ID'),
+       (SELECT count(*) FROM tree_project('main', 'app'));
+----
+type	0	54
+
+# with the source restored, alter is allowed again
+statement ok
+INSERT INTO src SELECT * FROM 'test/data/app.parquet' WHERE node_id > 10;
+
+statement ok
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', id := 'name'));
+
+query II
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'ID'),
+       (SELECT count(*) FROM tree_project('main', 'app'));
+----
+name	54
+
+# alter emits the same shadow check create does, so the back door stays shut
+statement error
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', attr := 'CAST(depth AS BIGINT) _size, name'));
+----
+shadows a canonical column: _size

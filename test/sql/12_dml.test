@@ -1,0 +1,207 @@
+# name: test/sql/12_dml.test
+# description: tree-granular DML by ROOT, P13 on ingest, check
+
+statement ok
+CREATE TABLE src AS SELECT * FROM 'test/data/scripts.parquet';
+
+statement ok
+CREATE TABLE first_file AS SELECT * FROM src WHERE file_path = (SELECT min(file_path) FROM src);
+
+statement ok
+CREATE TABLE other_files AS SELECT * FROM src WHERE file_path <> (SELECT min(file_path) FROM src);
+
+statement ok
+CALL tree_ddl_create('main', 'scripts', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'first_file'));
+
+query I
+SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts';
+----
+1
+
+# append trees
+statement ok
+CALL tree_insert('main', 'scripts', 'other_files');
+
+query II
+SELECT (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src);
+----
+true	true
+
+# alter refuses while partitions ingested after create are present (C1): the projection is
+# rebuilt from source_sql alone, which would silently drop everything tree_insert added
+statement error
+CALL tree_ddl_alter('main', 'scripts', tree_semantic(type := 'type'));
+----
+ingested after create
+
+# the refused alter left the tree untouched: rows, partitions and the S group as before
+query III
+SELECT (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'scripts');
+----
+true	true	false
+
+# re-inserting an existing ROOT is refused
+statement error
+CALL tree_insert('main', 'scripts', 'first_file');
+----
+already present
+
+# replace re-derives one tree and bumps its epoch
+statement ok
+CALL tree_replace('main', 'scripts', 'first_file');
+
+query I
+SELECT epoch FROM tree_state.partitions WHERE tree_name = 'scripts' AND root_key = (SELECT {file_path: min(file_path)}::VARCHAR FROM src);
+----
+2
+
+# delete by ROOT
+statement ok
+CALL tree_delete('main', 'scripts', 'file_path = (SELECT min(file_path) FROM src)');
+
+query I
+SELECT count(*) FROM tree_project('main', 'scripts') WHERE file_path = (SELECT min(file_path) FROM src);
+----
+0
+
+# delete by a non-ROOT column is ill-typed (P21 / MN17)
+statement error
+CALL tree_delete('main', 'scripts', 'node_id = 3');
+----
+node_id
+
+# P13 on ingest: a partition that descends two levels at once is rejected with the ROOT hint absent (ROOT declared)
+statement ok
+CREATE TABLE bad_levels(file_path VARCHAR, node_id INT, depth INT, descendant_count INT);
+
+statement ok
+INSERT INTO bad_levels VALUES ('x.py', 0, 0, 2), ('x.py', 1, 2, 0), ('x.py', 2, 1, 0);
+
+statement error
+CALL tree_insert('main', 'scripts', 'bad_levels');
+----
+P13 violated
+
+# P13 with no ROOT declared names the hint
+statement ok
+CREATE TABLE two_trees(node_id INT, depth INT);
+
+statement ok
+INSERT INTO two_trees VALUES (0, 0), (1, 1), (0, 0), (1, 1), (2, 2), (5, 5);
+
+statement error
+CALL tree_ddl_create('main', 'unrooted', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'two_trees'));
+----
+declare ROOT
+
+# the failed create left nothing behind
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'unrooted';
+----
+0
+
+# check records a P13 assertion
+statement ok
+CALL tree_check('main', 'scripts');
+
+query II
+SELECT artifact, status FROM tree_catalog_assertions() WHERE tree_name = 'scripts';
+----
+assert_p13	ok
+
+# a projection-mode tree refuses DML, and tree_check says assertions rather than DML (M13)
+statement ok
+CALL tree_ddl_create('main', 'live', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src', storage := 'projection'));
+
+statement error
+CALL tree_check('main', 'live');
+----
+is projection-mode; assertions need storage := materialized
+
+statement error
+CALL tree_insert('main', 'live', 'first_file');
+----
+is projection-mode; DML needs storage := materialized
+
+# a quote in the tree name is escaped where it lands inside a generated error literal (M9):
+# create compiles the P13 check, tree_insert compiles the already-present message
+statement ok
+CALL tree_ddl_create('main', 'it''s', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'first_file'));
+
+statement error
+CALL tree_insert('main', 'it''s', 'first_file');
+----
+already present
+
+statement error
+CALL tree_insert('main', 'it''s', 'bad_levels');
+----
+P13 violated in tree main.it's
+
+# DML on a SHAPE ONLY tree refuses in duckent's own words, not with a raw catalog error
+statement ok
+CALL tree_ddl_create('main', 'shape_only', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), abstract := true));
+
+statement error
+CALL tree_insert('main', 'shape_only', 'first_file');
+----
+is SHAPE ONLY (abstract); it has no storage
+
+statement error
+CALL tree_delete('main', 'shape_only', 'file_path = ''x''');
+----
+is SHAPE ONLY (abstract); it has no storage
+
+# the insert is BY NAME: a source that lists the same columns in another order must not
+# misfile them into the stored table positionally
+statement ok
+CREATE TABLE reordered AS SELECT node_id, name, semantic_type, flags, type, qualified_name, signature_type,
+  parameters, modifiers, annotations, 'reordered.py' AS file_path, language, start_line, end_line,
+  parent_id, depth, sibling_index, children_count, descendant_count, scope, peek FROM first_file;
+
+statement ok
+CALL tree_insert('main', 'scripts', 'reordered');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE p.type IS DISTINCT FROM f.type OR p.name IS DISTINCT FROM f.name)
+FROM tree_project('main', 'scripts') p JOIN first_file f USING (node_id)
+WHERE p.file_path = 'reordered.py';
+----
+857	0
+
+# a source column that itself collides with a canonical column is refused at ingest, the same
+# way create refuses a shadowing ATTR alias
+statement ok
+CREATE TABLE shadowed AS SELECT * REPLACE ('shadowed.py' AS file_path), 1 AS _size FROM first_file;
+
+statement error
+CALL tree_insert('main', 'scripts', 'shadowed');
+----
+shadows a canonical column: _size
+
+# frozen order (no ORDER declared) needs preserve_insertion_order on at ingest, exactly as
+# create does: the scan sequence _pre is taken from is not the source's order otherwise (T6)
+statement ok
+CALL tree_ddl_create('main', 'frozen', tree_spec(tree_shape(root := 'file_path', level := 'depth'), source := 'first_file'));
+
+statement ok
+SET preserve_insertion_order = false;
+
+statement error
+CALL tree_insert('main', 'frozen', 'other_files');
+----
+ORDER is required because preserve_insertion_order is off
+
+statement ok
+SET preserve_insertion_order = true;
+
+statement ok
+CALL tree_insert('main', 'frozen', 'other_files');
+
+query I
+SELECT (SELECT count(*) FROM tree_project('main', 'frozen')) = (SELECT count(*) FROM src);
+----
+true

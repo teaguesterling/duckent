@@ -4,7 +4,7 @@ Tree semantics for ordered relations: the contract every duck sits on.
 
 duckent is a (planned) DuckDB extension that implements **tree semantics over ordered relations**: the layer *below* every parser. It defines what makes a set of rows a tree, what a CSS-style selector means over those rows, and how a `MATCH` compiles to ordinary SQL. Parsers such as [sitting_duck](https://github.com/teaguesterling/sitting_duck) (ASTs) and [duck_block_utils](https://github.com/teaguesterling/duckdb_duck_block_utils) (documents), and every adjacency list already in your warehouse (org charts, category trees, BOMs, file hierarchies), become *vocabularies over one contract*.
 
-> **Status: design stage.** This repository currently holds the design documents. No extension code has landed yet. The build plan, the settled DDL, and a public lesson are in [`docs/`](docs/).
+> **Status: macro prototype.** `sql/` holds a macro-only reference implementation of M0, M1, and M1½: the catalog, the projection compiler, both basis derivations, forest DML with P13 on ingest, and TREEQL matching through `tree_steps`. It runs on DuckDB 1.5.5 with no extension dependency. `test/sql/` holds the sqllogictest suites and `test/mutants/` the planted mutants; both carry over unchanged to the C++ extension. The design is in [`docs/superpowers/specs/2026-09-13-duckent-core-design.md`](docs/superpowers/specs/2026-09-13-duckent-core-design.md).
 
 The name: Ents speak Tree, and Treebeard's policy of never saying anything unless it is worth taking a long time to say is bind-time checking's motto.
 
@@ -91,13 +91,34 @@ Four blocks, taught in dependency order (R, S, O, W). Rearranged, the initials s
 
 Twenty-one planted mutants are listed in the handover document. All must die before a milestone closes.
 
+## Running the prototype
+
+```bash
+pip install duckdb==1.5.5 pyyaml
+python3 test/run.py test/sql          # the suites
+python3 test/run_mutants.py           # every planted mutant must die
+python3 test/gen_fixtures.py          # only to regenerate fixtures; needs sitting_duck and markdown
+```
+
+Quick tour in a DuckDB session after loading `sql/*.sql` in order (the runner does this for you):
+
+```sql
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'f'}, {comb: 'child', type: 'block'}])) SELECT f.name;
+```
+
+In the macro phase `CALL tree_ddl_*`, the DML verbs, and `tree_match` are executed by the test runner, which compiles them with the `tree_compile_*` macros; in a bare session call the compilers yourself and run the returned SQL.
+
 ## Documents
 
 | File | What it is |
 |---|---|
 | [`docs/11-duckent-handover-v21.md`](docs/11-duckent-handover-v21.md) | The build brief. Identity, doctrine, the normative contract, API surface, milestones, planted mutants, open decisions. Usable verbatim as an engineer brief or a Claude Code session prompt. |
 | [`docs/14-shape-syntax-options-v13.md`](docs/14-shape-syntax-options-v13.md) | The settled DDL and DML family, with the design-space enumeration, verdicts, and the experiment log showing every ingredient verified on DuckDB 1.x. |
-| [`docs/12-tree-contract-lesson-v16.html`](docs/12-tree-contract-lesson-v16.html) | The public teaching layer: a hands-on lesson from `grep` to `CREATE TREE`. Self-contained HTML. Published at <https://teaguesterling.github.io/pages/static/tree-contract-lesson.html>. |
+| [`docs/12-tree-contract-lesson-v17.html`](docs/12-tree-contract-lesson-v17.html) | The public teaching layer: a hands-on lesson from `grep` to `CREATE TREE`. Self-contained HTML. Published at <https://teaguesterling.github.io/pages/static/tree-contract-lesson.html>. |
 
 The handover names other companion documents (the assertion plan, the trees-to-rows paper, the sitting_duck verification pass) that are not yet in this repository.
 

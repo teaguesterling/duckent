@@ -1,0 +1,65 @@
+# name: test/sql/30_selector.test
+# description: tree_steps builds the IR; the printer renders canonical TREEQL
+
+query I
+SELECT len(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]));
+----
+5
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]), recursive := true));
+----
+0	NULL	selector	NULL
+1	0	step	NULL
+2	1	type	function_definition
+3	0	step	child
+4	3	type	block
+
+query III
+SELECT value, op, arg FROM (SELECT unnest(tree_steps([{attr: 'start_line > 100'}]), recursive := true)) WHERE kind = 'attr';
+----
+start_line	>	100
+
+# the printer emits one line per step; the newlines are folded to " | " so the expected value
+# stays one record line (the runner compares one line per row, like DuckDB's own)
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([
+  {type: 'node'},
+  {comb: 'child', id: 'parse_ast'},
+  {comb: 'desc', class: 'fn'},
+  {comb: 'next', attr: 'start_line > 100'},
+  {comb: 'child', pseudo: 'leaf', "where": 'child_count > 2', "as": 'y'},
+  {comb: 'after'}])), chr(10), ' | ');
+----
+(TYPE 'node') | CHILD (ID 'parse_ast') | DESCENDANT (CLASS 'fn') | SIBLING (ATTR start_line > 100) | CHILD (PSEUDO 'leaf', WHERE child_count > 2) AS y | FOLLOWING
+
+# an unknown step field refuses, naming it: the cast to the fixed step shape drops it silently
+statement error
+SELECT tree_steps([{type: 'x', typo: 'y'}]);
+----
+unknown step field typo
+
+# an ATTR clause the operator regex cannot parse refuses instead of yielding empty name/op/arg
+statement error
+SELECT tree_steps([{attr: 'start_line IN (1,2)'}]);
+----
+cannot parse ATTR clause
+
+# s<N> is the generated alias of step N, so a user alias of that shape is refused rather
+# than silently capturing (or being captured by) another step's row
+statement error
+SELECT tree_steps([{type: 'x', "as": 's3'}]);
+----
+alias s3 is reserved for generated step aliases
+
+# a name that merely starts with s is fine
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'x', "as": 'src'}])), chr(10), ' | ');
+----
+(TYPE 'x') AS src
+
+# a step with no combinator after the first defaults to DESCENDANT
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}])), chr(10), ' | ');
+----
+(TYPE 'a') | DESCENDANT (TYPE 'b')

@@ -1,0 +1,81 @@
+# name: test/sql/20_derivations.test
+# description: P17 round trips are identities; sibling-free profile refuses sibling combinators at create time metadata
+
+# level -> parent -> level: deriving parent from level, then level from the derived parent chain, returns the original level
+query I
+WITH d AS (FROM tree_derive_parent('read_parquet(''test/data/app.parquet'')', 'file_path', 'node_id', 'depth')),
+lvl AS (
+  WITH RECURSIVE up USING KEY (_pre) AS (
+    SELECT _pre, 0 AS l FROM d WHERE _parent IS NULL
+    UNION ALL
+    SELECT d._pre, up.l + 1 FROM d JOIN up ON d._parent = up._pre)
+  SELECT * FROM up)
+SELECT count(*) FILTER (WHERE d._level <> lvl.l) FROM d JOIN lvl USING (_pre);
+----
+0
+
+# parent -> (order, level) -> parent: the encoder's pre-order, re-derived to parent via nearest prior row, matches the adjacency list
+query I
+WITH e AS (FROM tree_encode('read_csv(''test/data/employees.csv'')', 'email', 'manager_email', 'hire_date')),
+back AS (SELECT a.email, b.email AS parent_email FROM e a ASOF LEFT JOIN e b ON a._root = b._root AND b._level = a._level - 1 AND b._pre < a._pre)
+SELECT count(*) FILTER (WHERE back.parent_email IS DISTINCT FROM e.manager_email) FROM e JOIN back USING (email);
+----
+0
+
+# a two-column sibling key: children are ordered by hire_date, then email, then the key
+query I
+WITH e AS (FROM tree_encode('read_csv(''test/data/employees.csv'')', 'email', 'manager_email', 'hire_date, email'))
+SELECT list(email ORDER BY _pre) FROM e;
+----
+[ada@co, cy@co, fay@co, gus@co, bo@co, ed@co, di@co]
+
+# and every one of its columns is qualified to the source: a bare second column binds to the
+# walk relation instead when the source shares a name with it (_root, _level, __key, __path)
+statement ok
+CREATE TABLE emp_lvl AS SELECT email, manager_email, hire_date, length(email) AS _level FROM read_csv('test/data/employees.csv');
+
+query I
+WITH e AS (FROM tree_encode('emp_lvl', 'email', 'manager_email', 'hire_date, _level'))
+SELECT list(email ORDER BY _pre) FROM e;
+----
+[ada@co, cy@co, fay@co, gus@co, bo@co, ed@co, di@co]
+
+# the encoder is deterministic without a sibling key (falls back to key order) and still valid
+query II
+WITH e AS (FROM tree_encode('read_csv(''test/data/categories.csv'')', 'cat_id', 'parent_id', NULL))
+SELECT list(_pre ORDER BY cat_id), list(_level ORDER BY cat_id) FROM e;
+----
+[0, 1, 2, 3, 4]	[0, 1, 2, 2, 1]
+
+# P13 property: every valid level walk passes, every invalid one is rejected
+statement ok
+CREATE TABLE walks(name VARCHAR, node_id INT, depth INT);
+
+statement ok
+INSERT INTO walks VALUES
+  ('ok_chain', 0, 0), ('ok_chain', 1, 1), ('ok_chain', 2, 2), ('ok_chain', 3, 1), ('ok_chain', 4, 0),
+  ('ok_flat', 0, 0), ('ok_flat', 1, 0), ('ok_flat', 2, 0),
+  ('bad_jump', 0, 0), ('bad_jump', 1, 2),
+  ('bad_start', 0, 1), ('bad_start', 1, 2);
+
+statement ok
+CALL tree_ddl_create('main', 'ok_chain', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := '(SELECT * FROM walks WHERE name = ''ok_chain'')'));
+
+statement ok
+CALL tree_ddl_create('main', 'ok_flat', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := '(SELECT * FROM walks WHERE name = ''ok_flat'')'));
+
+statement error
+CALL tree_ddl_create('main', 'bad_jump', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := '(SELECT * FROM walks WHERE name = ''bad_jump'')'));
+----
+P13 violated
+
+statement error
+CALL tree_ddl_create('main', 'bad_start', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := '(SELECT * FROM walks WHERE name = ''bad_start'')'));
+----
+P13 violated
+
+# sizes on the flat forest: every root is a leaf
+query I
+SELECT list(_size ORDER BY _pre) FROM tree_project('main', 'ok_flat');
+----
+[0, 0, 0]

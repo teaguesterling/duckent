@@ -1,0 +1,27 @@
+# name: test/sql/02_catalog.test
+# description: catalog and state schemas exist and are empty; treeql is registered
+
+query I
+SELECT count(*) FROM tree_catalog_trees();
+----
+0
+
+query I
+SELECT count(*) FROM tree_catalog_slots();
+----
+0
+
+query III
+SELECT language, printer, bare_safe FROM tree_catalog_languages();
+----
+treeql	tree_selector_to_treeql	true
+
+query I
+SELECT count(*) FROM tree_state.partitions;
+----
+0
+
+query I
+SELECT column_name FROM information_schema.columns WHERE table_schema = 'tree_catalog' AND table_name = 'trees' AND column_name = 'has_semantic';
+----
+has_semantic

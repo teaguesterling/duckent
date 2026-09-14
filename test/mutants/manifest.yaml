@@ -1,0 +1,39 @@
+# test/mutants/manifest.yaml
+# id is permanent. expect_fail lists test files that must FAIL when the mutant is applied.
+- id: MN01
+  file: MN01_encoder_tiebreak_desc.sql
+  what: reverse the source-order tiebreak in DFS derivation
+  expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+- id: MN02
+  file: MN02_parent_same_level.sql
+  what: derive parent as nearest prior row at the same level, not level - 1
+  expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+  also_kills: parent join without root equality (no id reserved; see FINDINGS)
+- id: MN06
+  file: MN06_sibling_free_silent.sql
+  what: sibling combinators silently no-op under the sibling-free profile
+  expect_fail: [test/sql/31_match.test]
+- id: MN14
+  file: MN14_cross_partition.sql
+  what: descendant test crosses ROOT partitions
+  expect_fail: [test/sql/12_dml.test, test/sql/31_match.test]
+- id: MN15
+  file: MN15_p13_disabled.sql
+  what: INSERT of a partition violating P13 accepted
+  expect_fail: [test/sql/12_dml.test, test/sql/20_derivations.test]
+- id: MN17
+  file: MN17_row_surgery_delete.sql
+  what: pre-MATCH filter on a non-ROOT column accepted (row surgery)
+  expect_fail: [test/sql/12_dml.test]
+- id: MN18
+  file: MN18_abstract_open.sql
+  what: a closed abstract silently serves undeclared attributes
+  expect_fail: [test/sql/11_ddl.test]
+- id: MN19
+  file: MN19_where_raw_relation.sql
+  what: step WHERE compiled against the raw relation instead of the projection view
+  expect_fail: [test/sql/31_match.test]
+- id: MN21
+  file: MN21_type_default_null.sql
+  what: an S-empty tree fails structural matching (TYPE default lost)
+  expect_fail: [test/sql/11_ddl.test]
