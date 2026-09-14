@@ -166,7 +166,7 @@ query IIII
 SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'bad9'),
        (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name = 'bad9'),
        (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'bad9'),
-       (SELECT count(*) FROM duckdb_functions() WHERE function_name = 'proj_main_bad9');
+       (SELECT count(*) FROM duckdb_functions() WHERE tree_sql_ident(function_name) = tree_sql_object_name('proj', 'main', 'bad9'));
 ----
 0	0	0	0
 
@@ -206,7 +206,7 @@ query IIII
 SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
        (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
        (SELECT count(*) FROM tree_catalog.pseudo_classes WHERE tree_name IN ('bad10', 'bad14', 'bad15', 'bad16')),
-       (SELECT count(*) FROM duckdb_functions() WHERE function_name IN ('proj_main_bad10', 'proj_main_bad14', 'proj_main_bad15', 'proj_main_bad16'));
+       (SELECT count(*) FROM duckdb_functions() WHERE list_contains(list_transform(['bad10', 'bad14', 'bad15', 'bad16'], lambda x: tree_sql_object_name('proj', 'main', x)), tree_sql_ident(function_name)));
 ----
 0	0	0	0
 
@@ -329,6 +329,28 @@ SELECT count(*) FROM tree_project('a_b', 'c');
 ----
 54
 
+# doubling underscores is not enough on its own: ('a_','c') and ('a','_c') both double to
+# a__c. The schema's length goes in front, so decoding reads the number, then exactly that
+# many characters, then the separator, then the name.
+statement ok
+CALL tree_ddl_create('a_', 'c', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')', storage := 'projection'));
+
+statement ok
+CALL tree_ddl_create('a', '_c', tree_spec(tree_shape(key := 'email', parent := 'manager_email'), source := 'read_csv(''test/data/employees.csv'')', storage := 'projection'));
+
+query II
+SELECT (SELECT count(*) FROM tree_project('a_', 'c')), (SELECT count(*) FROM tree_project('a', '_c'));
+----
+54	7
+
+statement ok
+CALL tree_ddl_drop('a', '_c');
+
+query I
+SELECT count(*) FROM tree_project('a_', 'c');
+----
+54
+
 # drop removes everything
 statement ok
 CALL tree_ddl_drop('main', 'app');
@@ -341,4 +363,4 @@ SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'app'), (SEL
 statement error
 SELECT * FROM tree_project('main', 'app');
 ----
-proj_main_app
+proj_4_main_app

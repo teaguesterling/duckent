@@ -31,11 +31,14 @@ CREATE OR REPLACE MACRO tree_sql_list(csv) AS list_transform(string_split(csv, '
 CREATE OR REPLACE MACRO tree_sql_is_ident(s) AS regexp_matches(s, '^[A-Za-z_][A-Za-z0-9_]*$');
 
 -- The one spelling of a generated object's name: kind ('proj' or 't'), schema, tree.
--- Escape then separate: every underscore inside a part is doubled, so a lone underscore
--- occurs only as the separator and the encoding is injective -- ('a_b','c') compiles to
--- proj_a__b_c and ('a','b_c') to proj_a_b__c, which used to be the same object.
+-- Length-prefix the schema, because no escaping of the separator alone is injective here:
+-- doubling underscores still maps ('a_','c') and ('a','_c') to the same a__c. With the
+-- schema's length in front, decoding reads the number, then exactly that many characters,
+-- then the separator, then the rest as the name, so no two pairs can collide:
+-- ('a_b','c') is proj_3_a_b_c, ('a','b_c') is proj_1_a_b_c, ('a_','c') is proj_2_a__c
+-- and ('a','_c') is proj_1_a__c.
 CREATE OR REPLACE MACRO tree_sql_object_name(kind, sch, nm) AS
-  tree_sql_ident(kind || '_' || replace(sch, '_', '__') || '_' || replace(nm, '_', '__'));
+  tree_sql_ident(kind || '_' || length(sch) || '_' || sch || '_' || nm);
 
 -- The validation ladder for the S group, shared by tree_compile_create and tree_compile_alter
 -- so that altering a tree cannot bypass a check create enforces. `verb` prefixes the message.

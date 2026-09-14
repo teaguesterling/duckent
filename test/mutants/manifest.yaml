@@ -36,4 +36,4 @@
 - id: MN21
   file: MN21_type_default_null.sql
   what: an S-empty tree fails structural matching (TYPE default lost)
-  expect_fail: [test/sql/11_ddl.test, test/sql/31_match.test]
+  expect_fail: [test/sql/11_ddl.test]
