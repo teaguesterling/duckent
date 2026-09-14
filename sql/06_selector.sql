@@ -16,6 +16,8 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
   bad_key AS (
     SELECT min(k) AS k FROM (SELECT unnest(json_keys(to_json(s0))) AS k FROM raw)
     WHERE k NOT IN ('comb', 'type', 'id', 'class', 'attr', 'pseudo', 'where', 'as')),
+  bad_alias AS (
+    SELECT min(s."as") AS a FROM st WHERE s."as" IS NOT NULL AND regexp_matches(s."as", '^s[0-9]+$')),
   bad_attr AS (
     SELECT min(s.attr) AS a FROM st WHERE s.attr IS NOT NULL
       AND NOT regexp_matches(s.attr, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|<>|<=|>=|<|>|LIKE|ILIKE|NOT LIKE)\s*(.+?)\s*$')),
@@ -40,6 +42,9 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
   SELECT CASE
     WHEN (SELECT k FROM bad_key) IS NOT NULL THEN error('tree_steps: unknown step field ' || (SELECT k FROM bad_key))
     WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN error('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
+    -- s<N> is what the match compiler names step N when the user names nothing; a user
+    -- alias of that shape would collide with another step's generated alias
+    WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN error('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
   FROM parented);
 

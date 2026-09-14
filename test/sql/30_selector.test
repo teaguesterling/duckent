@@ -45,6 +45,19 @@ SELECT tree_steps([{attr: 'start_line IN (1,2)'}]);
 ----
 cannot parse ATTR clause
 
+# s<N> is the generated alias of step N, so a user alias of that shape is refused rather
+# than silently capturing (or being captured by) another step's row
+statement error
+SELECT tree_steps([{type: 'x', "as": 's3'}]);
+----
+alias s3 is reserved for generated step aliases
+
+# a name that merely starts with s is fine
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'x', "as": 'src'}])), chr(10), ' | ');
+----
+(TYPE 'x') AS src
+
 # a step with no combinator after the first defaults to DESCENDANT
 query I
 SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}])), chr(10), ' | ');

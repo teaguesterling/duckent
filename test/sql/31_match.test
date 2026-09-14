@@ -184,3 +184,77 @@ query I
 SELECT (SELECT count(*) FROM tree_match('main', 'scripts', tree_steps([{type: 'module'}, {comb: 'desc', type: 'function_definition'}]))) = (SELECT count(*) FROM 'test/data/scripts.parquet' WHERE type = 'function_definition');
 ----
 true
+
+# SIBLING and FOLLOWING relate rows with the same parent, and two level-0 rows of one
+# partition both have a NULL parent: = would make every root row sibling-less
+statement ok
+CREATE TABLE sibs(tag VARCHAR, node_id INT, depth INT);
+
+statement ok
+INSERT INTO sibs VALUES ('a', 0, 0), ('b', 1, 1), ('c', 2, 0), ('d', 3, 0);
+
+statement ok
+CALL tree_ddl_create('main', 'sibs', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'sibs'));
+
+query I
+SELECT count(*) FROM tree_match('main', 'sibs', tree_steps([{"where": 'true'}, {comb: 'next'}]));
+----
+2
+
+query I
+FROM tree_match('main', 'sibs', tree_steps([{"where": '_pre = 0'}, {comb: 'next'}])) SELECT tag;
+----
+c
+
+# the step alias is passed to the clause compiler, so user text is never rewritten: a literal
+# § in a WHERE or an ID used to be replaced by the generated alias
+statement ok
+CREATE TABLE marks(tag VARCHAR, node_id INT, depth INT);
+
+statement ok
+INSERT INTO marks VALUES ('s1', 0, 0), ('§', 1, 1), ('other', 2, 1);
+
+statement ok
+CALL tree_ddl_create('main', 'marks', tree_spec(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(id := 'tag', pseudo := [{name: 'busy', body: 'depth > 0'}])), source := 'marks'));
+
+query I rowsort
+FROM tree_match('main', 'marks', tree_steps([{"where": 'tag <> ''§'''}])) SELECT tag;
+----
+other
+s1
+
+query I
+FROM tree_match('main', 'marks', tree_steps([{id: '§'}])) SELECT tag;
+----
+§
+
+# a per-query pseudo overlay adds to the catalog's pseudo-classes, it does not orphan them
+query II
+SELECT (SELECT count(*) FROM tree_match('main', 'marks', tree_steps([{pseudo: 'busy'}]), semantic := tree_semantic(pseudo := [{name: 'leaf', body: 'depth = 0'}]))),
+       (SELECT count(*) FROM tree_match('main', 'marks', tree_steps([{pseudo: 'leaf'}]), semantic := tree_semantic(pseudo := [{name: 'leaf', body: 'depth = 0'}])));
+----
+2	1
+
+# the overlay wins on a name the catalog also binds
+query I
+SELECT count(*) FROM tree_match('main', 'marks', tree_steps([{pseudo: 'busy'}]), semantic := tree_semantic(pseudo := [{name: 'busy', body: 'depth = 0'}]));
+----
+1
+
+# a selector with no steps, an empty overlay, and an overlay that tries to add attribute
+# columns all refuse instead of compiling to NULL or being ignored
+statement error
+FROM tree_match('main', 'marks', tree_steps([]));
+----
+selector has no steps
+
+statement error
+FROM tree_match('main', 'marks', tree_steps([{id: 's1'}]), semantic := tree_semantic());
+----
+semantic overlay is empty
+
+statement error
+FROM tree_match('main', 'marks', tree_steps([{id: 's1'}]), semantic := tree_semantic(id := 'tag', attr := 'tag'));
+----
+cannot add attribute columns

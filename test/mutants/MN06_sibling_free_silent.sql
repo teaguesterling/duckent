@@ -17,13 +17,23 @@ WITH t AS (
   SELECT tr.profile, tr.has_semantic OR semantic IS NOT NULL AS has_semantic,
          (SELECT list(name) FROM tree_catalog.pseudo_classes p WHERE p.database_name = current_database() AND p.schema_name = sch AND p.tree_name = nm) AS known_pseudos
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
-chk AS (SELECT CASE WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found') ELSE true END AS ok),
+chk AS (SELECT CASE
+  WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found')
+  -- an overlay is an S group for this query only; it cannot widen the projection, and an
+  -- overlay that sets nothing (or a selector with no steps) used to compile to NULL
+  WHEN (semantic).attr IS NOT NULL THEN error('tree_match: a per-query SEMANTIC overlay cannot add attribute columns; use tree_ddl_alter')
+  WHEN semantic IS NOT NULL AND (semantic).type IS NULL AND (semantic).id IS NULL AND (semantic).classes IS NULL
+       AND (semantic).attr_map IS NULL AND (semantic).pseudo IS NULL THEN error('tree_match: semantic overlay is empty')
+  WHEN (SELECT count(*) FROM (SELECT unnest(sel, recursive := true)) WHERE kind = 'step') = 0 THEN error('tree_match: selector has no steps')
+  ELSE true END AS ok),
 proj AS (
-  SELECT CASE WHEN semantic IS NULL THEN 'tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) || '()'
+  SELECT CASE WHEN semantic IS NULL THEN 'tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()'
     ELSE '(SELECT * REPLACE (' || list_aggregate(list_filter([
         (semantic).type || ' AS _type', (semantic).id || ' AS _id', (semantic).classes || ' AS _classes', (semantic).attr_map || ' AS _attr_map',
-        CASE WHEN (semantic).pseudo IS NULL THEN NULL ELSE tree_sql_pseudo_map(semantic) || ' AS _pseudo' END], lambda x: x IS NOT NULL), 'string_agg', ', ')
-      || ') FROM tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) || '())' END AS p),
+        -- map_concat, not replace: the catalog's pseudo-classes stay bound, the overlay's
+        -- entries are added, and the overlay (the second argument) wins on a shared name
+        CASE WHEN (semantic).pseudo IS NULL THEN NULL ELSE 'map_concat(_pseudo, ' || tree_sql_pseudo_map(semantic) || ') AS _pseudo' END], lambda x: x IS NOT NULL), 'string_agg', ', ')
+      || ') FROM tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '())' END AS p),
 -- IR rows; S clauses refused on S-less trees; unknown pseudo-classes marked
 n AS (
   SELECT node_id, parent_id,
@@ -36,7 +46,7 @@ n AS (
   FROM (SELECT unnest(sel, recursive := true))),
 steps AS (
   SELECT s.node_id, s.op, s.alias,
-         COALESCE((SELECT string_agg(replace(tree_sql_clause(c.kind, c.value, c.op, c.arg), '§', s.alias), ' AND ' ORDER BY c.node_id) FROM n c WHERE c.parent_id = s.node_id), 'true') AS pred,
+         COALESCE((SELECT string_agg(tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias), ' AND ' ORDER BY c.node_id) FROM n c WHERE c.parent_id = s.node_id), 'true') AS pred,
          lag(s.alias) OVER (ORDER BY s.node_id) AS prev_alias,
          row_number() OVER (ORDER BY s.node_id) AS rn,
          count(*) OVER () AS n_steps
