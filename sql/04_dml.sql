@@ -19,7 +19,7 @@ CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
                     attr: (SELECT expression FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ATTR'),
                     has_root: bool_or(EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ROOT')),
-                    tbl: 'tree_catalog.' || tree_sql_ident('t_' || sch || '_' || nm)} END
+                    tbl: 'tree_catalog.' || tree_sql_object_name('t', sch, nm)} END
   FROM tree_catalog.trees WHERE database_name = current_database() AND schema_name = sch AND tree_name = nm);
 
 CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (

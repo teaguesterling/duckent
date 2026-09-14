@@ -34,11 +34,11 @@ WITH t AS (
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
 chk AS (SELECT CASE WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found') ELSE true END AS ok),
 proj AS (
-  SELECT CASE WHEN semantic IS NULL THEN 'tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) || '()'
+  SELECT CASE WHEN semantic IS NULL THEN 'tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()'
     ELSE '(SELECT * REPLACE (' || list_aggregate(list_filter([
         (semantic).type || ' AS _type', (semantic).id || ' AS _id', (semantic).classes || ' AS _classes', (semantic).attr_map || ' AS _attr_map',
         CASE WHEN (semantic).pseudo IS NULL THEN NULL ELSE tree_sql_pseudo_map(semantic) || ' AS _pseudo' END], lambda x: x IS NOT NULL), 'string_agg', ', ')
-      || ') FROM tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) || '())' END AS p),
+      || ') FROM tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '())' END AS p),
 -- IR rows; S clauses refused on S-less trees; unknown pseudo-classes marked; sibling combinators refused under sibling_free
 n AS (
   SELECT node_id, parent_id,

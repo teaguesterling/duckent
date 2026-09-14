@@ -54,8 +54,8 @@ derived AS (
     CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     (spec).shape.semantic IS NOT NULL OR ((spec)."like" IS NOT NULL AND tree_shape_from_catalog(current_database(), sch, (spec)."like").semantic.type IS NOT NULL) AS has_semantic,
-    'tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) AS proj_name,
-    'tree_catalog.' || tree_sql_ident('t_' || sch || '_' || nm) AS tbl_name
+    'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
+    'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
   FROM base
 ),
 checked AS (
@@ -116,8 +116,8 @@ CREATE OR REPLACE MACRO tree_compile_drop(sch, nm) AS (
     'DELETE FROM tree_catalog.compiled WHERE database_name = current_database() AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
     'DELETE FROM tree_state.partitions WHERE database_name = current_database() AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
     'DELETE FROM tree_state.assertions WHERE database_name = current_database() AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
-    'DROP MACRO TABLE IF EXISTS tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm),
-    'DROP TABLE IF EXISTS tree_catalog.' || tree_sql_ident('t_' || sch || '_' || nm),
+    'DROP MACRO TABLE IF EXISTS tree_catalog.' || tree_sql_object_name('proj', sch, nm),
+    'DROP TABLE IF EXISTS tree_catalog.' || tree_sql_object_name('t', sch, nm),
     'COMMIT']);
 
 -- Replace the SEMANTIC group and rebuild the projection (and storage, when materialized).
@@ -136,8 +136,8 @@ n AS (
     {root: (old_shape).root, "order": (old_shape)."order", key: (old_shape).key, level: (old_shape).level, parent: (old_shape).parent, sibling_order: (old_shape).sibling_order,
      size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: semantic}::TREE_SHAPE AS shape,
     COALESCE((semantic).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
-    'tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) AS proj_name,
-    'tree_catalog.' || tree_sql_ident('t_' || sch || '_' || nm) AS tbl_name
+    'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
+    'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
   FROM t
 ),
 c AS (
@@ -173,7 +173,7 @@ FROM c WHERE ok);
 
 -- The canonical projection of a registered tree. query() folds the concatenated literal to a constant.
 CREATE OR REPLACE MACRO tree_project(sch, nm) AS TABLE
-  FROM query('FROM tree_catalog.' || tree_sql_ident('proj_' || sch || '_' || nm) || '()');
+  FROM query('FROM tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()');
 
 -- Ad hoc: a shape applied to a bare source, no registration. Open attributes, as for any concrete tree.
 CREATE OR REPLACE MACRO tree_apply(shape, source) AS TABLE

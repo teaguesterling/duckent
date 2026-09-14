@@ -243,6 +243,34 @@ SELECT count(*) FROM tree_apply(tree_shape("order" := 'node_id', level := 'depth
 ----
 54
 
+# object names are injective: ('a_b','c') and ('a','b_c') must not compile to the same macro.
+# Underscores in the parts are doubled, so a single underscore is only ever the separator.
+statement ok
+CREATE TABLE tiny(node_id INT, depth INT);
+
+statement ok
+INSERT INTO tiny VALUES (0, 0), (1, 1);
+
+statement ok
+CALL tree_ddl_create('a_b', 'c', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')', storage := 'projection'));
+
+statement ok
+CALL tree_ddl_create('a', 'b_c', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'tiny', storage := 'projection'));
+
+query II
+SELECT (SELECT count(*) FROM tree_project('a_b', 'c')), (SELECT count(*) FROM tree_project('a', 'b_c'));
+----
+54	2
+
+# dropping one leaves the other queryable
+statement ok
+CALL tree_ddl_drop('a', 'b_c');
+
+query I
+SELECT count(*) FROM tree_project('a_b', 'c');
+----
+54
+
 # drop removes everything
 statement ok
 CALL tree_ddl_drop('main', 'app');

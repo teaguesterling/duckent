@@ -30,6 +30,13 @@ CREATE OR REPLACE MACRO tree_sql_ident(s) AS '"' || replace(s, '"', '""') || '"'
 CREATE OR REPLACE MACRO tree_sql_list(csv) AS list_transform(string_split(csv, ','), lambda x: trim(x));
 CREATE OR REPLACE MACRO tree_sql_is_ident(s) AS regexp_matches(s, '^[A-Za-z_][A-Za-z0-9_]*$');
 
+-- The one spelling of a generated object's name: kind ('proj' or 't'), schema, tree.
+-- Escape then separate: every underscore inside a part is doubled, so a lone underscore
+-- occurs only as the separator and the encoding is injective -- ('a_b','c') compiles to
+-- proj_a__b_c and ('a','b_c') to proj_a_b__c, which used to be the same object.
+CREATE OR REPLACE MACRO tree_sql_object_name(kind, sch, nm) AS
+  tree_sql_ident(kind || '_' || replace(sch, '_', '__') || '_' || replace(nm, '_', '__'));
+
 -- The validation ladder for the S group, shared by tree_compile_create and tree_compile_alter
 -- so that altering a tree cannot bypass a check create enforces. `verb` prefixes the message.
 -- Returns true when the semantic is acceptable; raises otherwise.
