@@ -14,39 +14,55 @@ CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root) AS
 -- helper: the tree row and its shape, or an error
 CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
   SELECT CASE WHEN count(*) = 0 THEN error(verb || ': tree ' || sch || '.' || nm || ' not found')
+              -- an abstract tree records storage = materialized but owns no table, so without
+              -- this the verb fails with a raw "table t_... does not exist" catalog error
+              WHEN bool_or(is_abstract) THEN error(verb || ': tree ' || sch || '.' || nm || ' is SHAPE ONLY (abstract); it has no storage')
               WHEN max(storage) <> 'materialized' THEN error(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; '
                                                              || CASE WHEN verb = 'tree_check' THEN 'assertions need' ELSE 'DML needs' END || ' storage := materialized')
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
+                    order_source: max(order_source),
                     attr: (SELECT expression FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ATTR'),
                     has_root: bool_or(EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ROOT')),
                     tbl: 'tree_catalog.' || tree_sql_object_name('t', sch, nm)} END
   FROM tree_catalog.trees WHERE database_name = current_database() AND schema_name = sch AND tree_name = nm);
 
+-- `frozen` means _pre is the source's scan order; taking it while preserve_insertion_order
+-- is off would freeze an arbitrary order into the tree. Create refuses this; so must ingest.
+CREATE OR REPLACE MACRO tree_sql_frozen_guard(order_source, verb) AS
+  CASE WHEN order_source <> 'frozen' THEN NULL ELSE
+    'SELECT CASE WHEN NOT current_setting(''preserve_insertion_order'') THEN error(''' || verb || ': ORDER is required because preserve_insertion_order is off'') END' END;
+
 CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
   WITH c AS (SELECT tree_dml_context('tree_insert', sch, nm) AS x),
   p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
-  SELECT ['BEGIN TRANSACTION',
+  SELECT list_filter(['BEGIN TRANSACTION',
+    tree_sql_frozen_guard(x.order_source, 'tree_insert'),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
+    tree_sql_shadow_check('__duckent_new', 'tree_insert'),
     'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || replace(sch || '.' || nm, '''', '''''') || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root),
-    'INSERT INTO ' || x.tbl || ' SELECT * FROM __duckent_new',
+    -- BY NAME: the projection's column order follows the source's select list, which need
+    -- not match the stored table's, and a positional INSERT misfiles same-typed columns
+    'INSERT INTO ' || x.tbl || ' BY NAME SELECT * FROM __duckent_new',
     'INSERT INTO tree_state.partitions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', _root::VARCHAR, 1, count(*), true, now() FROM __duckent_new GROUP BY _root',
     'DROP TABLE __duckent_new',
-    'COMMIT'] FROM p);
+    'COMMIT'], lambda s: s IS NOT NULL) FROM p);
 
 CREATE OR REPLACE MACRO tree_compile_replace(sch, nm, source) AS (
   WITH c AS (SELECT tree_dml_context('tree_replace', sch, nm) AS x),
   p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
-  SELECT ['BEGIN TRANSACTION',
+  SELECT list_filter(['BEGIN TRANSACTION',
+    tree_sql_frozen_guard(x.order_source, 'tree_replace'),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
+    tree_sql_shadow_check('__duckent_new', 'tree_replace'),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root),
     'CREATE TEMP TABLE __duckent_epochs AS SELECT root_key, epoch FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT DISTINCT _root::VARCHAR FROM __duckent_new)',
     'DELETE FROM ' || x.tbl || ' WHERE _root::VARCHAR IN (SELECT root_key FROM __duckent_epochs)',
     'DELETE FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT root_key FROM __duckent_epochs)',
-    'INSERT INTO ' || x.tbl || ' SELECT * FROM __duckent_new',
+    'INSERT INTO ' || x.tbl || ' BY NAME SELECT * FROM __duckent_new',
     'INSERT INTO tree_state.partitions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', n._root::VARCHAR, COALESCE(e.epoch, 0) + 1, count(*), true, now() FROM __duckent_new n LEFT JOIN __duckent_epochs e ON e.root_key = n._root::VARCHAR GROUP BY n._root, e.epoch',
     'DROP TABLE __duckent_new', 'DROP TABLE __duckent_epochs',
-    'COMMIT'] FROM p);
+    'COMMIT'], lambda s: s IS NOT NULL) FROM p);
 
 -- The predicate is evaluated over the ROOT columns only: a non-ROOT column is a binder error naming it (P21). MN17 mutates this to row surgery.
 CREATE OR REPLACE MACRO tree_sql_delete_stmt(tbl, root_predicate) AS
