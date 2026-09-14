@@ -22,6 +22,24 @@ SELECT count(*) FILTER (WHERE back.parent_email IS DISTINCT FROM e.manager_email
 ----
 0
 
+# a two-column sibling key: children are ordered by hire_date, then email, then the key
+query I
+WITH e AS (FROM tree_encode('read_csv(''test/data/employees.csv'')', 'email', 'manager_email', 'hire_date, email'))
+SELECT list(email ORDER BY _pre) FROM e;
+----
+[ada@co, cy@co, fay@co, gus@co, bo@co, ed@co, di@co]
+
+# and every one of its columns is qualified to the source: a bare second column binds to the
+# walk relation instead when the source shares a name with it (_root, _level, __key, __path)
+statement ok
+CREATE TABLE emp_lvl AS SELECT email, manager_email, hire_date, length(email) AS _level FROM read_csv('test/data/employees.csv');
+
+query I
+WITH e AS (FROM tree_encode('emp_lvl', 'email', 'manager_email', 'hire_date, _level'))
+SELECT list(email ORDER BY _pre) FROM e;
+----
+[ada@co, cy@co, fay@co, gus@co, bo@co, ed@co, di@co]
+
 # the encoder is deterministic without a sibling key (falls back to key order) and still valid
 query II
 WITH e AS (FROM tree_encode('read_csv(''test/data/categories.csv'')', 'cat_id', 'parent_id', NULL))

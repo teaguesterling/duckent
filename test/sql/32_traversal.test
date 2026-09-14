@@ -28,3 +28,19 @@ query I
 SELECT _pre FROM tree_first_child('main', 'app', '{''file_path'': app.py}', 6);
 ----
 7
+
+# the same traversals over a projection-mode tree, where the projection macro is the
+# compiled query rather than a table scan: ancestors by range, no recursion (I1)
+statement ok
+CALL tree_ddl_create('main', 'live', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'read_parquet(''test/data/app.parquet'')', storage := 'projection'));
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_ancestors('main', 'live', '{''file_path'': app.py}', 18);
+----
+[0, 6, 14, 15, 16]
+
+# a root row has no ancestors
+query I
+SELECT count(*) FROM tree_ancestors('main', 'live', '{''file_path'': app.py}', 0);
+----
+0
