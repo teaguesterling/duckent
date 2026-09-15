@@ -19,13 +19,20 @@
   file: MN03_size_status.sql
   what: a DECLARED SIZE column compiles to a subtree range one short of a derived one
   expect_fail: [test/sql/42_second_differential.test]
-  also_kills: 40_corpus and 41 (their trees declare SIZE), but 42 is the suite whose whole
-    claim this is -- it fails on both the projection-level record and on SIZE_WITNESS
+  also_kills: nothing. 42 is the ONLY suite that sees this mutant -- checked, not assumed
+    (40_corpus and 41 both PASS under it, although their trees do declare SIZE). 40 compares
+    two SPELLINGS of one selector on ONE tree, so a shortened _size moves both sides equally
+    and cancels, exactly as it cancels for MN22/MN24 below; 41's frozen references never turn
+    on a subtree's LAST descendant, which is the only row a range one short drops, and on
+    these fixtures that row is almost always an anonymous token no selector can name (the
+    same fact that made 42 write SIZE_WITNESS by hand). 42 fails twice -- on the record
+    comparing the two projections column for column, and on SIZE_WITNESS.
 - id: MN05
   file: MN05_has_child_only.sql
   what: a group's first inner step is joined as a CHILD whatever its op, so :has() is child-only
   expect_fail: [test/sql/40_corpus.test]
-  also_kills: 34_groups (verified) -- a nested :has whose target is not a direct child
+  also_kills: 34_groups and 41_differential_sitting_duck, both verified -- any :has whose
+    target is not a direct child of the subject
 - id: MN06
   file: MN06_sibling_free_silent.sql
   what: sibling combinators silently no-op under the sibling-free profile
@@ -89,6 +96,10 @@
     P13-clean (a language front-end reading engine state)
   expect_fail: [test/sql/44_parsers.test]
   # 44 carries the bait: one partition row, p13_ok = false, for a tree name nothing declares.
+  # The kill is total by construction, not incidental: every record in 44 calls tree_parse_css
+  # and the bait row is inserted before the first of them, so all 250 fail while it is there.
+  # Deleting the bait would leave this mutant alive, which is why the insert is commented in
+  # the generated file and templated in test/import_astcss_eval.py's write_44_parsers.
   also_kills: nothing else -- 40_corpus was checked and PASSES under this mutant. Its
     `language := 'css'` selectors are parsed by the RUNNER's parser (test/css_parser.py), so no
     record there reaches tree_css_lower at all; 44 is the suite that runs the SQL front-end.

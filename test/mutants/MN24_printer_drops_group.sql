@@ -9,6 +9,9 @@
 -- unrolled passes: grpA and grpB read `WHERE g.kind IN ('has', 'not')` in the base and
 -- `WHERE g.kind = 'has'` here. A group with no rendered text contributes nothing to partB/partC,
 -- so the step it hangs off prints without it. Comments trimmed to the passes they explain.
+-- This is a COPY, not a fragment override -- the group text is built inline in each pass and
+-- there is no fragment for it -- so regenerate it from sql/06_selector.sql when
+-- tree_selector_to_treeql changes, or the mutant stops being that macro with one edit.
 --
 -- NOTE for the manifest: 40_corpus cannot see this. Its printed-TREEQL records compare
 -- tree_selector_to_treeql(<ir>) against tree_explain(...).treeql, and BOTH sides go through

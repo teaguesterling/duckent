@@ -46,6 +46,84 @@ emits it as a commented no-op naming the reason). 107 of 108 references are asse
   deleting the `top_level_combinator` skip in the importer and regenerating restores full live
   coverage.
 
+## Mutant kill map corrections
+
+The M2 design's §9 mutant table names a killing suite per mutant. Planting the nine remaining
+mutants (task 12) showed six of those rows are wrong or incomplete. Every line below was
+established by running `python3 test/run.py <suite> --mutant test/mutants/<file>` on the suite in
+question, in both directions where a suite was expected to fail and did not. **Task 13 should
+correct the spec table from this entry.** The manifest (`test/mutants/manifest.yaml`) is the live
+record; this is the reasoning behind it.
+
+| mutant | §9 says | actually killed by | why the difference |
+|---|---|---|---|
+| MN03 | 42 | **42 only** | 40 and 41 PASS, although both declare SIZE — see below |
+| MN05 | 40/41 | **40, 41, 34_groups** | table is right; 34 is a third witness |
+| MN07 | 40 | **40, 37, 31, 34, 36** | only after corpus row c17 was added; 41 PASSES |
+| MN08 | 44 | **44, 37** | — |
+| MN12 | 40 | **36_pseudo only** | no corpus tree declares a pseudo a `sel_*` could shadow |
+| MN13 | 40 | **35_attr_map** | the `'9'` vs `'10'` row moved to 35 before this task |
+| MN22 | 40 | **44_parsers** | 40 never reaches the SQL lowering |
+| MN24 | 40 | **34_groups, 38_css_lower** | 40 cannot see a symmetric printer mutation |
+| MN25 | 43 | **43** | only after `rep_class_none` was added; the promotion records alone cannot discriminate |
+
+Three of these are the same lesson, and it is worth stating once: **a differential suite cannot see
+a mutation that moves both of its sides.** 40_corpus compares two SPELLINGS of one selector against
+each other on ONE tree.
+
+- **MN22** (the css lowering reads `tree_state`) is invisible to 40 because 40's
+  `language := 'css'` selectors are rewritten by `test/run.py`'s `rewrite_selectors`, which calls
+  the RUNNER's parser (`test/css_parser.py`). No record in 40 reaches `tree_css_lower` at all. The
+  suite that runs the SQL front-end is 44_parsers, which is where the bait row lives.
+- **MN24** (the printer omits NOT groups) is invisible to 40 because its printed-TREEQL records
+  compare `tree_selector_to_treeql(<ir>)` with `tree_explain(...).treeql` — both sides go through
+  the same printer, so a symmetric mutation cancels. Only a record comparing the print against a
+  FROZEN literal catches it: 34_groups and 38_css_lower have those.
+- **MN03** (a declared SIZE compiles one short of a derived one) is invisible to 40 for the same
+  reason — both spellings run against the same tree, so a shortened `_size` moves both key lists
+  identically. It is invisible to 41 for a different reason: a range one short drops only a
+  subtree's LAST descendant, and on these fixtures that row is almost always an anonymous token no
+  selector can name. That is the same fact that made 42 write `SIZE_WITNESS` (`attribute
+  identifier`) by hand rather than rely on the corpus. 42 is the only suite that sees MN03, and it
+  sees it twice: on the record comparing the two projections column for column, and on
+  SIZE_WITNESS. (This entry exists because the first version of MN03's manifest row claimed 40 and
+  41 as `also_kills` without running them. They pass. F14/MN21 precedent: a manifest states what a
+  mutant does, not what one hopes it does.)
+
+Two mutants had nothing in the suite that could kill them, so the corpora gained bait, each
+commented in place with the mutant it serves:
+
+- **MN07** — no corpus row carried an unknown pseudo-class (the 108 astcss rows use only `:has` and
+  `:not`). Hand-corpus row **c17**, `.fn:not(:nope)`, was added. The unknown name sits inside a
+  `:not()` because a compound carrying one directly matches no row, and 40's records are written so
+  that an empty match FAILS rather than passing vacuously.
+- **MN25** — 43's two promotion records cannot discriminate: on `rep_class` every `def` row already
+  has a non-empty CLASSES list, so a fallback that fires only on an empty one never fires. Tree
+  `rep_class_none` (binds `def` as a PSEUDO, declares `classes := '[]::VARCHAR[]'`) was added, with
+  a record asserting `.def` selects nothing there while `:def` still selects every def.
+
+And one mechanism: **MN08** mutates the runner's css parser, which is Python, not a macro, so no
+`CREATE OR REPLACE MACRO` override can express it. `test/mutants/manifest.yaml` rows may now carry
+an optional `env:` map that `test/run_mutants.py` adds to each subprocess environment; the mutant's
+SQL file is comment-only, so every mutant is still one id, one file, one row.
+
+Two mutants are also shaped differently from the §9 table's sentence, for reasons task 13 should
+carry into the spec text:
+
+- **MN3** as §9 words it ("the compiler reads `_size` through a fragment that consults
+  declared-versus-derived status") would die trivially: a fragment that reads the catalog cannot be
+  spliced into `query()`, which is where the projection text goes. The planted mutant is instead a
+  copy of `tree_compile_projection` whose DECLARED size branch is `CAST(a.__size_raw AS BIGINT) - 1`
+  — the smallest edit that makes a declared O column diverge from its derived default.
+- **MN22** is a one-fragment override of `tree_css_path` (the fragment stage 9 of the lowering calls
+  for every emitted row) rather than a copy of the whole 365-line `tree_css_lower`, which §9's last
+  paragraph anticipates. The state read still happens where the lowering decides where a row goes.
+- **MN13** drops the typed cast by casting the LITERAL to VARCHAR rather than by removing
+  `TRY_CAST` outright. Removing it outright is a *binder* error in 1.5.5 ("Cannot compare values of
+  type VARCHAR and type INTEGER_LITERAL"), which would make MN13 a loud mutant that any suite
+  comparing a map against a number kills. Casting the literal instead is the plausible wrong
+  implementation: it binds, it runs, and it answers that `'10'` is not greater than `9`.
+
 ## Spec deviations in this milestone
 
 Where the prototype knowingly differs from `docs/superpowers/specs/2026-09-13-duckent-core-design.md`. Each is a deviation to carry forward or close in M2, not an accident.
