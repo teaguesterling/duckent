@@ -186,3 +186,22 @@ SELECT type, _match_unknown_pseudos;
 function_definition	0
 function_definition	0
 module	0
+
+# An overlay that sets ONLY pseudo_args is not an empty overlay: the shared tier binds every live
+# sel_* macro from it -- the record just above, with `type :=` alongside, is the same expansion --
+# so refusing it as empty denied the query the one thing it was asking for. The emptiness test now
+# asks the question create and alter ask (does this SEMANTIC declare an S slot?) through the one
+# predicate all three share, and PSEUDO_ARGS is an S slot in all three.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'deep'}]), semantic := tree_semantic(pseudo_args := 'descendant_count'))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0
+module	0
+
+# a genuinely empty overlay still refuses
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]), semantic := tree_semantic());
+----
+semantic overlay is empty

@@ -123,28 +123,15 @@ derived AS (
     CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
-    -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. It is a question about
-    -- what the group DECLARES, one slot at a time -- never about whether a group was written.
+    -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. The question -- does this
+    -- SEMANTIC declare an S slot? -- is tree_semantic_declares (sql/00_types.sql), the one
+    -- predicate create, alter and the match compiler's overlay check all read, so the three
+    -- cannot drift apart (they had: see that macro's comment).
     --
-    -- This led with `(spec).shape.semantic IS NOT NULL` until 2026-09-15, which asked the second
-    -- question: `semantic := tree_semantic(attr := 'x')` declares no S slot (ATTR names the
-    -- projected columns; it binds nothing structural) and still marked the tree S-ful. A TYPE
-    -- step then compiled against TYPE's `'node'` default and returned zero rows, which reads as
-    -- "no node of that type here" rather than as "this tree has no types" -- a refusal owed and
-    -- an empty result delivered. tree_compile_alter reads this same expression, so create and
-    -- alter now answer the question the same way; 11_ddl and 13_alter carry the twin records.
-    --
-    -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is,
-    -- and a slot added later must be added here. ATTR is the one that must NOT appear: every
-    -- tree stores an S/ATTR slot ('' closed, '*' open), so tree_shape_from_catalog gives every
-    -- LIKE child a non-NULL semantic.attr, and counting it would make every child S-ful --
-    -- the same back door, by the other road. The slots are read off the LIKE-MERGED shape, so an
-    -- inherited slot counts as a declared one; the last term carries a parent whose own S group
-    -- this shape cannot see, because reading the parent's TYPE alone made an ID-only parent
-    -- invisible.
-    (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
-      OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
-      OR len(COALESCE((shape).semantic.pseudo, [])) > 0 OR (shape).semantic.pseudo_args IS NOT NULL
+    -- The slots are read off the LIKE-MERGED shape, so an inherited slot counts as a declared
+    -- one; the last term carries a parent whose own S group this shape cannot see, because
+    -- reading the parent's TYPE alone made an ID-only parent invisible.
+    tree_semantic_declares((shape).semantic)
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
@@ -237,7 +224,6 @@ CREATE OR REPLACE MACRO tree_compile_drop(sch, nm) AS (
 CREATE OR REPLACE MACRO tree_compile_alter(sch, nm, semantic) AS (
 WITH t AS (
   SELECT current_database() AS db, tr.storage, tr.source_sql, tr.is_abstract,
-         COALESCE(tr.has_semantic, false) AS old_has_semantic,
          tree_shape_from_catalog(current_database(), sch, nm) AS old_shape
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm
 ),
@@ -254,15 +240,17 @@ n AS (
      size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: sem}::TREE_SHAPE AS shape,
     COALESCE((sem).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
     -- Whether the tree has an S GROUP after this alter, which is what tree_match reads to decide
-    -- whether an S clause may be asked for. Create's per-slot expression, read here on the alter's
-    -- own semantic: ATTR is deliberately NOT one of the slots -- every tree stores an S/ATTR slot
-    -- ('' closed, '*' open), so counting it would mark an R-only tree S-ful on an ATTR-only alter
-    -- and its TYPE clauses would then compile against the 'node' default and return nothing. The
-    -- last term is the flag the tree already carried: alter adds to what create declared.
-    (sem).type IS NOT NULL OR (sem).id IS NOT NULL OR (sem).classes IS NOT NULL
-      OR (sem).attr_map IS NOT NULL OR (sem).element IS NOT NULL
-      OR len(COALESCE((sem).pseudo, [])) > 0 OR (sem).pseudo_args IS NOT NULL
-      OR old_has_semantic AS has_semantic,
+    -- whether an S clause may be asked for. The same predicate create reads (tree_semantic_declares,
+    -- sql/00_types.sql), asked of THIS ALTER'S semantic and nothing else.
+    --
+    -- Nothing is OR'd in from the flag the tree already carried. Alter REPLACES the S group -- the
+    -- statement list below DELETEs every S slot of the tree and re-inserts only the ones this
+    -- semantic declares -- so a flag that survived its slots was a flag about slots that are gone:
+    -- a TYPE tree altered to an ATTR-only semantic stayed marked S-ful, and a TYPE clause then
+    -- compiled against the 'node' default and returned nothing where a refusal was owed. 13_alter
+    -- carries the record. (The comment here used to say "alter adds to what create declared",
+    -- which the DELETE two dozen lines below has always made false.)
+    tree_semantic_declares(sem) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
     'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
   FROM ex

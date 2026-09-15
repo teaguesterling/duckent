@@ -13,15 +13,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     WHEN 'type'   THEN alias || '._type = ' || tree_sql_lit(value)
     WHEN 'id'     THEN alias || '._id = ' || tree_sql_lit(value)
     WHEN 'class'  THEN 'COALESCE(list_contains(' || alias || '._classes, ' || tree_sql_lit(value) || '), false)'
-    -- The built-ins go through the navigation fragments rather than being spelled out again
-    -- here, so a tree that declares ELEMENT gets the first *element* child instead of the row
-    -- at _parent + 1. Their one NULL case is a root row's NULL _parent under the O(1) form,
-    -- and a NULL predicate reads as false wherever a predicate is used -- a WHERE, a JOIN ON,
-    -- or the WHERE inside an EXISTS -- so no COALESCE wrapper is needed.
-    WHEN 'pseudo' THEN CASE value
-                         WHEN 'first-child' THEN tree_sql_first_child(alias, p, elem)
-                         WHEN 'last-child'  THEN tree_sql_last_child(alias, p, elem)
-                         ELSE 'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)' END
+    -- The built-ins are compiled by tree_sql_builtin_pseudo, which returns NULL for every other
+    -- name -- so this branch consults the one list rather than repeating it. A declared
+    -- pseudo-class is a lookup in the projection's _pseudo map.
+    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, p, elem),
+                                'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)')
     -- An attribute resolves to a projected column first, then to ATTR MAP. The map is
     -- MAP(VARCHAR, VARCHAR), so a comparison against a number or a boolean has to cast the
     -- value ('3' > '10' is true as text); a quoted literal compares as text and needs none.

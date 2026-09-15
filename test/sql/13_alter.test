@@ -155,3 +155,33 @@ SELECT (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly')
        (SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{type: 'function_definition'}])));
 ----
 true	2
+
+# ALTER REPLACES the S group. The compiler DELETEs every S slot the tree had and re-inserts only
+# the ones this alter declares, so the flag has to be computed from the NEW semantic alone. It
+# used to be OR'd with the flag the tree already carried ("alter adds to what create declared",
+# which the DELETE above it makes false): a tree that HAD a TYPE and is altered to an ATTR-only
+# semantic kept has_semantic = true while its TYPE slot was gone, and a TYPE clause then compiled
+# against the 'node' default and answered with no rows where a refusal was owed.
+statement ok
+CALL tree_ddl_create('main', 'wasty', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'src'));
+
+query II
+SELECT has_semantic, (SELECT string_agg(slot, ',' ORDER BY slot) FROM tree_catalog_slots() WHERE tree_name = 'wasty' AND block = 'S')
+FROM tree_catalog_trees() WHERE tree_name = 'wasty';
+----
+true	ATTR,TYPE
+
+statement ok
+CALL tree_ddl_alter('main', 'wasty', tree_semantic(attr := 'node_id, type, depth'));
+
+query II
+SELECT has_semantic, (SELECT string_agg(slot, ',' ORDER BY slot) FROM tree_catalog_slots() WHERE tree_name = 'wasty' AND block = 'S')
+FROM tree_catalog_trees() WHERE tree_name = 'wasty';
+----
+false	ATTR
+
+statement error
+FROM tree_match('main', 'wasty', tree_steps([{type: 'module'}]));
+----
+has no SEMANTIC group

@@ -130,8 +130,11 @@ chk AS (SELECT CASE
   -- an overlay is an S group for this query only; it cannot widen the projection, and an
   -- overlay that sets nothing (or a selector with no steps) used to compile to NULL
   WHEN (semantic).attr IS NOT NULL THEN tree_err('tree_match: a per-query SEMANTIC overlay cannot add attribute columns; use tree_ddl_alter')
-  WHEN semantic IS NOT NULL AND (semantic).type IS NULL AND (semantic).id IS NULL AND (semantic).classes IS NULL
-       AND (semantic).attr_map IS NULL AND (semantic).pseudo IS NULL AND (semantic).element IS NULL
+  -- ... and "sets nothing" is the question create and alter ask of a SEMANTIC group, through the
+  -- predicate all three now share. The copy that stood here had already drifted from theirs: it
+  -- omitted PSEUDO_ARGS, so an overlay that set only pseudo_args -- which binds the whole shared
+  -- pseudo tier, and whose names ovp already treated as known -- was refused as empty.
+  WHEN semantic IS NOT NULL AND NOT tree_semantic_declares(semantic)
        THEN tree_err('tree_match: semantic overlay is empty')
   WHEN (SELECT count(*) FROM ir WHERE kind = 'step') = 0 THEN tree_err('tree_match: selector has no steps')
   -- before the depth walk, which is the thing a duplicated node id makes non-terminating
@@ -188,7 +191,14 @@ n AS (
                    AND NOT list_contains(COALESCE((SELECT known_pseudos FROM t), []), value)
                    AND (semantic IS NULL OR NOT list_contains((SELECT names FROM ovp), value)) THEN 'pseudo_unknown' ELSE kind END AS kind,
          value, op, arg, COALESCE(alias, 's' || node_id) AS alias,
-         CASE WHEN kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
+         -- The S-less refusal, with the built-in positional pseudo-classes exempted: they are
+         -- structural (they compile through the navigation fragments, read no S slot and bind
+         -- nothing from the SEMANTIC group), so there is nothing about them for an R-only tree to
+         -- be missing. Refusing them said "this tree has no SEMANTIC group" about a clause that
+         -- never wanted one. An unknown pseudo on the same tree still refuses: `ir.kind` is read
+         -- here, not the `pseudo_unknown` the column above computes.
+         CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
+                   AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
               -- the mutation, half two: the sibling-free refusal branch is gone
               ELSE true END AS ok

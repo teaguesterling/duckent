@@ -113,6 +113,29 @@ SELECT {type: (sem).type, id: (sem).id, classes: (sem).classes, attr: (sem).attr
 }::TREE_SEMANTIC
 FROM lp, shared);
 
+-- Does this SEMANTIC group DECLARE an S slot? The one answer to that question, shared by
+-- tree_compile_create, tree_compile_alter (which both store it as tree_catalog.trees.has_semantic)
+-- and tree_compile_match (whose "semantic overlay is empty" refusal asks exactly the same thing of
+-- an overlay). It had been hand-copied into all three, and the copies had already drifted: the
+-- compiler's forgot PSEUDO_ARGS, so a `tree_semantic(pseudo_args := ...)` overlay -- which DOES
+-- bind the shared pseudo tier -- was refused as empty.
+--
+-- It is a question about what the group DECLARES, one slot at a time, never about whether a group
+-- was written: `tree_semantic(attr := 'x')` declares no S slot (ATTR names the projected columns;
+-- it binds nothing structural) and must not mark a tree S-ful, or a TYPE step would compile
+-- against TYPE's 'node' default and return zero rows -- a refusal owed and an empty result
+-- delivered. Every other slot counts: ELEMENT, ATTR MAP, PSEUDO and PSEUDO_ARGS are S declarations
+-- as much as TYPE is, and a slot added later must be added here.
+--
+-- ATTR is the one that must NOT appear: every tree stores an S/ATTR slot ('' closed, '*' open),
+-- so tree_shape_from_catalog gives every LIKE child a non-NULL semantic.attr and counting it would
+-- make every child S-ful. Never NULL, whatever it is handed -- every term is an IS NOT NULL
+-- predicate or a length test -- so a caller may concatenate the result into generated SQL.
+CREATE OR REPLACE MACRO tree_semantic_declares(sem) AS
+  (sem).type IS NOT NULL OR (sem).id IS NOT NULL OR (sem).classes IS NOT NULL
+    OR (sem).attr_map IS NOT NULL OR (sem).element IS NOT NULL
+    OR len(COALESCE((sem).pseudo, [])) > 0 OR (sem).pseudo_args IS NOT NULL;
+
 -- The type a comparison literal implies: numbers and booleans cast the map value; quoted text compares as VARCHAR.
 CREATE OR REPLACE MACRO tree_sql_literal_type(arg) AS
   CASE WHEN regexp_matches(trim(arg), '^-?[0-9]+$') THEN 'BIGINT'

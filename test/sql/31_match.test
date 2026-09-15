@@ -337,6 +337,28 @@ FROM tree_match('main', 'bare', tree_steps([{pseudo: 'leaf'}]));
 ----
 SEMANTIC
 
+# ...but NOT the built-in positional pseudo-classes. They are structural -- they compile through
+# the navigation fragments, read no S slot and bind nothing from the SEMANTIC group -- so the
+# S-less refusal does not cover them: it used to, which left `:first-child` unavailable on an
+# R-only tree although nothing it needs was missing. app.py's module row is the first (and only)
+# row at level 0 of its partition, and each of its children at _parent + 1 is a first child too.
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'bare', tree_steps([{pseudo: 'first-child'}]));
+----
+true
+
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'bare', tree_steps([{pseudo: 'last-child'}]));
+----
+true
+
+# and an unknown pseudo on the same tree still refuses in the same words: `first-child` is
+# exempt because it is a built-in, not because pseudo clauses stopped being S clauses
+statement error
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'nope'}]));
+----
+has no SEMANTIC group
+
 # an unknown tree refuses and says so (T10)
 statement error
 FROM tree_match('main', 'nope', tree_steps([{type: 'function_definition'}]));

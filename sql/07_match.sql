@@ -73,8 +73,21 @@ CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
 
 -- The pseudo-classes the language itself defines. They are structural, so every tree has them
 -- whatever its SEMANTIC group binds, and they are never reported as unknown. One list, read by
--- tree_sql_clause (which compiles them) and by tree_compile_match (which must not mark them).
+-- tree_sql_builtin_pseudo (which compiles them) and by tree_compile_match -- which must not mark
+-- them unknown, and must not refuse them on a tree with no SEMANTIC group: they read no S slot.
 CREATE OR REPLACE MACRO tree_builtin_pseudos() AS ['first-child', 'last-child'];
+
+-- The predicate a built-in pseudo-class compiles to, or NULL when `name` is not one of them --
+-- which is what makes tree_builtin_pseudos() above the single list. The dispatch used to be a
+-- second, hand-copied CASE inside tree_sql_clause, so adding a built-in meant remembering both
+-- and forgetting either one left a built-in that compiled but was reported unknown (or the
+-- reverse). The built-ins go through the navigation fragments rather than being spelled out
+-- again, so a tree that declares ELEMENT gets the first *element* child instead of the row at
+-- _parent + 1.
+CREATE OR REPLACE MACRO tree_sql_builtin_pseudo(name, alias, p, elem) AS
+  CASE WHEN NOT list_contains(tree_builtin_pseudos(), name) THEN NULL
+       WHEN name = 'first-child' THEN tree_sql_first_child(alias, p, elem)
+       WHEN name = 'last-child'  THEN tree_sql_last_child(alias, p, elem) END;
 
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
 -- would rewrite any user text that happened to contain it. Attribute and pseudo filters are
@@ -85,15 +98,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     WHEN 'type'   THEN alias || '._type = ' || tree_sql_lit(value)
     WHEN 'id'     THEN alias || '._id = ' || tree_sql_lit(value)
     WHEN 'class'  THEN 'COALESCE(list_contains(' || alias || '._classes, ' || tree_sql_lit(value) || '), false)'
-    -- The built-ins go through the navigation fragments rather than being spelled out again
-    -- here, so a tree that declares ELEMENT gets the first *element* child instead of the row
-    -- at _parent + 1. Their one NULL case is a root row's NULL _parent under the O(1) form,
-    -- and a NULL predicate reads as false wherever a predicate is used -- a WHERE, a JOIN ON,
-    -- or the WHERE inside an EXISTS -- so no COALESCE wrapper is needed.
-    WHEN 'pseudo' THEN CASE value
-                         WHEN 'first-child' THEN tree_sql_first_child(alias, p, elem)
-                         WHEN 'last-child'  THEN tree_sql_last_child(alias, p, elem)
-                         ELSE 'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)' END
+    -- The built-ins are compiled by tree_sql_builtin_pseudo, which returns NULL for every other
+    -- name -- so this branch consults the one list rather than repeating it. A declared
+    -- pseudo-class is a lookup in the projection's _pseudo map.
+    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, p, elem),
+                                'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)')
     -- An attribute resolves to a projected column first, then to ATTR MAP. The map is
     -- MAP(VARCHAR, VARCHAR), so a comparison against a number or a boolean has to cast the
     -- value ('3' > '10' is true as text); a quoted literal compares as text and needs none.
@@ -263,8 +272,11 @@ chk AS (SELECT CASE
   -- an overlay is an S group for this query only; it cannot widen the projection, and an
   -- overlay that sets nothing (or a selector with no steps) used to compile to NULL
   WHEN (semantic).attr IS NOT NULL THEN tree_err('tree_match: a per-query SEMANTIC overlay cannot add attribute columns; use tree_ddl_alter')
-  WHEN semantic IS NOT NULL AND (semantic).type IS NULL AND (semantic).id IS NULL AND (semantic).classes IS NULL
-       AND (semantic).attr_map IS NULL AND (semantic).pseudo IS NULL AND (semantic).element IS NULL
+  -- ... and "sets nothing" is the question create and alter ask of a SEMANTIC group, through the
+  -- predicate all three now share. The copy that stood here had already drifted from theirs: it
+  -- omitted PSEUDO_ARGS, so an overlay that set only pseudo_args -- which binds the whole shared
+  -- pseudo tier, and whose names ovp already treated as known -- was refused as empty.
+  WHEN semantic IS NOT NULL AND NOT tree_semantic_declares(semantic)
        THEN tree_err('tree_match: semantic overlay is empty')
   WHEN (SELECT count(*) FROM ir WHERE kind = 'step') = 0 THEN tree_err('tree_match: selector has no steps')
   -- before the depth walk, which is the thing a duplicated node id makes non-terminating
@@ -321,9 +333,16 @@ n AS (
                    AND NOT list_contains(COALESCE((SELECT known_pseudos FROM t), []), value)
                    AND (semantic IS NULL OR NOT list_contains((SELECT names FROM ovp), value)) THEN 'pseudo_unknown' ELSE kind END AS kind,
          value, op, arg, COALESCE(alias, 's' || node_id) AS alias,
-         CASE WHEN kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
+         -- The S-less refusal, with the built-in positional pseudo-classes exempted: they are
+         -- structural (they compile through the navigation fragments, read no S slot and bind
+         -- nothing from the SEMANTIC group), so there is nothing about them for an R-only tree to
+         -- be missing. Refusing them said "this tree has no SEMANTIC group" about a clause that
+         -- never wanted one. An unknown pseudo on the same tree still refuses: `ir.kind` is read
+         -- here, not the `pseudo_unknown` the column above computes.
+         CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
+                   AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
-              WHEN kind = 'step' AND op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
+              WHEN ir.kind = 'step' AND ir.op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
               ELSE true END AS ok
   FROM ir),
