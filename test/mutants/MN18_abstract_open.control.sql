@@ -1,10 +1,8 @@
--- test/mutants/MN18_abstract_open.sql
--- Abstract trees default to open attributes. Copied from sql/03_ddl.sql with
--- the attr_text default changed from
---   COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END)
--- to
---   COALESCE((shape).semantic.attr, '*')
--- so a closed abstract with no ATTR declared silently serves undeclared attributes.
+-- test/mutants/MN18_abstract_open.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/03_ddl.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS (
@@ -38,7 +36,7 @@ derived AS (
     CASE WHEN (shape).level IS NOT NULL THEN 'level' ELSE 'parent' END AS basis,
     CASE WHEN (shape).level IS NULL AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
     CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
-    COALESCE((shape).semantic.attr, '*') AS attr_text,  -- the mutation
+    COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     -- A LIKE child has an S group when it declares one or when its parent has one, whatever
     -- slot the parent filled: reading the parent's TYPE alone made an ID-only parent invisible.
     -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is.

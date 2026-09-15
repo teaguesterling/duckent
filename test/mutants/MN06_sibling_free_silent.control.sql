@@ -1,8 +1,8 @@
--- test/mutants/MN06_sibling_free_silent.sql
--- Sibling combinators silently no-op under the sibling-free profile: 'next'/'after'
--- compile to a comparison that never raises (they still combine into a predicate,
--- just not a useful one), and the refusal branch in tree_compile_match is removed
--- so the compiler never objects to using them on a sibling-free tree.
+-- test/mutants/MN06_sibling_free_silent.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/07_match.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Combinator between the previous step alias a and this step alias b. MN14 mutates
@@ -14,9 +14,12 @@ CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
     WHEN 'desc'  THEN tree_sql_subtree(a, b)
     WHEN 'child' THEN tree_sql_children(a, b)
     WHEN 'self'  THEN tree_sql_self(a, b)
-    -- the mutation, half one: 'next' and 'after' fall through to the ELSE below
-    -- ... which is a predicate that never raises and never matches
-    ELSE 'false' END;
+    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
+    WHEN 'after' THEN tree_sql_after(a, b)
+    -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain
+    -- defaults that one before it gets here, so a NULL arriving is hand-built IR -- which is
+    -- exactly the case that must be told what is wrong instead of receiving a NULL fragment.
+    ELSE tree_err('tree_match: unknown combinator ' || COALESCE(op, '<NULL>')) END;
 
 -- The compiler is a fold over the IR: every node's text is built from its children's, so the
 -- chain and the HAS/NOT groups hanging off its steps are compiled by the same two rules applied
@@ -190,7 +193,8 @@ n AS (
          value, op, arg, COALESCE(alias, 's' || node_id) AS alias,
          CASE WHEN kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
-              -- the mutation, half two: the sibling-free refusal branch is gone
+              WHEN kind = 'step' AND op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
+              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
               ELSE true END AS ok
   FROM ir),
 -- (step node id, part node id, part text) for every clause: the same at every level. A child of a

@@ -1,13 +1,8 @@
--- test/mutants/MN05_has_child_only.sql
--- A HAS/NOT group's first inner step is always joined to the step the group hangs off with
--- tree_sql_children, whatever op the IR gives it: `:has(x)` becomes "has a direct CHILD x"
--- instead of "has a descendant x". The classic css reading of :has() as a child test.
---
--- Copied from sql/07_match.sql's tree_sql_chain with one edit: the anchored branch of the
--- final CASE calls tree_sql_children(anchor, first alias) where the original calls
--- tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, ...). The outer chain (anchor IS NULL)
--- is untouched, so only groups are affected -- which is the point: a child-only :has() is
--- invisible to every selector whose group happens to test a direct child.
+-- test/mutants/MN05_has_child_only.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/07_match.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- One step chain as FROM text. `steps` is STRUCT(node_id, alias, op, pred)[] in chain order and
@@ -33,5 +28,5 @@ CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
     -- combinator is asked for. A hand-built IR that breaks that invariant would otherwise reach
     -- tree_sql_comb with a NULL op, whose refusal message concatenates to NULL and raises nothing.
     || CASE WHEN anchor IS NULL THEN (steps[1]).pred
-            ELSE tree_sql_children(anchor, (steps[1]).alias) || ' AND (' || (steps[1]).pred || ')' END
+            ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem) || ' AND (' || (steps[1]).pred || ')' END
   END;

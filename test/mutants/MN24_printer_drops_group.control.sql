@@ -1,22 +1,8 @@
--- test/mutants/MN24_printer_drops_group.sql
--- The printer renders HAS groups and silently drops NOT groups, so `.fn:not(:has(string))` and
--- `.fn` print as the same canonical TREEQL. The printed form is what a caller reads back, what
--- tree_explain reports and what a round-trip through another front-end is compared against, so
--- a printer that omits a part of the selector makes two different selectors indistinguishable
--- on the page while they still match different rows.
---
--- Copied from sql/06_selector.sql's tree_selector_to_treeql with one edit, applied to both
--- unrolled passes: grpA and grpB read `WHERE g.kind IN ('has', 'not')` in the base and
--- `WHERE g.kind = 'has'` here. A group with no rendered text contributes nothing to partB/partC,
--- so the step it hangs off prints without it. This is a COPY, not a fragment override -- the
--- group text is built inline in each pass and there is no fragment for it -- so the copy is
--- GENERATED from sql/06_selector.sql by test/mutants/regen.py and cannot drift from it;
--- .control.sql is the same copy with the edit left out.
---
--- NOTE for the manifest: 40_corpus cannot see this. Its printed-TREEQL records compare
--- tree_selector_to_treeql(<ir>) against tree_explain(...).treeql, and BOTH sides go through
--- this same mutated printer, so the equality still holds. Only a record comparing the printed
--- text against a FROZEN literal catches it -- 34_groups and 38_css_lower have those.
+-- test/mutants/MN24_printer_drops_group.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/06_selector.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Printer: one line per top-level step. A HAS/NOT group renders inline in its step's clause list
@@ -63,8 +49,7 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
     SELECT g.node_id, g.parent_id, upper(g.kind) || ' ( '
              || (SELECT string_agg(tree_treeql_step(x.op, x.body, x.alias), ' ' ORDER BY x.node_id)
                  FROM stepA x WHERE x.parent_id = g.node_id) || ' )' AS t
-    -- the mutation: NOT groups render as nothing and vanish from their step
-    FROM n g WHERE g.kind = 'has'),
+    FROM n g WHERE g.kind IN ('has', 'not')),
   partB AS (SELECT step, id, t FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.t FROM grpA g),
   stepB AS (
     SELECT s.node_id, s.parent_id, s.op, s.alias,
@@ -74,8 +59,7 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
     SELECT g.node_id, g.parent_id, upper(g.kind) || ' ( '
              || (SELECT string_agg(tree_treeql_step(x.op, x.body, x.alias), ' ' ORDER BY x.node_id)
                  FROM stepB x WHERE x.parent_id = g.node_id) || ' )' AS t
-    -- the mutation: NOT groups render as nothing and vanish from their step
-    FROM n g WHERE g.kind = 'has'),
+    FROM n g WHERE g.kind IN ('has', 'not')),
   partC AS (SELECT step, id, t FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.t FROM grpB g),
   stepC AS (
     SELECT s.node_id, s.parent_id, s.op, s.alias,

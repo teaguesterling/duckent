@@ -6,6 +6,27 @@
 # CREATE OR REPLACE MACRO override because the code they mutate is not a macro -- the runner's
 # own css parser, which stands in for the extension's parse-time hook. Such a mutant still has
 # an SQL file, comment-only, so that every mutant is one id, one file, one row. MN08 is the one.
+#
+# WHAT MAKES A KILL EVIDENCE. Most mutants here are copy-and-edit: the whole macro, with one
+# planted edit. A kill only says something about that edit while the copy is still the macro --
+# and in M2 it silently stopped being: the `error(` -> `tree_err(` sweep left ten copies quoting
+# macros that no longer existed, and every one went on being reported KILLED, because a macro
+# from two commits ago fails the same tests a wrong macro does. Two checks hold the claim up,
+# both run by `python3 test/run_mutants.py`:
+#
+#   1. STRUCTURAL. `test/mutants/regen.py` GENERATES each copy from the macro it copies plus its
+#      planted edit; `regen.py --check` rebuilds and compares, and run_mutants.py runs it first,
+#      before touching a database. A drifted copy is out of date whatever the tests say. Edit the
+#      source macro, or the edit table in regen.py -- never the generated body.
+#   2. BEHAVIOURAL. Next to each generated mutant, regen.py writes `<file>.control.sql`: the same
+#      copy with the edit LEFT OUT, so applying it is a no-op CREATE OR REPLACE. run_mutants.py
+#      applies it and requires every suite in expect_fail to PASS, which is what says the kill
+#      comes from the difference between mutant and control. `--no-verify` skips this half;
+#      an explicit `control:` key overrides the file name.
+#
+# MN08 has no control, because its mutation is not a macro override at all -- there is nothing to
+# leave out. Verify it by hand: unset DUCKENT_MUTANT and run the two suites in its expect_fail
+# list; they must PASS. That is the same procedure as the automated one, run by a person.
 - id: MN01
   file: MN01_encoder_tiebreak_desc.sql
   what: reverse the source-order tiebreak in DFS derivation

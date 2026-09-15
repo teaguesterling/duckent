@@ -1,17 +1,8 @@
--- test/mutants/MN13_map_no_cast.sql
--- An ATTR MAP comparison is made without the literal-typed cast: the map value stays VARCHAR
--- and the LITERAL is coerced to text instead, so `[n>9]` compares '9' and '10' as strings and
--- answers that neither is greater than 9 -- the failure sql/07_match.sql's comment names
--- ('3' > '10' is true as text). The map is MAP(VARCHAR, VARCHAR), so the direction of the
--- cast is the whole of the semantics: cast the value to the literal's type (right) or the
--- literal to the value's (wrong, and silent -- it binds and it returns rows).
---
--- Copied from sql/07_match.sql's tree_sql_clause with one edit: the has_map branch's
--- TRY_CAST(... AS <literal type>) around the map lookup is dropped and the arg is wrapped in
--- CAST(... AS VARCHAR) instead. The quoted-literal case (tree_sql_literal_type IS NULL) is
--- untouched -- it always compared as text. The copy is GENERATED verbatim from the source
--- macro by test/mutants/regen.py, comments included; .control.sql is the same copy with the
--- edit left out, so a diff between the two IS the mutation.
+-- test/mutants/MN25_promoted_class_from_body.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/07_match.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
@@ -40,11 +31,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     WHEN 'attr'   THEN CASE
         WHEN list_contains(attr_cols, value)
           THEN 'COALESCE(' || alias || '.' || tree_sql_ident(value) || ' ' || op || ' ' || arg || ', false)'
-        -- the mutation: no TRY_CAST on the map value; the literal is cast to VARCHAR instead
         WHEN has_map
-          THEN 'COALESCE(' || alias || '._attr_map[' || tree_sql_lit(value) || ']'
-               || ' ' || op || ' ' || CASE WHEN tree_sql_literal_type(arg) IS NULL THEN arg
-                                           ELSE 'CAST(' || arg || ' AS VARCHAR)' END || ', false)'
+          THEN 'COALESCE(' || CASE WHEN tree_sql_literal_type(arg) IS NULL
+                                   THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'
+                                   ELSE 'TRY_CAST(' || alias || '._attr_map[' || tree_sql_lit(value) || '] AS ' || tree_sql_literal_type(arg) || ')' END
+               || ' ' || op || ' ' || arg || ', false)'
         ELSE tree_err('tree_match: attribute ' || COALESCE(value, '<NULL>') || ' is neither a projected column nor served by ATTR MAP') END
     -- One level only: recursive := true flattens _root's struct into its component columns, so
     -- _root itself stops being addressable and falls through to an enclosing step alias

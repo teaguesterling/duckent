@@ -1,18 +1,8 @@
--- test/mutants/MN12_shared_wins.sql
--- The shared pseudo tier shadows the tree's own bindings instead of the other way round: every
--- catalog macro named sel_<name> is bound first and a local or prefix declaration of the same
--- name is dropped as a duplicate. A tree that declares `:leaf` -- by name or through a PREFIX
--- namespace claim -- then silently answers some other schema's sel_leaf.
---
--- Copied from sql/00_types.sql's tree_expand_pseudo with two edits, both in service of one
--- claim (spec S7: the shared tier is a fallback, not an override):
---   (1) the two dedup filters in `shared` -- NOT list_contains(... name) and NOT
---       list_contains(... macro) -- are removed, so a shared candidate is kept even when the
---       tree already binds that name or that macro;
---   (2) the concatenation is list_concat(shared.extra, lp.bound) instead of
---       list_concat(lp.bound, shared.extra), and the result is deduped keeping the FIRST
---       occurrence of each name -- which is now the shared one. The dedup is needed because
---       tree_sql_pseudo_map builds a MAP, and a MAP with a repeated key raises.
+-- test/mutants/MN12_shared_wins.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/00_types.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Expand macro, map, prefix and shared bindings to expression bodies. Prefix entries bind every
@@ -53,17 +43,19 @@ shared AS (
                       -- a bare sel_ macro has an empty remainder: not an error, just not a
                       -- nameable pseudo-class, so it is left unbound rather than bound as ''
                       AND substr(f.function_name, length(tree_shared_pseudo_prefix()) + 1) <> ''
-                      -- the mutation, edit (1): the name and macro dedup filters are gone
+                      -- spec §7, amended: identity dedup. The spec's literal text excludes a
+                      -- candidate only by name collision; that alone double-binds a macro
+                      -- already claimed by a prefix declaration (e.g. sel_ast_leaf, which also
+                      -- starts with the shared tier's own "sel_") under a second, derived name.
+                      -- A prefix declaration is a namespace claim: a macro already bound under
+                      -- any name -- locally or via a prefix -- is not re-bound by the shared
+                      -- tier under another one.
+                      AND NOT list_contains(list_transform(lp.bound, lambda y: (y).name), substr(f.function_name, length(tree_shared_pseudo_prefix()) + 1))
+                      AND NOT list_contains(list_transform(lp.bound, lambda y: (y).macro), f.function_name)
                    ), []) AS extra
   FROM lp
-),
--- the mutation, edit (2): shared first, local/prefix second, and the FIRST occurrence of a
--- name wins -- so the shared tier overrides what the tree declared. The dedup is needed
--- because tree_sql_pseudo_map builds a MAP and a repeated key raises.
-allb AS (SELECT list_concat(shared.extra, lp.bound) AS v FROM lp, shared),
-ded AS (SELECT list_filter(v, lambda x, i:
-                 list_position(list_transform(v, lambda y: (y).name), (x).name) = i) AS v FROM allb)
+)
 SELECT {type: (sem).type, id: (sem).id, classes: (sem).classes, attr: (sem).attr, attr_map: (sem).attr_map, element: (sem).element, pseudo_args: (sem).pseudo_args,
-  pseudo: CASE WHEN (sem).pseudo IS NULL AND (sem).pseudo_args IS NULL THEN NULL ELSE ded.v END
+  pseudo: CASE WHEN (sem).pseudo IS NULL AND (sem).pseudo_args IS NULL THEN NULL ELSE list_concat(lp.bound, shared.extra) END
 }::TREE_SEMANTIC
-FROM ded);
+FROM lp, shared);

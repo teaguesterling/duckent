@@ -1,20 +1,8 @@
--- test/mutants/MN03_size_status.sql
--- A tree that DECLARES its size column gets a subtree range one short of it, while a tree that
--- derives SIZE from (ROOT, ORDER, LEVEL) gets the full range: the compiler treats a declared O
--- column as a different kind of number from a derived one instead of the same number written
--- down. The spec's O group says the opposite -- a declared column and its derived default are
--- the same thing, and whether _size was read off the source or computed may not be observable.
--- The second differential (42) is what makes that testable.
---
--- Copied from sql/02_projection.sql's tree_compile_projection with one edit, in the __s CTE:
---   COALESCE(CASE WHEN (shape).size IS NOT NULL THEN 'CAST(a.__size_raw AS BIGINT)' END, ...)
--- becomes                                       'CAST(a.__size_raw AS BIGINT) - 1'
--- so only the DECLARED branch moves; the derived branch (tree_sql_size_expr) is untouched, which
--- is what makes 42's declared-vs-derived records the ones that see it. A copy-and-edit rather
--- than a fragment override: the declared branch is written inline in the compiler, and the only
--- fragment next to it is the derived one. The copy is GENERATED from the source macro by
--- test/mutants/regen.py, so it cannot drift from it; .control.sql is the same copy with the
--- edit left out.
+-- test/mutants/MN03_size_status.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/02_projection.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- 1.5.5 notes:
@@ -77,7 +65,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || ' FROM __src s JOIN __walk w ON s.' || (shape).key || ' = w.__key), '
      || '__p AS (SELECT a.* EXCLUDE (__key, __pkey), b._pre AS _parent FROM __r0 a LEFT JOIN __r0 b ON b.__key = a.__pkey AND b._root = a._root), '
    END)
-  || '__s AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).size IS NOT NULL THEN 'CAST(a.__size_raw AS BIGINT) - 1' END, tree_sql_size_expr()) || ' AS _size FROM __p a), '
+  || '__s AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).size IS NOT NULL THEN 'CAST(a.__size_raw AS BIGINT)' END, tree_sql_size_expr()) || ' AS _size FROM __p a), '
   || '__c AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).children IS NOT NULL THEN 'CAST(a.__children_raw AS BIGINT)' END, tree_sql_children_expr()) || ' AS _children, '
   || COALESCE(CASE WHEN (shape).next IS NOT NULL THEN 'CAST(a.__next_raw AS BIGINT)' END, 'a._pre + a._size + 1') || ' AS _next FROM __s a) '
   || (CASE WHEN COALESCE(list_aggregate(list_filter([
