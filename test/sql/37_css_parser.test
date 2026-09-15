@@ -1,0 +1,159 @@
+# name: test/sql/37_css_parser.test
+# description: the runner's css parser lowers v0 css text to the selector IR, and
+# language := 'css' both selects the parser and is carried into the provenance columns
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name', classes := 'CASE WHEN (flags & 6) = 6 AND type = ''function_definition'' THEN [''fn''] ELSE [] END',
+                                       pseudo := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# an IR selector is not text, so the runner leaves it alone whatever the default language is
+query I
+FROM tree_match('main', 'app', tree_steps([{class: 'fn', id: 'greet'}])) SELECT name;
+----
+greet
+
+# app.parquet: node 6 is function_definition greet, node 30 is shout; greet's subtree carries
+# `string` rows (16, 22), shout's carries none -- so only shout has no string beneath it
+query I
+FROM tree_match('main', 'app', '.fn:not(:has(string))', language := 'css') SELECT name;
+----
+shout
+
+# both function_definitions have flags & 6 = 6 (:def) and a block child holding a
+# return_statement: greet's is node 20, shout's node 39
+query I rowsort
+FROM tree_match('main', 'app', 'function_definition:def > block > return_statement', language := 'css') SELECT node_id;
+----
+20
+39
+
+# a relative selector inside :has may open with a combinator: both fn rows have a block child
+query I rowsort
+FROM tree_match('main', 'app', '.fn:has(> block)', language := 'css') SELECT name;
+----
+greet
+shout
+
+query I
+FROM tree_match('main', 'app', '.fn#greet', language := 'css') SELECT name;
+----
+greet
+
+# ^= lowers to LIKE 'sh%'; name is a projected attribute column, so no ATTR MAP is needed
+query I
+FROM tree_match('main', 'app', '.fn[name^="sh"]', language := 'css') SELECT name;
+----
+shout
+
+# a bare identifier value is quoted as text, a bare number is left unquoted
+query I
+FROM tree_match('main', 'app', '.fn[name=greet]', language := 'css') SELECT name;
+----
+greet
+
+# greet spans lines 4-6 in the fixture, shout 9-10
+query I
+FROM tree_match('main', 'app', '.fn[start_line=4]', language := 'css') SELECT name;
+----
+greet
+
+# node 14 (greet's block) has children 15 (expression_statement) and 20; node 38 (shout's block)
+# has only 39 -- so exactly one block has an expression_statement as its first child
+query I
+FROM tree_match('main', 'app', 'block > expression_statement:first-child', language := 'css') SELECT count(*);
+----
+1
+
+# captures
+query I
+FROM tree_match('main', 'app', '.fn@f > block', language := 'css') SELECT f.name ORDER BY 1 LIMIT 1;
+----
+greet
+
+# the language the selector was written in reaches the provenance column
+query I
+SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn', language := 'css');
+----
+css
+
+# quoted keyword types: the quotes are stripped and the name becomes a TYPE clause. The printer
+# emits one line per step; the newlines are folded to " | " as in 30_selector.test
+query II
+SELECT replace((tree_explain('main', 'app', '"select" > "from"', language := 'css')).treeql, chr(10), ' | '),
+       (tree_explain('main', 'app', '"select" > "from"', language := 'css')).language;
+----
+(TYPE 'select') | CHILD (TYPE 'from')	css
+
+# the parser builds the IR tree_steps builds for the equivalent selector literal, so the two
+# print as the same TREEQL -- combinators, group nesting and the group chain's leading
+# combinator included. This is the contract the corpus differential rests on.
+query I
+SELECT (tree_explain('main', 'app', '.fn:not(:has(string))', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{has: [{type: 'string'}]}]}]));
+----
+true
+
+query I
+SELECT (tree_explain('main', 'app', 'a > b c', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'child', type: 'b'}, {comb: 'desc', type: 'c'}]));
+----
+true
+
+# an unknown pseudo-class is preserved as a clause, compiles to false, and is counted
+query I
+SELECT count(*) FROM tree_match('main', 'app', '.fn:nope', language := 'css');
+----
+0
+
+query I
+SELECT (tree_explain('main', 'app', '.fn:nope', language := 'css')).sql LIKE '%1 AS _match_unknown_pseudos%';
+----
+true
+
+# refusals: host escape, unclosed bracket, doubled combinator, junk
+statement error
+FROM tree_match('main', 'app', '.fn[WHERE x > 2]', language := 'css');
+----
+css has no host escape
+
+statement error
+FROM tree_match('main', 'app', '.fn[name="main"', language := 'css');
+----
+unclosed
+
+statement error
+FROM tree_match('main', 'app', '.fn:has(block', language := 'css');
+----
+unclosed
+
+statement error
+FROM tree_match('main', 'app', '.fn >> .call', language := 'css');
+----
+unexpected
+
+statement error
+FROM tree_match('main', 'app', '.fn#main extra junk!!', language := 'css');
+----
+unexpected
+
+# a capture inside a group has no row to bind, exactly as tree_steps refuses one
+statement error
+FROM tree_match('main', 'app', '.fn:has(block@b)', language := 'css');
+----
+capture inside
+
+# tree_explain refuses the same text the same way
+statement error
+SELECT (tree_explain('main', 'app', '.fn[WHERE 1]', language := 'css')).sql;
+----
+css has no host escape
+
+# treeql text is refused until M-LANG; with no language the runner reads
+# tree_catalog.settings, which still says treeql
+statement error
+FROM tree_match('main', 'app', '(TYPE ''fn'')');
+----
+M-LANG
