@@ -245,6 +245,19 @@ SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', attr: 'params = 2'}]))
 ----
 true
 
+# c17  .fn:not(:nope)  [app]  portable nested self pseudo unknown_pseudo
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'app', tree_steps([{class: 'fn', "not": [{comb: 'self', pseudo: 'nope'}]}])))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'app', '.fn:not(:nope)', language := 'css'));
+----
+true
+
+query I
+SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{comb: 'self', pseudo: 'nope'}]}]))
+     = (tree_explain('main', 'app', '.fn:not(:nope)', language := 'css')).treeql;
+----
+true
+
 # --------------------------------------------------------------------------------------
 # astcss-eval accepted pairs: test/corpus/astcss_eval.jsonl
 # --------------------------------------------------------------------------------------

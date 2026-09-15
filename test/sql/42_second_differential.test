@@ -154,3 +154,12 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
 ----
 true
 
+# c17  .fn:not(:nope)  portable nested self pseudo unknown_pseudo
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'app_declared', '.fn:not(:nope)', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'app_derived', '.fn:not(:nope)', language := 'css'));
+----
+true
+

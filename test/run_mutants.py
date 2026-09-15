@@ -7,10 +7,15 @@ manifest = yaml.safe_load(open(os.path.join(ROOT, "test/mutants/manifest.yaml"))
 alive = []
 for m in manifest:
     path = os.path.join(ROOT, "test/mutants", m["file"])
+    # A mutant whose mutation is PYTHON-side (the runner's own css parser, say) cannot be
+    # expressed as a CREATE OR REPLACE MACRO override, so the manifest may carry an `env` map
+    # that is added to the environment of every subprocess run for that mutant; its SQL file is
+    # then comment-only. Keys are read by the runner, not by the SQL: see MN08.
+    env = dict(os.environ, **{k: str(v) for k, v in (m.get("env") or {}).items()})
     killed_by = []
     for t in m["expect_fail"]:
         r = subprocess.run([sys.executable, os.path.join(ROOT, "test/run.py"), os.path.join(ROOT, t), "--mutant", path],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
         if r.returncode != 0:
             killed_by.append(t)
     status = "KILLED" if killed_by else "SURVIVED"

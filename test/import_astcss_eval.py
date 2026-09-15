@@ -4,7 +4,7 @@
     python3 test/import_astcss_eval.py          # from the repo root
 
 Reads `~/Projects/astcss-eval/pairs/accepted-b*.jsonl` (108 rows at batch b3) and the hand
-corpus `test/corpus/selectors.tsv`, and writes seven files, one per `write_*` function below:
+corpus `test/corpus/selectors.tsv`, and writes eight files, one per `write_*` function below:
 
   test/corpus/astcss_eval.jsonl        the imported rows, with both duckent spellings attached
   test/corpus/aliases.tsv              alias -> the semantic types it selects on our fixtures
@@ -13,6 +13,7 @@ corpus `test/corpus/selectors.tsv`, and writes seven files, one per `write_*` fu
   test/sql/41b_live_sitting_duck.test          the same, against today's sitting_duck
   test/sql/42_second_differential.test         declared O columns vs derived ones
   test/sql/43_representation.test              P23: the same semantics, spelled differently
+  test/sql/44_parsers.test                     the two css front-ends build the same IR
 
 Everything it writes is deterministic and committed, so a re-run is a no-op and a diff is a real
 change. Needs `duckdb`; needs sitting_duck loadable only for `aliases.tsv`.
@@ -389,6 +390,20 @@ def write_43_representation(hand):
         out += _same_keys_record("# %s" % sel,
                                  _treeql_keys("rep_pseudo", "tree_steps(%s)" % lhs),
                                  _treeql_keys("rep_class", "tree_steps(%s)" % rhs))
+    out += ["# The two records above say a promoted class and its pseudo-class select the same\n"
+            "# rows. They do NOT say a class may be ANSWERED from a pseudo-class body: promotion\n"
+            "# is something the tree's declaration does, not something the matcher may infer per\n"
+            "# row. rep_class_none binds `def` as a PSEUDO and declares an empty CLASSES list, so\n"
+            "# `.def` must select nothing there while `:def` still selects every def -- the second\n"
+            "# column, which keeps the first from passing on a tree that selects nothing at all.\n\n",
+            _app_ddl("rep_class_none", SIZE_ONLY,
+                     "type := 'type', classes := '[]::VARCHAR[]',\n"
+                     "    pseudo := [{name: 'def', body: '(flags & 6) = 6'}]"),
+            "query II\n"
+            "SELECT (SELECT count(*) FROM tree_match('main', 'rep_class_none', tree_steps([{class: 'def'}]))),\n"
+            "       (SELECT count(*) FROM tree_match('main', 'rep_class_none', tree_steps([{pseudo: 'def'}])))\n"
+            "     = (SELECT count(*) FROM tree_match('main', 'rep_pseudo', tree_steps([{pseudo: 'def'}])));\n"
+            "----\n0\ttrue\n\n"]
     out += ["# " + "-" * 86 + "\n# (c) ELEMENT: a column, or a macro over the flag bit it was"
             " derived from\n# " + "-" * 86 + "\n\n",
             "# `is_element` is is_construct(flags), frozen into the fixture. On app.parquet (and on\n"
@@ -413,6 +428,55 @@ def write_43_representation(hand):
             % (_css_keys("rep_elem_col", ELEM_DIVERGES),
                _css_keys("rep_elem_expr", ELEM_DIVERGES), ELEM_DIVERGES_EXPECTED)]
     return _write(os.path.join(SQL, "43_representation.test"), out)
+
+
+def write_44_parsers(hand, astcss):
+    """test/sql/44_parsers.test -- the parser differential: one language, two front-ends.
+
+    test/css_parser.py is a recursive-descent parser over the selector TEXT (it stands in for the
+    parse-time hook the extension will own); sql/09_css.sql lowers the parse tree tree-sitter-css
+    builds for the same text. 38_css_lower binds them on a hand-written list of shapes; this file
+    binds them on the CORPUS -- every css row of both corpora, which is where the selectors people
+    actually wrote live.
+
+    Two records per row:
+
+      * the IR. `tree_parse_css(<css>)` equals the rows the runner parser built, frozen into this
+        file as a `[...]::TREE_SELECTOR` literal. The literal is generated from the runner, never
+        written by hand, so a mismatch is a real disagreement rather than a typo -- and because it
+        is frozen, it also catches the runner drifting away from what it used to build.
+      * the print. `tree_selector_to_treeql(tree_parse_css(<css>))` equals the TREEQL
+        `tree_explain` reports for the same text. tree_explain's selector is parsed by the RUNNER
+        at test time, so this record has a live parser on each side -- it is the one that sees a
+        runner-side mutation (MN08) that the frozen literal above cannot.
+    """
+    out = ["# name: test/sql/44_parsers.test\n",
+           "# description: the parser differential -- the runner's css parser (test/css_parser.py)\n",
+           "# and the SQL front-end (tree_parse_css / tree_css_lower) build the same IR, and print\n",
+           "# the same canonical TREEQL, for every css row of both corpora.\n#\n",
+           "# The `[...]::TREE_SELECTOR` literals are the runner parser's own output, frozen. The\n",
+           "# second record of each pair re-parses the text with the runner at test time, so the\n",
+           "# two records fail for different reasons: the first when the lowering drifts, the\n",
+           "# second when either front-end does.\n#\n",
+           GENERATED,
+           "\nrequire sitting_duck\n\nstatement ok\nLOAD sitting_duck;\n\n",
+           "# MN22 bait. A partition row marked NOT P13-clean, for a tree name nothing here (or\n"
+           "# anywhere else) declares: no record below reads tree_state, so this row is invisible\n"
+           "# to a front-end that lowers a selector from its text alone -- and fatal to one that\n"
+           "# consults engine state, which is the mutant.\n",
+           "statement ok\nINSERT INTO tree_state.partitions\n"
+           "VALUES (current_database(), 'main', '__mn22_absent', 'x', 0, 0, false, NULL);\n\n"]
+    out += _tree_ddl_records(("app", "scripts", "py_variety"))
+    out.append("# " + "-" * 86 + "\n# the hand corpus: test/corpus/selectors.tsv\n# "
+               + "-" * 86 + "\n\n")
+    for r in hand:
+        out += _parser_records(r["id"], r["fixture"], r["css"],
+                               css_parser.to_sql(css_parser.parse(r["css"])), r["tags"])
+    out.append("# " + "-" * 86 + "\n# astcss-eval accepted pairs: test/corpus/astcss_eval.jsonl\n# "
+               + "-" * 86 + "\n\n")
+    for r in astcss:
+        out += _parser_records(r["id"], r["fixture"], r["css"], r["treeql_ir"], r["tags"])
+    return _write(os.path.join(SQL, "44_parsers.test"), out)
 
 
 # --- record templates ---------------------------------------------------------------------
@@ -479,6 +543,15 @@ def _p22_records(cid, tree, treeql, css, tags):
             % (treeql, tree, sql_text(css))]
 
 
+def _parser_records(cid, tree, css, ir, tags):
+    return ["# %s  %s  [%s]  %s\n" % (cid, css, tree, " ".join(tags)),
+            "query I\nSELECT tree_parse_css('%s')\n     = %s;\n----\ntrue\n\n"
+            % (sql_text(css), ir),
+            "query I\nSELECT tree_selector_to_treeql(tree_parse_css('%s'))\n"
+            "     = (tree_explain('main', '%s', '%s', language := 'css')).treeql;\n----\ntrue\n\n"
+            % (sql_text(css), tree, sql_text(css))]
+
+
 def _keys_from_match(tree, css):
     """The node keys of a css match, as astcss-eval spells and orders them."""
     return ("FROM (SELECT DISTINCT file_path, node_id\n"
@@ -537,7 +610,7 @@ def main():
     written = [write_aliases_tsv(session), write_astcss_jsonl(astcss),
                write_40_corpus(hand, astcss), write_41_differential(astcss),
                write_41b_live(astcss), write_42_second_differential(hand),
-               write_43_representation(hand)]
+               write_43_representation(hand), write_44_parsers(hand, astcss)]
     print("hand rows: %d   astcss rows: %d (%d divergent)"
           % (len(hand), len(astcss), len(DIVERGENT)))
     for path in written:

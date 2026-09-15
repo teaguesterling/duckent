@@ -128,6 +128,15 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
 ----
 true
 
+# c17  .fn:not(:nope)  portable nested self pseudo unknown_pseudo
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_col', '.fn:not(:nope)', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_expr', '.fn:not(:nope)', language := 'css'));
+----
+true
+
 # --------------------------------------------------------------------------------------
 # (b) promotion: one predicate as a PSEUDO body, and as a CLASSES list the source computes
 # --------------------------------------------------------------------------------------
@@ -163,6 +172,28 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
         FROM tree_match('main', 'rep_class', tree_steps([{type: 'function_definition', class: 'def'}])));
 ----
 true
+
+# The two records above say a promoted class and its pseudo-class select the same
+# rows. They do NOT say a class may be ANSWERED from a pseudo-class body: promotion
+# is something the tree's declaration does, not something the matcher may infer per
+# row. rep_class_none binds `def` as a PSEUDO and declares an empty CLASSES list, so
+# `.def` must select nothing there while `:def` still selects every def -- the second
+# column, which keeps the first from passing on a tree that selects nothing at all.
+
+statement ok
+CALL tree_ddl_create('main', 'rep_class_none', tree_spec(tree_shape(
+  root := 'file_path', "order" := 'node_id', level := 'depth',
+  size := 'descendant_count',
+  semantic := tree_semantic(type := 'type', classes := '[]::VARCHAR[]',
+    pseudo := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT (SELECT count(*) FROM tree_match('main', 'rep_class_none', tree_steps([{class: 'def'}]))),
+       (SELECT count(*) FROM tree_match('main', 'rep_class_none', tree_steps([{pseudo: 'def'}])))
+     = (SELECT count(*) FROM tree_match('main', 'rep_pseudo', tree_steps([{pseudo: 'def'}])));
+----
+0	true
 
 # --------------------------------------------------------------------------------------
 # (c) ELEMENT: a column, or a macro over the flag bit it was derived from
@@ -295,6 +326,15 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
         FROM tree_match('main', 'rep_elem_col', '.def:not(.fn)', language := 'css'))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
         FROM tree_match('main', 'rep_elem_stub', '.def:not(.fn)', language := 'css'));
+----
+true
+
+# c17  .fn:not(:nope)  portable nested self pseudo unknown_pseudo
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_elem_col', '.fn:not(:nope)', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_elem_stub', '.fn:not(:nope)', language := 'css'));
 ----
 true
 
