@@ -236,3 +236,151 @@ query I
 SELECT tree_selector_group_depth(tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c'}]}]}]));
 ----
 2
+
+# ---------------------------------------------------------------------------
+# Matching. A HAS/NOT group is a predicate on the step it hangs off, compiled as an
+# (NOT) EXISTS over the group's own chain, the chain anchored on that step's alias.
+#
+# The CLASS expression is a CASE on the source columns rather than a call to
+# semantic_type_to_string: that function lives in sitting_duck, and the fixture carries the raw
+# numeric semantic_type (240 for a function_definition), so a stub mapping it would be pinning a
+# magic number rather than testing anything.
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name',
+                                       classes := 'CASE WHEN type = ''function_definition'' AND (flags & 6) = 6 THEN [''fn''] ELSE [] END',
+                                       pseudo := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the flagship, and the thing a linear chain cannot say: functions with no string anywhere below.
+# greet's body holds the docstring (node 16) and the f-string (22); shout's body (39..53) holds
+# neither, so shout is the whole answer.
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'string'}]}])) SELECT name;
+----
+shout
+
+# the same selector with the CLASS spelling of "is a definition"
+query I
+FROM tree_match('main', 'app', tree_steps([{class: 'fn', "not": [{type: 'string'}]}])) SELECT name;
+----
+shout
+
+# HAS with a child-anchored inner chain: functions whose block directly contains a return.
+# greet's block is 14 (children 15, 20 -- 20 is the return_statement), shout's is 38 (child 39).
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', has: [{comb: 'child', type: 'block', has: [{comb: 'child', type: 'return_statement'}]}]}])) SELECT name;
+----
+greet
+shout
+
+# nesting two deep: NOT ( HAS ) reads as "has no block that has a string". greet's block 14 has
+# strings 16 and 22 below it; shout's block 38 has none.
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'block', has: [{type: 'string'}]}]}])) SELECT name;
+----
+shout
+
+# a group is a predicate on its step, not a step of its own: the chain still has two steps, so
+# the subject is the block (node 38) and the capture outside the group still binds
+query III
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f', "not": [{type: 'string'}]}, {comb: 'child', type: 'block'}])) SELECT f.name, type, node_id;
+----
+shout	block	38
+
+# unknown pseudo-classes are counted at every level, groups included. The inner :nope compiles to
+# false, so the NOT group holds for every function and both rows survive to report the count.
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'block', pseudo: 'nope'}]}])) SELECT name, _match_unknown_pseudos;
+----
+greet	1
+shout	1
+
+# The built-in positional pseudo-classes. They are structural, so they compile through the same
+# fragments the combinators and traversal use, and they are never reported as unknown.
+# Node 15 (expression_statement) is block 14's first child; block 38's only child is 39.
+query I
+SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'block'}, {comb: 'child', type: 'expression_statement', pseudo: 'first-child'}]));
+----
+1
+
+# last child of block 14 is the return_statement 20, of block 38 the return_statement 39
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'block'}, {comb: 'child', pseudo: 'last-child'}])) SELECT node_id;
+----
+20
+39
+
+# a built-in is never reported as unknown, whatever the tree's SEMANTIC group binds: the two
+# expression_statements (1 under the module, 15 under block 14) are both first children
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'expression_statement', pseudo: 'first-child'}])) SELECT node_id, _match_unknown_pseudos;
+----
+1	0
+15	0
+
+# ELEMENT through a per-query overlay: the overlay REPLACEs _element in the projection, so the
+# sibling and positional relations stop counting the punctuation tokens. SIBLING of each
+# `parameters` node (9, 33) then skips the ':' (13, 37) and lands on the block (14, 38).
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'next'}]),
+     semantic := tree_semantic(element := 'regexp_matches(type, ''^[a-z_]'')')) SELECT node_id;
+----
+14
+38
+
+# without the overlay every row is an element, so SIBLING is the O(1) _pre + _size + 1 form
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'next'}])) SELECT node_id;
+----
+13
+37
+
+# :first-child under the same overlay is the identifier (11, 35), not the '(' token (10, 34)
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'child', pseudo: 'first-child'}]),
+     semantic := tree_semantic(element := 'regexp_matches(type, ''^[a-z_]'')')) SELECT node_id;
+----
+11
+35
+
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'child', pseudo: 'first-child'}])) SELECT node_id;
+----
+10
+34
+
+# an overlay that sets only ELEMENT is not an empty overlay: ELEMENT is an S slot like the rest,
+# which is why the four records above compile at all
+statement error
+FROM tree_match('main', 'app', tree_steps([{type: 'block'}]), semantic := tree_semantic());
+----
+semantic overlay is empty
+
+# The refusals read every level of the IR, groups included: an S clause inside a group on a tree
+# with no SEMANTIC group is as unavailable as one at the top level.
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement error
+FROM tree_match('main', 'bare', tree_steps([{"where": 'depth = 0', has: [{type: 'function_definition'}]}]));
+----
+SEMANTIC
+
+# ... and so is a sibling combinator inside a group on a sibling-free tree
+statement ok
+CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
+
+statement error
+FROM tree_match('main', 'cats', tree_steps([{"where": 'true', has: [{comb: 'next'}]}]));
+----
+SIBLING_ORDER
+
+# tree_sql_chain is the only thing that turns a chain into FROM text. tree_steps refuses an empty
+# group before the compiler can see one, but the fragment refuses on its own account rather than
+# emitting a FROM with no relation in it.
+statement error
+SELECT tree_sql_chain('P', []::STRUCT(node_id INTEGER, alias VARCHAR, op VARCHAR, pred VARCHAR)[], 'a', false);
+----
+tree_match: empty group
