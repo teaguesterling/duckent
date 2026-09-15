@@ -369,12 +369,6 @@ decide rather than re-discover.
 
 - LIKE patterns are not `%`-escaped in either css front-end, so `[attr^=50%]` means more than it
   says. v0, in both, deliberately.
-- A **bare text selector reports `treeql` in provenance** although it was parsed as css. The
-  runner substitutes the IR without synthesizing the `language :=` its caller did not write, and
-  `_match_language` is `COALESCE(language, 'treeql')` by design — the compiler sees IR and cannot
-  know what text, if any, produced it. Having a front-end record the language it used is an
-  M-LANG item; it is listed here because the default flip is what made the case reachable.
-
 **Fixtures and cost.**
 
 - `test/gen_fixtures.py` is not byte-reproducible for `scripts.parquet` and `py_variety.parquet`:

@@ -130,23 +130,39 @@ class Session:
             except Exception as e:
                 raise RuntimeError(f"{label}: {e}\n  in: {stmt[:200]}") from e
 
-    def selector_language(self, args):
-        """The language a selector argument list is written in: the `language := ...` named
-        argument if it carries one, else the catalog's default. Emulates the parse-time
-        lookup the extension will do; a literal language is not read from the catalog."""
+    @staticmethod
+    def written_language(args):
+        """The language the call NAMES, or None when it names none: the value of a literal
+        `language := '...'` among the named arguments."""
         for part in args[3:]:
             m = NAMED_ARG_RE.match(part)
             if m and m.group(1) == "language":
                 lit = string_literal(m.group(2))
                 if lit is not None: return lit
+        return None
+
+    def default_language(self):
+        """The catalog's default selector language: which front-end parses selector TEXT that
+        names no language. Emulates the parse-time lookup the extension will do."""
         return self.con.execute(
             "SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language'").fetchone()[0]
 
+    def selector_language(self, args):
+        """The language a selector argument list is written in: the `language := ...` named
+        argument if it carries one, else the catalog's default."""
+        return self.written_language(args) or self.default_language()
+
     def rewrite_selectors(self, sql):
         """Replace a *text* selector in tree_match/tree_explain with the IR its language parses
-        it to, leaving every other argument (language := included, so the provenance still names
-        the language it was written in) alone. A selector already handed over as IR is not text
-        and is left untouched."""
+        it to, leaving every other argument alone. A selector already handed over as IR is not
+        text and is left untouched.
+
+        When the call names no language, the default from `tree_catalog.settings` is applied AND
+        WRITTEN BACK as `language := '<default>'`. That is the front-end recording the language it
+        used: the compiler reports `_match_language = COALESCE(language, 'treeql')` and sees only
+        IR, so without this a selector parsed as css reported `treeql` -- provenance naming a
+        language nothing had parsed. Here the parse and the provenance are the same decision, made
+        once, by the thing that made it. A call that names its language keeps the one it named."""
         for fname in ("tree_match", "tree_explain"):
             pos = 0
             while True:
@@ -157,7 +173,10 @@ class Session:
                 text = string_literal(args[2]) if len(args) >= 3 else None
                 if text is None:
                     pos = end; continue
-                lang = self.selector_language(args)
+                lang = self.written_language(args)
+                if lang is None:
+                    lang = self.default_language()
+                    args.append(" language := '" + lang.replace("'", "''") + "'")
                 if lang != "css":
                     raise RuntimeError("tree_match: TREEQL text parsing arrives with M-LANG; pass tree_steps(...)")
                 args[2] = " " + css_parser.to_sql(css_parser.parse(text))

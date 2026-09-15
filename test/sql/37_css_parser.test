@@ -279,17 +279,26 @@ SELECT (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', '.f
 true
 
 # ...and a bare selector that css cannot parse refuses as css, which is what "the default is
-# css" means: the settings row picks the PARSER. It does not touch provenance -- _match_language
-# is COALESCE(language, 'treeql') and never reads the catalog, because a selector reaches the
-# compiler as IR and the compiler cannot know what text, if any, it was parsed from. So the
-# language a match reports is the one its caller declared, and a bare selector declares none.
+# css" means: the settings row picks the PARSER.
 statement error
 FROM tree_match('main', 'app', '(TYPE ''fn'')');
 ----
 unexpected
 
+# Provenance follows the parse. _match_language is still COALESCE(language, 'treeql') in the
+# compiler and still never reads the catalog -- a selector reaches the compiler as IR, and IR
+# cannot say what text, if any, produced it. What changed is who answers: the front-end that
+# applies the default now WRITES IT BACK as `language := 'css'` when it rewrites the call, so the
+# language a match reports is the language its text was actually parsed as. A call that names its
+# language keeps the one it named, and a selector handed over as IR still reports `treeql`
+# (31_match) -- it was never parsed.
 query II
 SELECT (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn')),
        (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn', language := 'css'));
 ----
-treeql	css
+css	css
+
+query I
+SELECT (tree_explain('main', 'app', '.fn')).language;
+----
+css

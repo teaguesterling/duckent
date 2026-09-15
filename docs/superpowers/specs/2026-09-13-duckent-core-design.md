@@ -124,10 +124,16 @@ A second setting, `tree_catalog.settings.tree_default_selector_language`, govern
 thing: which front-end parses a selector handed over as **text** with no language named. That is
 the runner's job in the macro phase (`test/run.py` rewrites the text to IR before the call) and
 the binder's job in the extension. It was seeded `treeql` and flipped to `css` by the last M2
-task, as §1 said it would be. The two never meet, and the residue of that is visible: a bare
-text selector is *parsed* as css and still reports `treeql` in provenance, because the runner
-substitutes the IR without synthesizing the argument the caller did not write. Making a
-front-end record the language it used is an M-LANG item, alongside the TREEQL text parser.
+task, as §1 said it would be.
+
+**A front-end that applies the default records it** *(amended 2026-09-15, M2 build)*. The two
+settings meet at exactly one point, and it is the front-end's: when it parses text that names no
+language, it writes `language := '<default>'` into the call it rewrites. So a bare text selector
+reports the language it was actually parsed as — `css` after M2 — while the compiler's rule is
+unchanged, `COALESCE(language, 'treeql')` read off the argument and never off the catalog. A
+selector handed over as `TREE_SELECTOR` still reports `treeql`: nothing parsed it, and `treeql`
+is the IR's own spelling. The rule generalizes to every future front-end: whoever parses the
+text names the language, because it is the only party that knows.
 
 ## 5. The projection
 
