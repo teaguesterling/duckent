@@ -437,6 +437,94 @@ SELECT tree_parse_css('a >');
 unexpected end of selector
 
 # ---------------------------------------------------------------------------------------
+# A refusal must RAISE, never evaluate to NULL. `error(NULL)` does not raise in 1.5.5 -- it
+# returns NULL -- so a message built by concatenating a value that turns out to be NULL would
+# hand the caller a NULL TREE_SELECTOR and call it a selector. Every refusal goes through
+# tree_css_err, which COALESCEs the message first. These are the shapes that found it: a `(`
+# with no pseudo-class in front of it, so there is no name to put in `unclosed :<name>(`.
+# ---------------------------------------------------------------------------------------
+
+statement error
+SELECT tree_parse_css('a(');
+----
+css: unexpected '('
+
+statement error
+SELECT tree_parse_css('(');
+----
+css: unexpected '('
+
+statement error
+SELECT tree_parse_css('a > b(');
+----
+css: unexpected '('
+
+statement error
+SELECT tree_parse_css('a:has(b) c(');
+----
+css: unexpected '('
+
+# the guard itself: a refused selector must never come back as a value, NULL included. If the
+# refusal ever evaluates to NULL again this record fails, because IS NULL would return true
+# instead of raising.
+statement error
+SELECT tree_parse_css('a(') IS NULL;
+----
+css: unexpected '('
+
+statement error
+SELECT tree_css_err(NULL);
+----
+css: internal: a refusal built a NULL message
+
+# ... and an open paren that DOES follow a pseudo-class still names it
+statement error
+SELECT tree_parse_css('a:not(x');
+----
+css: unclosed :not(
+
+statement error
+SELECT tree_parse_css('.fn:not(:has(x)');
+----
+css: unclosed :not(
+
+# a pseudo-class that was never going to lower refuses as the unsupported one it is, not as an
+# unclosed paren
+statement error
+SELECT tree_parse_css('a:nope(');
+----
+:nope() is not supported in v0
+
+# a `)` that closes nothing: the argument list ran out mid-chain
+statement error
+SELECT tree_parse_css('a:has(x > )');
+----
+css: unexpected ')'
+
+# an empty argument: the runner names the `)` that arrived where a compound was due, so this
+# names it too rather than describing the emptiness in different words
+statement error
+SELECT tree_parse_css('.fn:has()');
+----
+css: unexpected ')'
+
+statement error
+SELECT tree_parse_css('.fn:not()');
+----
+css: unexpected ')'
+
+# `*` is not v0 grammar; the offending token is quoted, as the runner quotes it
+statement error
+SELECT tree_parse_css('*');
+----
+css: unexpected '*'
+
+statement error
+SELECT tree_parse_css('a *');
+----
+css: unexpected '*'
+
+# ---------------------------------------------------------------------------------------
 # The one construct tree-sitter-css cannot be held to parity on: it has no `@`, so
 # tree_parse_css rewrites `@name` to a marker pseudo-class before parsing. A selector that
 # already spells that marker would be indistinguishable from a capture, so it is refused
@@ -496,7 +584,7 @@ css: unexpected text after the selector
 statement error
 SELECT tree_parse_css('a :first-child');
 ----
-css: unexpected
+needs its combinator written out (a > :has(x))
 
 # the same selectors with the combinator written out, which is the way to say this in v0
 query I
@@ -562,4 +650,4 @@ groups nested deeper than 2 levels are not supported
 statement error
 SELECT tree_css_lower([{node_id: 0, parent_id: NULL, type: 'stylesheet', name: ''}, {node_id: 1, parent_id: 0, type: 'ERROR', name: 'x'}, {node_id: 2, parent_id: 1, type: 'keyframe_block', name: 'x'}]);
 ----
-unexpected keyframe_block: the css grammar did not read this as a v0 selector
+unexpected 'keyframe_block': the css grammar did not read this as a v0 selector

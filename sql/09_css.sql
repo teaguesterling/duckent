@@ -30,8 +30,8 @@
 -- too, as a {i0, a0, i1, a1, i2, a2} path that 1.5.5 sorts and compares field by field, so one
 -- column is the whole sort key and a row's parent path is the whole parent link.
 --
--- WHERE PARITY IS NOT POSSIBLE. Two v0 constructs this front-end refuses and the runner accepts.
--- Neither can produce a WRONG selector -- both are refusals -- and a 3026-selector differential
+-- WHERE PARITY IS NOT POSSIBLE. Three v0 constructs this front-end refuses and the runner accepts.
+-- None can produce a WRONG selector -- all three are refusals -- and a 3444-selector differential
 -- (see the report) found no input the two accept and lower differently.
 --
 -- 1. A compound that begins with a QUOTED TYPE or a PSEUDO-CLASS, after a whitespace (descendant)
@@ -50,6 +50,19 @@
 --    leaves the refusal to the printer and the compiler; here the path has one field pair per
 --    level, so a level past the limit would collide with the level below it rather than overflow
 --    visibly. It is refused where it is detected.
+--
+-- And one WORDING-ONLY divergence, on an input both front-ends refuse: trailing junk (`.fn!!`).
+-- The runner names the offending character (`unexpected '!'`); tree-sitter reports junk as a
+-- second child of the container without saying where it starts, so the refusal here names the
+-- situation instead (`unexpected text after the selector`). Every other refusal in the corpus
+-- agrees with the runner on its first distinguishing token.
+
+-- Refuse with `msg`, and refuse even when building `msg` went wrong. `error(NULL)` does not raise
+-- in 1.5.5 -- it evaluates to NULL -- so a refusal whose message concatenates a value that turns
+-- out to be NULL would silently hand the caller a NULL TREE_SELECTOR instead of an error. Every
+-- refusal in this file goes through here, so that failure mode cannot come back.
+CREATE OR REPLACE MACRO tree_css_err(msg) AS
+  error(COALESCE(msg, 'css: internal: a refusal built a NULL message; the parse shape was not anticipated'));
 
 -- A combinator node type as the IR op it means.
 CREATE OR REPLACE MACRO tree_css_comb(t) AS
@@ -103,8 +116,10 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
           WHEN x.ty IN ('integer_value', 'float_value', 'plain_value') THEN 'val'
           WHEN x.ty = 'ERROR' THEN 'err'
           WHEN x.ty = 'stylesheet' THEN 'root'
+          -- `not` is a keyword NODE in the css grammar, not a class_name, and it only surfaces
+          -- when the `:not(` it opens was never closed -- the refusal reads the name off its type
           WHEN x.ty IN ('.', '#', ':', '[', ']', '(', ')', '=', '^=', '$=', '*=', '~=', '|=',
-                        '>', '+', '~', ',', '"', '''', 'string_content') THEN 'punct'
+                        '>', '+', '~', ',', '"', '''', 'string_content', 'not') THEN 'punct'
           ELSE 'other' END AS cls
         FROM n x LEFT JOIN n p ON p.id = x.pid),
 
@@ -321,11 +336,20 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   bad_property AS (SELECT count(*) AS n FROM c
                    WHERE ty IN ('declaration', 'property_name', 'call_expression', 'function_name')
                       OR (ty = 'selectors' AND (SELECT count(*) FROM c t WHERE t.ty = ',') = 0)
-                      OR (ty = '(' AND pid = (SELECT id FROM container)
-                          AND (SELECT count(*) FROM c t WHERE t.ty = ')' AND t.pid = (SELECT id FROM container)) > 0)),
+                      -- ... or a pseudo-class whose parens BALANCE -- so it parsed completely --
+                      -- left lying beside the selector with its `)` loose under the container
+                      -- instead of attached to it (`#i :has(b)`, `a :not(.c)`). Balance is what
+                      -- tells those from a truncated `.fn:has(block`, which never closes; and a
+                      -- combinator left loose beside the parens (`a:has(x > )`) means the argument
+                      -- ran out mid-chain, which is a truncation too.
+                      OR (ty = ')' AND pid = (SELECT id FROM container)
+                          AND (SELECT count(*) FROM c t WHERE t.ty = '(')
+                            = (SELECT count(*) FROM c t WHERE t.ty = ')')
+                          AND (SELECT count(*) FROM c t WHERE t.ty IN ('>', '+', '~')
+                                 AND t.pid = (SELECT id FROM container)) = 0)),
   -- an argument-less `:where` / `:is`: the css grammar knows those two names ONLY as functional
   -- pseudo-classes, so written bare they do not even form a pseudo_class_selector -- the `:` and
-  -- the name land loose under the container. Note 3 of the header.
+  -- the name land loose under the container. Note 2 of the header.
   -- ... which is a COMPLETE parse with a loose `:name` in it, not a truncated one, so it does not
   -- fire for `.fn:has(block` -- there the same two nodes come loose because the `(` was left open
   bad_bare_fn AS (SELECT min_by(k.nm, k.id) AS nm FROM c t JOIN c k ON k.pid = t.pid AND k.ty = 'class_name' AND k.id > t.id
@@ -341,11 +365,18 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   -- under the ERROR node instead of inside a selector node. For a `(` the pseudo-class it belongs
   -- to is the class_name just before it, which is what makes this read `unclosed :has(`.
   -- the LAST one, so `.fn[name="sh]` -- which leaves both a `[` and a `"` loose -- is reported as
-  -- the unclosed quote the runner parser reports, not as the bracket around it
+  -- the unclosed quote the runner parser reports, not as the bracket around it. `pseudo` is the
+  -- pseudo-class an open `(` belongs to, read from the node just before it: normally a
+  -- `class_name`, but for `not` the css grammar has a keyword node whose TYPE is the name and
+  -- whose text is empty. It stays NULL when the `(` follows no pseudo at all (`a(`), which the
+  -- refusal arm handles rather than concatenating a NULL into the message.
   bad_open AS (SELECT max_by(k.ty, k.id) AS t,
-                      (SELECT max_by(x.nm, x.id) FROM c x
-                       WHERE x.pid = (SELECT id FROM container) AND x.ty = 'class_name' AND x.id < max(k.id)) AS pseudo
+                      (SELECT max_by(CASE WHEN x.ty = 'not' THEN 'not' ELSE x.nm END, x.id) FROM c x
+                       WHERE x.pid = (SELECT id FROM container) AND x.ty IN ('class_name', 'not')
+                         AND x.id < max(k.id)) AS pseudo
                FROM c k WHERE k.pid = (SELECT id FROM container) AND k.ty IN ('(', '[', '"', '''')),
+  -- a `)` loose under the container closes nothing: the selector ran out inside an argument list
+  bad_close AS (SELECT count(*) AS n FROM c WHERE pid = (SELECT id FROM container) AND ty = ')'),
   -- the whole selector must be ONE selector node under the container. Nothing (an empty text), a
   -- trailing combinator token (the selector stopped mid-chain), or several children (trailing
   -- junk) is not a v0 selector.
@@ -379,39 +410,55 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   bad_cap_in_group AS (SELECT count(*) AS n FROM alias a JOIN placed p ON p.anchor = a.anchor WHERE p.lvl > 0),
   bad_depth AS (SELECT max(lvl) AS d FROM chains)
 
+  -- Every arm goes through tree_css_err, never through error() directly: `error(NULL)` RETURNS
+  -- NULL instead of raising, so one NULL in a concatenated message would turn a refusal into a
+  -- NULL TREE_SELECTOR handed back to the caller. Each arm below reads a value from a CTE, and any
+  -- of those can be NULL for a parse shape that was not anticipated, so the guard is on the helper
+  -- rather than on the arms one at a time.
   SELECT CASE
     WHEN (SELECT n FROM bad_where) > 0
-      THEN error('css: css has no host escape: mint a PSEUDO, or MATCH USING TREEQL')
-    WHEN (SELECT n FROM bad_list) > 0 THEN error('css: unexpected '','': v0 has no selector lists')
+      THEN tree_css_err('css: css has no host escape: mint a PSEUDO, or MATCH USING TREEQL')
+    WHEN (SELECT n FROM bad_list) > 0 THEN tree_css_err('css: unexpected '','': v0 has no selector lists')
     WHEN (SELECT n FROM bad_property) > 0
-      THEN error('css: unexpected end of selector: tree-sitter-css read this as css property syntax, '
+      THEN tree_css_err('css: unexpected end of selector: tree-sitter-css read this as css property syntax, '
                  || 'not a selector -- after a space, a compound opening with a quoted type or a '
                  || 'pseudo-class needs its combinator written out (a > :has(x))')
+    -- a `)` with nothing to close: the argument list ran out mid-chain (`a:has(x > )`)
+    WHEN (SELECT n FROM bad_close) > 0 THEN tree_css_err('css: unexpected '')''')
     WHEN (SELECT nm FROM bad_bare_fn) IS NOT NULL
-      THEN error('css: :' || (SELECT nm FROM bad_bare_fn) || ' is not supported in v0 by this front-end: '
+      THEN tree_css_err('css: :' || (SELECT nm FROM bad_bare_fn) || ' is not supported in v0 by this front-end: '
                  || 'the css grammar knows :' || (SELECT nm FROM bad_bare_fn)
                  || ' only with an argument, so written bare it does not parse as a selector '
                  || '(the runner parser accepts it as a plain PSEUDO clause)')
     WHEN (SELECT t FROM bad_type) IS NOT NULL
-      THEN error('css: unexpected ' || (SELECT t FROM bad_type) || ': the css grammar did not read this as a v0 selector')
-    WHEN (SELECT t FROM bad_open) = '(' THEN error('css: unclosed :' || (SELECT pseudo FROM bad_open) || '(')
-    WHEN (SELECT t FROM bad_open) = '[' THEN error('css: unclosed [ in attribute selector')
-    WHEN (SELECT t FROM bad_open) IS NOT NULL THEN error('css: unclosed quote in selector')
-    WHEN (SELECT t FROM bad_shape) IS NOT NULL THEN error('css: unexpected ' || (SELECT t FROM bad_shape))
+      THEN tree_css_err('css: unexpected ' || tree_sql_lit((SELECT t FROM bad_type))
+                 || ': the css grammar did not read this as a v0 selector')
+    -- an open `(` names the pseudo-class it belongs to when the parse left one next to it. With no
+    -- pseudo there is nothing unclosed, just a paren where a selector was expected; and a pseudo
+    -- that is not has/not was never going to be lowered, so it refuses as the unsupported one it is.
+    WHEN (SELECT t FROM bad_open) = '(' AND (SELECT pseudo FROM bad_open) IS NULL
+      THEN tree_css_err('css: unexpected ''(''')
+    WHEN (SELECT t FROM bad_open) = '(' AND (SELECT pseudo FROM bad_open) NOT IN ('has', 'not')
+      THEN tree_css_err('css: :' || (SELECT pseudo FROM bad_open) || '() is not supported in v0')
+    WHEN (SELECT t FROM bad_open) = '(' THEN tree_css_err('css: unclosed :' || (SELECT pseudo FROM bad_open) || '(')
+    WHEN (SELECT t FROM bad_open) = '[' THEN tree_css_err('css: unclosed [ in attribute selector')
+    WHEN (SELECT t FROM bad_open) IS NOT NULL THEN tree_css_err('css: unclosed quote in selector')
+    WHEN (SELECT t FROM bad_shape) IS NOT NULL THEN tree_css_err('css: unexpected ' || (SELECT t FROM bad_shape))
     WHEN (SELECT nm FROM bad_pseudo) IS NOT NULL
-      THEN error('css: :' || (SELECT nm FROM bad_pseudo) || '() is not supported in v0')
-    WHEN (SELECT n FROM bad_arg) > 0 THEN error('css: unexpected empty :has()/:not() argument')
-    WHEN (SELECT n FROM bad_not) > 0 THEN error('css: :not() takes a compound selector in v0')
+      THEN tree_css_err('css: :' || (SELECT nm FROM bad_pseudo) || '() is not supported in v0')
+    WHEN (SELECT n FROM bad_arg) > 0
+      THEN tree_css_err('css: unexpected '')'': :has()/:not() needs a selector between its parentheses')
+    WHEN (SELECT n FROM bad_not) > 0 THEN tree_css_err('css: :not() takes a compound selector in v0')
     WHEN (SELECT tok FROM bad_rel) IS NOT NULL
-      THEN error('css: unexpected ''' || (SELECT tok FROM bad_rel) || ''': a combinator with nothing on its left')
+      THEN tree_css_err('css: unexpected ''' || (SELECT tok FROM bad_rel) || ''': a combinator with nothing on its left')
     WHEN (SELECT nm FROM bad_attr) IS NOT NULL
-      THEN error('css: expected one of = ^= $= *= after attribute ' || (SELECT nm FROM bad_attr))
+      THEN tree_css_err('css: expected one of = ^= $= *= after attribute ' || (SELECT nm FROM bad_attr))
     WHEN (SELECT t FROM bad_qtype) IS NOT NULL
-      THEN error('css: expected a type name in quotes, got ' || tree_sql_lit((SELECT t FROM bad_qtype)))
-    WHEN (SELECT n FROM bad_cap_second) > 0 THEN error('css: unexpected second capture')
-    WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN error('css: capture inside :has/:not has no row to bind')
+      THEN tree_css_err('css: expected a type name in quotes, got ' || tree_sql_lit((SELECT t FROM bad_qtype)))
+    WHEN (SELECT n FROM bad_cap_second) > 0 THEN tree_css_err('css: unexpected second capture')
+    WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN tree_css_err('css: capture inside :has/:not has no row to bind')
     WHEN (SELECT d FROM bad_depth) > tree_group_depth_limit()
-      THEN error('css: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+      THEN tree_css_err('css: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value,
                op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
   FROM parented);
@@ -436,10 +483,10 @@ CREATE OR REPLACE MACRO tree_css_capture_markers(t) AS
 -- runs at the point a selector is written, not per row.
 CREATE OR REPLACE MACRO tree_parse_css(sel) AS (
   SELECT CASE
-    WHEN sel IS NULL THEN error('css: no selector text')
+    WHEN sel IS NULL THEN tree_css_err('css: no selector text')
     -- the marker is an internal spelling; a selector that already used it would be read as a
     -- capture, so it is refused rather than quietly turned into one
-    WHEN regexp_matches(sel, ':__cap_') THEN error('css: :__cap_ is reserved for the @name capture rewrite')
+    WHEN regexp_matches(sel, ':__cap_') THEN tree_css_err('css: :__cap_ is reserved for the @name capture rewrite')
     ELSE tree_css_lower(
       (SELECT list({node_id: node_id, parent_id: parent_id, type: type, name: name} ORDER BY node_id)
        FROM query('SELECT node_id, parent_id, type, name FROM parse_ast_list_table('
