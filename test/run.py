@@ -131,15 +131,22 @@ class Session:
                 raise RuntimeError(f"{label}: {e}\n  in: {stmt[:200]}") from e
 
     @staticmethod
-    def written_language(args):
-        """The language the call NAMES, or None when it names none: the value of a literal
-        `language := '...'` among the named arguments."""
+    def language_arg(args):
+        """(the call carries a `language :=` argument, its literal value or None). The two are
+        not the same question, and the rewrite below needs both: a call that carries one must not
+        have a second appended to it, whatever the argument says -- DuckDB refuses a duplicate
+        named parameter -- while only a LITERAL one tells the parser which front-end to use."""
         for part in args[3:]:
             m = NAMED_ARG_RE.match(part)
             if m and m.group(1) == "language":
-                lit = string_literal(m.group(2))
-                if lit is not None: return lit
-        return None
+                return True, string_literal(m.group(2))
+        return False, None
+
+    @staticmethod
+    def written_language(args):
+        """The language the call NAMES, or None when it names none (or names it with something
+        other than a text literal, which the parse-time lookup cannot read)."""
+        return Session.language_arg(args)[1]
 
     def default_language(self):
         """The catalog's default selector language: which front-end parses selector TEXT that
@@ -162,7 +169,10 @@ class Session:
         used: the compiler reports `_match_language = COALESCE(language, 'treeql')` and sees only
         IR, so without this a selector parsed as css reported `treeql` -- provenance naming a
         language nothing had parsed. Here the parse and the provenance are the same decision, made
-        once, by the thing that made it. A call that names its language keeps the one it named."""
+        once, by the thing that made it. A call that names its language keeps the one it named --
+        and so does one that names it with an expression rather than a literal: the parse-time
+        lookup cannot read that, so the default front-end parses it as before, but nothing is
+        appended, because a second `language :=` would be a duplicate named parameter."""
         for fname in ("tree_match", "tree_explain"):
             pos = 0
             while True:
@@ -173,10 +183,11 @@ class Session:
                 text = string_literal(args[2]) if len(args) >= 3 else None
                 if text is None:
                     pos = end; continue
-                lang = self.written_language(args)
+                named, lang = self.language_arg(args)
                 if lang is None:
                     lang = self.default_language()
-                    args.append(" language := '" + lang.replace("'", "''") + "'")
+                    if not named:
+                        args.append(" language := '" + lang.replace("'", "''") + "'")
                 if lang != "css":
                     raise RuntimeError("tree_match: TREEQL text parsing arrives with M-LANG; pass tree_steps(...)")
                 args[2] = " " + css_parser.to_sql(css_parser.parse(text))
