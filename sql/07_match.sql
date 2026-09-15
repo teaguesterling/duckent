@@ -232,7 +232,13 @@ proj AS (
         CASE WHEN (semantic).element IS NULL THEN NULL ELSE 'COALESCE(' || (semantic).element || ', false) AS _element' END,
         -- map_concat, not replace: the catalog's pseudo-classes stay bound, the overlay's
         -- entries are added, and the overlay (the second argument) wins on a shared name
-        CASE WHEN (semantic).pseudo IS NULL THEN NULL ELSE 'map_concat(_pseudo, ' || tree_sql_pseudo_map(sem) || ') AS _pseudo' END], lambda x: x IS NOT NULL), 'string_agg', ', ')
+        -- Gated on (sem).pseudo -- the EXPANDED overlay -- not the raw (semantic).pseudo: an
+        -- overlay that sets only pseudo_args (no pseudo declared at all) still expands to a
+        -- non-NULL shared-tier binding list, and ovp.names (below) already treats those names
+        -- as known. Gating on the raw, undeclared field left the projection's _pseudo map
+        -- without the shared binding while the matcher believed it was bound -- a lookup that
+        -- silently matched nothing instead of raising or actually binding.
+        CASE WHEN (sem).pseudo IS NULL THEN NULL ELSE 'map_concat(_pseudo, ' || tree_sql_pseudo_map(sem) || ') AS _pseudo' END], lambda x: x IS NOT NULL), 'string_agg', ', ')
       || ') FROM tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '())' END AS p
   FROM ovp),
 -- The one row every text-building step joins against. A missing tree leaves t empty, so these are

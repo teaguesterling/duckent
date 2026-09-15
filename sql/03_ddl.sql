@@ -20,14 +20,19 @@ CREATE OR REPLACE MACRO tree_shape_from_catalog(db, sch, nm) AS (
       attr_map: max(expression) FILTER (WHERE slot = 'ATTR_MAP'),
       element: max(expression) FILTER (WHERE slot = 'ELEMENT'),
       pseudo_args: max(expression) FILTER (WHERE slot = 'PSEUDO_ARGS'),
-      -- macro is not recoverable from body alone (it would need parsing), so it is dropped here;
-      -- origin IS recoverable and is carried back as a provenance-only prefix marker, so a LIKE
-      -- child re-inserting this entry (tree_sql_pseudo_insert) records the right origin instead
-      -- of flattening every inherited row to 'local'. 'sel_' specifically reuses
-      -- tree_expand_pseudo's own shared-tier marker; any other non-NULL value just needs to be
-      -- distinct from 'sel_' so the origin CASE falls through to 'prefix'.
-      pseudo: (SELECT list({name: name, body: body, macro: NULL::VARCHAR, args: NULL::VARCHAR,
-                            prefix: CASE origin WHEN 'shared' THEN 'sel_' WHEN 'prefix' THEN 'prefix' ELSE NULL END} ORDER BY name)
+      -- kind = 'macro' rows store body as 'macro_name(args)' (tree_sql_pseudo_insert), so both
+      -- are recoverable by parsing instead of dropped: without macro, a LIKE child's shared-tier
+      -- scan cannot recognize that an inherited entry already claims a catalog macro (the
+      -- identity exclusion in tree_expand_pseudo needs (x).macro), and re-binds it a second time
+      -- under a different derived name. origin is carried back as a provenance-only prefix
+      -- marker, so a LIKE child re-inserting this entry (tree_sql_pseudo_insert) records the
+      -- right origin instead of flattening every inherited row to 'local'. tree_shared_pseudo_prefix()
+      -- specifically reuses tree_expand_pseudo's own shared-tier marker; any other non-NULL value
+      -- just needs to be distinct from it so the origin CASE falls through to 'prefix'.
+      pseudo: (SELECT list({name: name, body: body,
+                            macro: CASE WHEN kind = 'macro' THEN split_part(body, '(', 1) END,
+                            args: CASE WHEN kind = 'macro' THEN NULLIF(regexp_extract(body, '^[^(]*\((.*)\)$', 1), '') END,
+                            prefix: CASE origin WHEN 'shared' THEN tree_shared_pseudo_prefix() WHEN 'prefix' THEN 'prefix' ELSE NULL END} ORDER BY name)
                FROM tree_catalog.pseudo_classes p WHERE p.database_name = db AND p.schema_name = sch AND p.tree_name = nm)
     }::TREE_SEMANTIC }::TREE_SHAPE END
   FROM tree_catalog.slots WHERE database_name = db AND schema_name = sch AND tree_name = nm);
@@ -68,7 +73,7 @@ CREATE OR REPLACE MACRO tree_sql_pseudo_insert(db, sch, nm, pseudo, explicit_sel
       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', '
       || CASE WHEN (x).macro IS NULL THEN '''expression''' ELSE '''macro''' END || ', ' || tree_sql_lit((x).body) || ', '
       || CASE WHEN (x).prefix IS NULL THEN '''local'''
-              WHEN (x).prefix = 'sel_' AND NOT explicit_sel_prefix THEN '''shared'''
+              WHEN (x).prefix = tree_shared_pseudo_prefix() AND NOT explicit_sel_prefix THEN '''shared'''
               ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END;
 
 -- The attribute_columns artifact: the projection's non-canonical column names, in projection
@@ -107,7 +112,7 @@ expanded AS (
     -- already-resolved shared/prefix rows round-trip with a provenance marker of their own
     -- (tree_shape_from_catalog), and that marker must never be mistaken for a fresh explicit
     -- declaration by this tree.
-    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
+    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = tree_shared_pseudo_prefix())) > 0 AS explicit_sel_prefix
   FROM base
 ),
 derived AS (
@@ -230,7 +235,7 @@ WITH t AS (
 -- against this alter's own `semantic` argument (never `sem`, its expansion): an explicit
 -- {prefix: 'sel_'} declaration is what this flag means, not the shared tier's own marker.
 ex AS (SELECT *, tree_expand_pseudo(semantic) AS sem,
-              len(list_filter(COALESCE((semantic).pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
+              len(list_filter(COALESCE((semantic).pseudo, []), lambda p: (p).prefix = tree_shared_pseudo_prefix())) > 0 AS explicit_sel_prefix
        FROM t),
 n AS (
   SELECT *,

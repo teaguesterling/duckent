@@ -38,6 +38,10 @@ CREATE OR REPLACE MACRO tree_semantic(type := NULL, id := NULL, classes := NULL,
        lambda e: {name: (e).key, body: NULL::VARCHAR, macro: (e).value, args: pseudo_args, prefix: NULL::VARCHAR}) END) END
   }::TREE_SEMANTIC;
 
+-- The shared pseudo tier's prefix, spelled once: every reference to the literal "sel_" (and its
+-- length, for stripping it off a matched function_name) goes through this macro.
+CREATE OR REPLACE MACRO tree_shared_pseudo_prefix() AS 'sel_';
+
 -- Expand macro, map, prefix and shared bindings to expression bodies. Prefix entries bind every
 -- catalog scalar macro whose name starts with the prefix; name = the remainder. A round-tripped
 -- catalog entry (tree_shape_from_catalog, for a LIKE child) always carries a name, even when it
@@ -68,12 +72,22 @@ WITH lp AS (
   ) AS bound
 ),
 shared AS (
-  SELECT COALESCE((SELECT list({name: substr(f.function_name, 5),
+  SELECT COALESCE((SELECT list({name: substr(f.function_name, length(tree_shared_pseudo_prefix()) + 1),
                                 body: f.function_name || '(' || COALESCE((sem).pseudo_args, '') || ')',
-                                macro: f.function_name, args: (sem).pseudo_args, prefix: 'sel_'} ORDER BY f.function_name)
+                                macro: f.function_name, args: (sem).pseudo_args, prefix: tree_shared_pseudo_prefix()} ORDER BY f.function_name)
                     FROM (SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'macro') f
-                    WHERE (sem).pseudo_args IS NOT NULL AND starts_with(f.function_name, 'sel_')
-                      AND NOT list_contains(list_transform(lp.bound, lambda y: (y).name), substr(f.function_name, 5))
+                    WHERE (sem).pseudo_args IS NOT NULL AND starts_with(f.function_name, tree_shared_pseudo_prefix())
+                      -- a bare sel_ macro has an empty remainder: not an error, just not a
+                      -- nameable pseudo-class, so it is left unbound rather than bound as ''
+                      AND substr(f.function_name, length(tree_shared_pseudo_prefix()) + 1) <> ''
+                      -- spec §7, amended: identity dedup. The spec's literal text excludes a
+                      -- candidate only by name collision; that alone double-binds a macro
+                      -- already claimed by a prefix declaration (e.g. sel_ast_leaf, which also
+                      -- starts with the shared tier's own "sel_") under a second, derived name.
+                      -- A prefix declaration is a namespace claim: a macro already bound under
+                      -- any name -- locally or via a prefix -- is not re-bound by the shared
+                      -- tier under another one.
+                      AND NOT list_contains(list_transform(lp.bound, lambda y: (y).name), substr(f.function_name, length(tree_shared_pseudo_prefix()) + 1))
                       AND NOT list_contains(list_transform(lp.bound, lambda y: (y).macro), f.function_name)
                    ), []) AS extra
   FROM lp

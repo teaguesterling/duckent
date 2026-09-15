@@ -23,7 +23,11 @@ expanded AS (
     {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
      sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
      semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape,
-    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
+    -- Tested against this create's own declared PSEUDO, never the LIKE-merged one: a parent's
+    -- already-resolved shared/prefix rows round-trip with a provenance marker of their own
+    -- (tree_shape_from_catalog), and that marker must never be mistaken for a fresh explicit
+    -- declaration by this tree.
+    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = tree_shared_pseudo_prefix())) > 0 AS explicit_sel_prefix
   FROM base
 ),
 derived AS (
