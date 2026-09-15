@@ -112,6 +112,9 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
 -- the top level that predicate is the whole WHERE and needs no parentheses; inside a group it is
 -- ANDed with the relation to the anchor, so there it is parenthesized like every joined step's.
 -- 1.5.5: list_transform's two-argument lambda indexes from 1, so steps[i - 1] is the previous step.
+-- The empty-step refusal is the fragment's own guard, not the compiler's: a group with no inner
+-- steps contributes no row to the fold's group pass, so nothing would call this for it. That case
+-- is refused in chk. This branch is what stops a direct caller emitting a FROM with no relation.
 CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
   CASE WHEN steps IS NULL OR len(steps) = 0 THEN error('tree_match: empty group') ELSE
     list_aggregate(list_transform(steps, lambda s, i:
@@ -126,6 +129,13 @@ CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
     || CASE WHEN anchor IS NULL THEN (steps[1]).pred
             ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem) || ' AND (' || (steps[1]).pred || ')' END
   END;
+
+-- A HAS/NOT group as a predicate on the step it hangs off: the group's own chain, anchored on
+-- that step, under an (NOT) EXISTS. One definition, called once per unrolled pass of the fold --
+-- which is also what filters `kind` down to 'has' or 'not' before it gets here.
+CREATE OR REPLACE MACRO tree_sql_group(kind, p, steps, anchor, elem) AS
+  CASE WHEN kind = 'not' THEN 'NOT ' ELSE '' END
+  || 'EXISTS (SELECT 1 FROM ' || tree_sql_chain(p, steps, anchor, elem) || ')';
 
 -- The compiler is a fold over the IR: every node's text is built from its children's, so the
 -- chain and the HAS/NOT groups hanging off its steps are compiled by the same two rules applied
@@ -169,6 +179,23 @@ ov AS (SELECT CASE WHEN semantic IS NULL THEN NULL ELSE tree_expand_pseudo(seman
 -- lambda here is handed has to arrive as a plain column reference, which is what ovp and cfg are
 -- for: each is one row, joined in rather than read with (SELECT ... FROM ...).
 ovp AS (SELECT sem, list_transform(COALESCE((sem).pseudo, []), lambda x: (x).name) AS names FROM ov),
+-- the selector's rows, flattened once and read by both the checks below and the n CTE
+ir AS (SELECT * FROM (SELECT unnest(sel, recursive := true))),
+-- Structure the unrolled fold cannot reach. Its passes are inner joins over a fixed number of
+-- levels, so anything out of reach is missing from the compiled text rather than wrong in it,
+-- which is the worst way for a matcher to fail: a group nested past the ceiling loses its
+-- innermost level (and so matches more than it should), a group with no inner steps disappears
+-- (same), and a clause hung off anything but a step is never compiled (same). None of these can
+-- come out of tree_steps, but the compiler also takes IR built by hand or by a front-end, so it
+-- refuses them here rather than trusting its caller. The depth refusal is worded exactly as the
+-- printer's, since it is the same ceiling.
+bad_empty AS (
+  SELECT count(*) AS n FROM ir g
+  WHERE g.kind IN ('has', 'not') AND NOT EXISTS (SELECT 1 FROM ir s WHERE s.parent_id = g.node_id AND s.kind = 'step')),
+bad_clause AS (
+  SELECT min(c.kind) AS k FROM ir c
+  WHERE c.kind IN ('type', 'id', 'class', 'attr', 'pseudo', 'where')
+    AND NOT EXISTS (SELECT 1 FROM ir s WHERE s.node_id = c.parent_id AND s.kind = 'step')),
 chk AS (SELECT CASE
   WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found')
   -- an overlay is an S group for this query only; it cannot widen the projection, and an
@@ -177,7 +204,12 @@ chk AS (SELECT CASE
   WHEN semantic IS NOT NULL AND (semantic).type IS NULL AND (semantic).id IS NULL AND (semantic).classes IS NULL
        AND (semantic).attr_map IS NULL AND (semantic).pseudo IS NULL AND (semantic).element IS NULL
        THEN error('tree_match: semantic overlay is empty')
-  WHEN (SELECT count(*) FROM (SELECT unnest(sel, recursive := true)) WHERE kind = 'step') = 0 THEN error('tree_match: selector has no steps')
+  WHEN (SELECT count(*) FROM ir WHERE kind = 'step') = 0 THEN error('tree_match: selector has no steps')
+  WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
+    THEN error('tree_match: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+  WHEN (SELECT n FROM bad_empty) > 0 THEN error('tree_match: empty group')
+  WHEN (SELECT k FROM bad_clause) IS NOT NULL
+    THEN error('tree_match: clause ' || (SELECT k FROM bad_clause) || ' is not attached to a step')
   ELSE true END AS ok),
 -- The relation every step alias ranges over: the stored projection, or a REPLACE over it when
 -- the query carries an overlay. Each replaced column is spelled the way sql/02_projection.sql
@@ -196,9 +228,11 @@ proj AS (
   FROM ovp),
 -- The one row every text-building step joins against. A missing tree leaves t empty, so these are
 -- scalar subqueries over a FROM-less SELECT rather than a join: cfg must still have its one row,
--- or chk would never get to raise "tree not found".
+-- or chk would never get to raise "tree not found". `known` says whether the tree is there at
+-- all, which is what gates the clause compiler below.
 cfg AS (SELECT (SELECT p FROM proj) AS p, (SELECT has_element FROM t) AS elem,
-               (SELECT has_map FROM t) AS has_map, (SELECT attr_cols FROM t) AS attr_cols),
+               (SELECT has_map FROM t) AS has_map, (SELECT attr_cols FROM t) AS attr_cols,
+               (SELECT count(*) FROM t) > 0 AS known),
 -- IR rows, every level of them: S clauses refused on S-less trees, unknown pseudo-classes marked,
 -- sibling combinators refused under sibling_free. unnest(recursive := true) flattens the whole
 -- selector, so a clause or a combinator inside a group is checked exactly like a top-level one.
@@ -213,14 +247,17 @@ n AS (
               WHEN kind = 'step' AND op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
               THEN error('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
               ELSE true END AS ok
-  FROM (SELECT unnest(sel, recursive := true))),
+  FROM ir),
 -- (step node id, part node id, part text) for every clause: the same at every level. A child of a
 -- step that is neither a clause nor a group reaches tree_sql_clause and is refused there.
+-- cfg.known gates the whole CTE: an unknown tree has no attribute_columns artifact, so every ATTR
+-- clause would be refused for a name the tree might well carry. Compiling no clauses at all
+-- leaves chk to say what is actually wrong, and it says it whatever the selector asks for.
 clause AS (
   SELECT c.parent_id AS step, c.node_id AS id,
          tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias, cfg.attr_cols, cfg.has_map, cfg.p, cfg.elem) AS txt
   FROM n c JOIN n s ON s.node_id = c.parent_id AND s.kind = 'step' CROSS JOIN cfg
-  WHERE c.kind NOT IN ('has', 'not', 'step')),
+  WHERE c.kind NOT IN ('has', 'not', 'step') AND cfg.known),
 -- Each pass is two CTEs: the first gathers a group's inner chain into one list column, the second
 -- renders it. They cannot be one, because tree_sql_chain's lambda may not be handed an aggregate
 -- or a subquery -- only a column.
@@ -234,8 +271,7 @@ grpA0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepA x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpA AS (
-  SELECT g.node_id, g.parent_id, CASE WHEN g.kind = 'not' THEN 'NOT ' ELSE '' END
-         || 'EXISTS (SELECT 1 FROM ' || tree_sql_chain(cfg.p, g.steps, g.anchor, cfg.elem) || ')' AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpA0 g CROSS JOIN cfg),
 partB AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpA g),
 stepB AS (
@@ -248,8 +284,7 @@ grpB0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepB x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpB AS (
-  SELECT g.node_id, g.parent_id, CASE WHEN g.kind = 'not' THEN 'NOT ' ELSE '' END
-         || 'EXISTS (SELECT 1 FROM ' || tree_sql_chain(cfg.p, g.steps, g.anchor, cfg.elem) || ')' AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpB0 g CROSS JOIN cfg),
 partC AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpB g),
 stepC AS (

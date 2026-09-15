@@ -97,6 +97,53 @@ SELECT tree_compile_match('main', 'app', [
 ----
 tree_match: unknown clause kind bogus
 
+# The compiler's fold is unrolled to a fixed number of group levels, so IR that nests deeper does
+# not fail loudly -- the passes are inner joins and the innermost group is simply never rendered,
+# leaving a selector that matches MORE than it asked for. This IR is
+# `function_definition HAS (block HAS (return_statement HAS (NOSUCHTYPE)))`, whose honest answer
+# is no rows; with the innermost group dropped it returned greet and shout. tree_steps refuses to
+# build it, so the check has to be on the IR the compiler is handed, and it is worded as the
+# printer's: one ceiling, one sentence.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 4, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 8, parent_id: 7, kind: 'type', value: 'return_statement', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 9, parent_id: 7, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 10, parent_id: 9, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 11, parent_id: 10, kind: 'type', value: 'NOSUCHTYPE', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: groups nested deeper than 2 levels are not supported
+
+# a group with no inner steps contributes no row to the fold's group pass at all, so it would
+# vanish and the NOT would go untested -- tree_sql_chain's own empty-group refusal is never
+# reached, because nothing calls it for a group that produced no row
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: empty group
+
+# a clause is compiled from its step's alias, so one hung off anything but a step -- here the
+# selector root -- has no alias to compile against and would be dropped, widening the match
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 0, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: clause type is not attached to a step
+
 # step WHERE sees the projection row; SIBLING and FOLLOWING work on the full profile
 query I rowsort
 FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'a'}, {comb: 'next', type: 'function_definition', "where": '(flags & 6) = 6'}])) SELECT a.name;
