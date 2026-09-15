@@ -256,6 +256,36 @@ SELECT count(*) FROM tree_match('main', 'kid2', tree_steps([{type: 'function_def
 ----
 has no SEMANTIC group
 
+# ...and the same back door from the other side, on a tree with no LIKE in sight. A SEMANTIC
+# group that declares only ATTR fills no S slot: ATTR names the projected columns, it binds
+# nothing structural. Create used to lead its has_semantic expression with
+# `(spec).shape.semantic IS NOT NULL` -- counting the PRESENCE of the group rather than what the
+# group declared -- so this tree was marked S-ful, and a TYPE step then compiled against TYPE's
+# `'node'` default and returned zero rows: a refusal owed, an empty result delivered. Create now
+# reads the same per-slot expression tree_ddl_alter reads (13_alter carries the alter-side twin),
+# and ATTR is excluded from both for the reason the record above gives.
+statement ok
+CALL tree_ddl_create('main', 'attronly', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(attr := 'node_id, type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT has_semantic, (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'attronly' AND artifact = 'attribute_columns')
+FROM tree_catalog_trees() WHERE tree_name = 'attronly';
+----
+false	["node_id","type"]
+
+statement error
+SELECT count(*) FROM tree_match('main', 'attronly', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
+# the ATTR declaration itself did land: R-only means no S GROUP, not no columns. A WHERE step --
+# the thing an S-less tree does have -- still matches, over the narrowed projection.
+query I
+SELECT count(*) FROM tree_match('main', 'attronly', tree_steps([{"where": 'node_id = 6'}]));
+----
+1
+
 # parent basis, sibling-free profile recorded
 statement ok
 CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));

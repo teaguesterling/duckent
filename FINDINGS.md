@@ -372,8 +372,13 @@ and the wave added a few of its own.)*
 
 - ~~`tree_compile_alter` sets `has_semantic = true` unconditionally, so an alter that changes only
   ATTR marks an S-less tree as S-ful.~~ **Closed** in the final fix wave (I4): alter computes the
-  flag from create's per-slot expression OR the flag the tree already carried. See the new item
-  below on create, which is *not* symmetric with it.
+  flag from a per-slot expression (type / id / classes / attr_map / element / pseudo /
+  pseudo_args declared, or the flag already there), never from the presence of a `semantic`
+  argument and never from ATTR. ~~Create was not symmetric with it: its expression led with
+  `(spec).shape.semantic IS NOT NULL`, so `tree_ddl_create(..., semantic := tree_semantic(attr :=
+  'x'))` marked an S-less tree S-ful by the other road.~~ **Also closed**, in the same wave:
+  create reads exactly the expression alter reads, and `11_ddl` and `13_alter` carry the twin
+  records.
 - "semantic overlay is empty" ignores a `pseudo_args`-only overlay: such an overlay *would* bind
   the shared tier, so refusing it as empty is wrong, if harmlessly so.
 - ~~The compiler does not police `SELF`'s position.~~ **Closed** in the final fix wave (I5): the
@@ -389,12 +394,6 @@ and the wave added a few of its own.)*
 - ~~The printer's own unknown-kind check reads `min(kind)`, which is NULL when the offending
   node's `kind` is NULL.~~ **Closed** in the final fix wave (I5): the COALESCE is inside the
   aggregate and the node is named `<NULL>`.
-- `tree_ddl_create` is **not** symmetric with the alter fix above. Its `has_semantic` expression
-  leads with `(spec).shape.semantic IS NOT NULL`, so `tree_ddl_create(..., semantic :=
-  tree_semantic(attr := 'x'))` — a semantic group that fills no S slot — still marks the tree
-  S-ful, and a `{type: ...}` step on it then compiles against TYPE's `'node'` default and returns
-  nothing. Same silent-empty shape as I4, on the other verb. Out of I4's scope; it wants the same
-  ruling, and `13_alter.test`'s R-only records are the shape a create-side record would take.
 - The shadow check (`tree_sql_shadow_check`) enumerates thirteen canonical columns in its regex
   and **only `_size` is exercised by a test** (11_ddl, 12_dml, 13_alter all use it). `_element` in
   particular was added in M2 and its arm has never fired in a test; a typo in that alternative

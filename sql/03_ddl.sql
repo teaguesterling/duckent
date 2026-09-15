@@ -122,17 +122,27 @@ derived AS (
     CASE WHEN (shape).level IS NULL AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
     CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
-    -- A LIKE child has an S group when it declares one or when its parent has one, whatever
-    -- slot the parent filled: reading the parent's TYPE alone made an ID-only parent invisible.
-    -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is.
-    -- ATTR is the one exception and must not appear below: every tree stores an S/ATTR slot
-    -- ('' closed, '*' open), so tree_shape_from_catalog gives every LIKE child a non-NULL
-    -- semantic.attr, and counting it would make every child S-ful -- opening the S-clause back
-    -- door tree_match refuses on an S-less tree. The per-slot terms are otherwise redundant
-    -- (a locally declared group is caught by the first term, an inherited one by the last), and
-    -- are spelled out so that a slot added later is not silently missed here.
-    (spec).shape.semantic IS NOT NULL
-      OR (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
+    -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
+    -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. It is a question about
+    -- what the group DECLARES, one slot at a time -- never about whether a group was written.
+    --
+    -- This led with `(spec).shape.semantic IS NOT NULL` until 2026-09-15, which asked the second
+    -- question: `semantic := tree_semantic(attr := 'x')` declares no S slot (ATTR names the
+    -- projected columns; it binds nothing structural) and still marked the tree S-ful. A TYPE
+    -- step then compiled against TYPE's `'node'` default and returned zero rows, which reads as
+    -- "no node of that type here" rather than as "this tree has no types" -- a refusal owed and
+    -- an empty result delivered. tree_compile_alter reads this same expression, so create and
+    -- alter now answer the question the same way; 11_ddl and 13_alter carry the twin records.
+    --
+    -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is,
+    -- and a slot added later must be added here. ATTR is the one that must NOT appear: every
+    -- tree stores an S/ATTR slot ('' closed, '*' open), so tree_shape_from_catalog gives every
+    -- LIKE child a non-NULL semantic.attr, and counting it would make every child S-ful --
+    -- the same back door, by the other road. The slots are read off the LIKE-MERGED shape, so an
+    -- inherited slot counts as a declared one; the last term carries a parent whose own S group
+    -- this shape cannot see, because reading the parent's TYPE alone made an ID-only parent
+    -- invisible.
+    (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
       OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
       OR len(COALESCE((shape).semantic.pseudo, [])) > 0 OR (shape).semantic.pseudo_args IS NOT NULL
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
