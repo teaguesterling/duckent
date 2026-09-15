@@ -107,14 +107,55 @@ The single-root timing lives in `test/spike_listspace.py` (a new `--sizes` mode)
 
 **Harness.** `test/run_mutants.py --verify` stops re-running a full-suite baseline per control file: the green suite run already proves the baseline, so each control needs only its own `expect_fail` suites.
 
-## 7. What M3 does not fix: compile cost
+## 7. Well-formedness and the duck_block_utils review
+
+A review from the duck_block_utils side (2026-09-15, all suites and mutants green on DuckDB 1.5.5 with sitting_duck loaded) found defects none of the M2 reviews did. M3 absorbs all of them, because §2 and §3 rewrite most of the code they live in. Items marked *verified* were reproduced by the reviewer against test files.
+
+**7.1 Wrong results.**
+
+| # | defect | rule |
+|---|---|---|
+| W1 | a numeric literal compared through `TRY_CAST(… AS BIGINT)` rounds: `[n=2]` matches `'1.5'` and `'2.4'` (*verified*; `tree_sql_attr_col_cmp`'s TRY_CAST arm and the ATTR MAP arm of `tree_sql_clause`) | every cast of a stored value for a numeric literal targets `DOUBLE`; `tree_sql_literal_type` keeps classifying literals, and a new `tree_sql_numeric_cast_type(arg)` returns `DOUBLE` for both integer and decimal literals and NULL otherwise |
+| W2 | an empty affix value (`[a^=""]`, `$=""`, `*=""`) lowers to `LIKE '%'`-style patterns and matches every row (*verified*) | in CSS an empty affix value matches nothing; both front-ends lower it to an `attr` clause with `op = 'LIKE'` and `arg = 'NULL'`, which the clause's `COALESCE(…, false)` makes false; the printer shows `ATTR a LIKE NULL` |
+| W3 | `:first-child` wrong on a gapped or offset ORDER (*verified*) | closed by §2.1 |
+| W4 | a capture named `@__c` collides with the compiler's own `__c` subquery alias and turns `+` into `~` | aliases beginning `__` are reserved like `s<N>`: refused by `tree_steps`, `tree_steps_group`, both css front-ends and the compiler's `bad_alias` (`alias __c is reserved: names beginning with __ belong to the compiler`) |
+| W5 | the SQL `@name` rewrite splits on `"` first, so a `"` inside a single-quoted value corrupts the text | `tree_css_capture_markers` tokenizes quoted strings with one pattern (`'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^'"]+`) and rewrites only the unquoted tokens |
+| W6 | `b:not(:nope)` matches every `b`: the unknown pseudo-class compiles to `false` inside a NOT, which widens the step | "unknowns match nothing" holds for the whole step: a HAS or NOT group containing an unknown pseudo-class at any depth compiles to `false`, so its step matches nothing; `_match_unknown_pseudos` still counts it |
+
+**7.2 Data loss.** Tree names that differ only in case share generated objects, because DuckDB identifiers are case-insensitive: creating `App` overwrote `app`'s table, and `tree_ddl_drop` of a tree that does not exist runs its `DROP … IF EXISTS` statements anyway, so dropping a mistyped `App` destroys `app`'s storage while `app`'s catalog rows stay (*verified*). Rules: `tree_compile_create` refuses when a tree exists whose schema and name match case-insensitively (`tree_ddl_create: tree main.App collides with existing tree main.app (names are case-insensitive)`); `tree_compile_drop` refuses a tree that does not exist, matched exactly (`tree_ddl_drop: tree main.App not found`). Identity stays case-sensitive in the catalog; uniqueness is case-insensitive.
+
+**7.3 Well-formedness at ingest (P13 and the bases).** P13 today checks only level jumps and the first row's level. Wherever P13 runs, the following refuse, each with its own message naming the tree and root:
+
+- a NULL or negative `_level`;
+- a NULL ORDER value, or two rows of one root with the same ORDER value (§3.2), checked against the source's ORDER expression before normalization, since `row_number()` would otherwise number NULLs and ties arbitrarily;
+- a partition whose first row starts above level 0: the message now says `rows start at level <n>; if the source's levels are <n>-based, declare LEVEL as '<level> - <n>'`, and keeps the ROOT hint only for the case it describes (an undeclared ROOT whose levels reset).
+
+A ROOT partition with several level-0 rows is **not** refused. The handover allows it ("multiple roots legal — R2 permits level returning to 0"): ROOT delimits independent trees for DML and attachments, it does not require one root row. The reviewer read it as a defect; FINDINGS records the adjudication.
+
+**7.4 The parent basis respects ROOT.** The DFS walk joins a child to its parent by key alone, so a valid forest whose keys repeat per root is refused, orphans vanish, and a duplicate key duplicates rows or never terminates (*verified*). Rules: the walk's recursive join also requires the child's ROOT to equal the walker's; before the walk, ingest refuses a key that repeats within a root (`KEY <k> appears <n> times in root <r>`) and any row the walk cannot reach from a NULL parent within its root (`<n> rows are not reachable from a root in root <r>: orphans or a cycle, e.g. key <k>`). Those two checks are emitted before any statement that evaluates the projection.
+
+**7.5 Smaller items.** A ROOT declaration splits on every comma, so an expression containing one cannot be declared: `tree_sql_list` splits on top-level commas only, honoring one level of parentheses and quotes, and a deeper nesting refuses with a hint to project a column. Selectors that reach a raw DuckDB error instead of a duckent refusal, and inputs the two css front-ends treat differently, are found by one sweep (`test/sweep_selectors.py`, reusing the Task 9 differential generator) over `app`, and each class found gets a fix and a record.
+
+**7.6 The harness.**
+
+- A mutant that fails to load is counted as a kill. `test/run.py --mutant` exits `3` with `MUTANT DID NOT LOAD` when applying the overlay raises, and `run_mutants.py` counts only exit `1` with at least one `FAIL <file>:<line>` record as a kill; exit `3` fails the run.
+- MN08 has no control but the summary says every kill was verified. The manifest marks it `control: manual`, and the summary reads `<k> of <n> kills verified against a control; manual: MN08`.
+- A file with no assertions passes, and a `require` that cannot load returns `[]`, discarding earlier failures. `run.py` fails a file that executes no `query` and no `statement error` record; `require` is legal only before the first record; `DUCKENT_NO_SKIP=1` turns a skip into a failure (CI sets it).
+- Expected error text matches by substring against DuckDB's message *including* its echoed SQL (`LINE n: …`), so `01_types.test:34` passes only because `levl` appears in the echo (*verified*). The runner compares against the message with everything from `\nLINE ` onward removed, and the one record that relied on the echo asserts the real message.
+- Suite 38 compares against a frozen snapshot of the runner parser's IR, not a live parser: its header and the README say so, and suite 44 is named as the live parser differential.
+
+**7.7 duck_block_utils.** The README's claim that duck_block_utils documents "conform by construction" is false: duck_blocks puts top-level blocks at level 1, so P13 refuses the repo's own markdown fixture, and its hint says to declare ROOT (*verified*). Rules: the README says documents conform with one declaration, `level := 'level - 1'`; its `section h2 + table` example is marked as needing a section projection duckent does not build; a new suite `45_duck_blocks.test` declares `test/data/readme_blocks.parquet` as a tree (ORDER `element_order`, LEVEL `level - 1`, TYPE `element_type`) and pins `heading + table` against a result computed independently in SQL; `test/data/FIXTURES.md` records the markdown extension version the fixture was generated with (community `2ba1321`). duckent has no notion of a block's body, so spec-1.4 metadata and value subtrees are ordinary nodes to it: recorded as **D-N22**, not built.
+
+**7.8 Mutants.** The review's harness findings change what a kill means (§7.6) but plant no new ids. W2, W4, W6, 7.2 and 7.4 each get a record that fails under a hand-reverted fix during implementation; none is promoted to a permanent mutant id.
+
+## 8. What M3 does not fix: compile cost
 
 Profiled on the corpus suites (2026-09-15): a 40_corpus record spends 67–107 ms in `tree_compile_match`, 29–59 ms in the printer and 2–10 ms executing the match; a `tree_steps` literal costs 28 ms. The suites are slow because DuckDB binds very large macro expansions, not because of the derivation or the joins. The C++ port removes this cost; M3 records the numbers and does not chase them (no compiled-selector cache: it would be state consulted by matching).
 
-## 8. Scope
+## 9. Scope
 
-**In:** §2–§6. **Out:** planner-side use of O and the EXPLAIN-shape benchmark (C++ port); attachments and loaders (W); M-LANG (TREEQL text, D-N20 parameterized pseudo-classes); compile-cost caching.
+**In:** §2–§7. **Out:** planner-side use of O and the EXPLAIN-shape benchmark (C++ port); attachments and loaders (W); M-LANG (TREEQL text, D-N20 parameterized pseudo-classes); compile-cost caching.
 
-## 9. Open decisions carried
+## 10. Open decisions carried
 
-D-N9, D-N10, D-N13, D-N15, D-N16, D-N19, D-N20 unchanged. New: **D-N21** whether projection-mode trees should run conformance at create as P13 does (M3 checks them on demand only; the asymmetry is deliberate and one line to change).
+D-N9, D-N10, D-N13, D-N15, D-N16, D-N19, D-N20 unchanged. New: **D-N21** whether projection-mode trees should run conformance at create as P13 does (M3 checks them on demand only; the asymmetry is deliberate and one line to change). **D-N22** whether duckent models a block's body (duck_blocks spec-1.4 metadata and value subtrees) or leaves it to the vocabulary.
