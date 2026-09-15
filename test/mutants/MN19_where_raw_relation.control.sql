@@ -24,9 +24,27 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     -- value ('3' > '10' is true as text); a quoted literal compares as text and needs none.
     -- TRY_CAST, not CAST: a row whose map holds text where a number was asked for should not
     -- match, not abort the query. MN13 mutates the cast.
+    --
+    -- The column lookup is CASE-INSENSITIVE, because SQL identifiers are and the projection's
+    -- columns are SQL identifiers: `[Name=x]` on a tree whose column is `name` names that column.
+    -- It used to be a byte comparison against the artifact, which on a MAP-less tree refused a
+    -- mis-cased name outright and on a MAP tree did something worse -- fell past the column into
+    -- the map, which serves every key, and answered no rows. The column is emitted with the
+    -- spelling the projection STORES, so the generated SQL binds whatever the selector wrote.
+    --
+    -- A canonical column is not an attribute: it is the tree's own representation, and P14 says
+    -- MATCH sees the projection's DECLARED attributes. Checked FIRST, before the map, for the
+    -- same reason the case fold matters -- on an ATTR MAP tree `_level` would otherwise be a
+    -- lookup for a key the map cannot hold, which reads as "no such row" rather than as "wrong
+    -- question". WHERE is where a question about the representation belongs, so it is named.
     WHEN 'attr'   THEN CASE
-        WHEN list_contains(attr_cols, value)
-          THEN 'COALESCE(' || alias || '.' || tree_sql_ident(value) || ' ' || op || ' ' || arg || ', false)'
+        WHEN list_contains(tree_canonical_columns(), lower(COALESCE(value, '')))
+          THEN tree_err('tree_match: attribute ' || value || ' is a canonical column, not an attribute; use a WHERE clause')
+        WHEN len(list_filter(attr_cols, lambda c: lower((c).name) = lower(value))) > 0
+          THEN 'COALESCE(' || tree_sql_attr_col_cmp(alias,
+                 (list_filter(attr_cols, lambda c: lower((c).name) = lower(value))[1]).name,
+                 (list_filter(attr_cols, lambda c: lower((c).name) = lower(value))[1])."type",
+                 op, arg) || ', false)'
         WHEN has_map
           THEN 'COALESCE(' || CASE WHEN tree_sql_literal_type(arg) IS NULL
                                    THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'

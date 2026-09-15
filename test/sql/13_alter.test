@@ -81,7 +81,7 @@ SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND 
        (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'app' AND artifact = 'attribute_columns'),
        (SELECT count(*) FILTER (WHERE NOT _element) FROM tree_project('main', 'app'));
 ----
-depth > 0	macro is_leaf(descendant_count)	["name","depth"]	1
+depth > 0	macro is_leaf(descendant_count)	[{"name":"name","type":"VARCHAR"},{"name":"depth","type":"UINTEGER"}]	1
 
 # error(NULL) audit (Task 13): F11 made the existence check fire outside the FROM so that an
 # alter on a missing tree refuses instead of returning NULL. A NULL schema or name defeated it
@@ -103,8 +103,9 @@ tree_ddl_alter: tree main.<NULL> not found
 # it to true unconditionally, so an ATTR-only alter -- which declares no S slot; ATTR names the
 # projected columns -- marked an R-only tree S-ful. The S clause then compiled against TYPE's
 # `'node'` default and returned zero rows, which reads as "no such node" rather than as "this
-# tree has no types". The flag is now create's own per-slot expression: declared here, or already
-# there.
+# tree has no types". The flag is now the predicate create reads (tree_semantic_declares), asked
+# of this alter's own semantic -- see the record at the end of this file for why nothing is OR'd
+# in from the flag the tree already carried.
 statement ok
 CALL tree_ddl_create('main', 'ronly', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src'));
 
@@ -133,7 +134,7 @@ has no SEMANTIC group
 query I
 SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'ronly' AND artifact = 'attribute_columns';
 ----
-["node_id","type"]
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"}]
 
 statement error
 SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{attr: 'node_id = 0'}]));

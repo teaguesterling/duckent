@@ -272,7 +272,7 @@ query II
 SELECT has_semantic, (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'attronly' AND artifact = 'attribute_columns')
 FROM tree_catalog_trees() WHERE tree_name = 'attronly';
 ----
-false	["node_id","type"]
+false	[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"}]
 
 statement error
 SELECT count(*) FROM tree_match('main', 'attronly', tree_steps([{type: 'function_definition'}]));
@@ -445,7 +445,7 @@ true
 query I
 SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'elem' AND artifact = 'attribute_columns';
 ----
-["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek","css_classes","is_element","params"]
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"},{"name":"semantic_type","type":"UTINYINT"},{"name":"flags","type":"UTINYINT"},{"name":"name","type":"VARCHAR"},{"name":"qualified_name","type":"STRUCT(semantic_type UTINYINT, \"name\" VARCHAR, \"index\" INTEGER)[]"},{"name":"signature_type","type":"VARCHAR"},{"name":"parameters","type":"STRUCT(\"name\" VARCHAR, \"type\" VARCHAR)[]"},{"name":"modifiers","type":"VARCHAR[]"},{"name":"annotations","type":"VARCHAR"},{"name":"file_path","type":"VARCHAR"},{"name":"language","type":"VARCHAR"},{"name":"start_line","type":"UINTEGER"},{"name":"end_line","type":"UINTEGER"},{"name":"parent_id","type":"BIGINT"},{"name":"depth","type":"UINTEGER"},{"name":"sibling_index","type":"INTEGER"},{"name":"children_count","type":"UINTEGER"},{"name":"descendant_count","type":"UINTEGER"},{"name":"scope","type":"STRUCT(\"current\" BIGINT, \"function\" BIGINT, \"class\" BIGINT, module BIGINT, stack STRUCT(id BIGINT, kind UTINYINT)[])"},{"name":"peek","type":"VARCHAR"},{"name":"css_classes","type":"VARCHAR[]"},{"name":"is_element","type":"BOOLEAN"},{"name":"params","type":"INTEGER"}]
 
 # a prefix-bound PSEUDO binds every catalog macro carrying that prefix, is stored expanded
 # with origin = prefix, and is selectable like any other pseudo-class
@@ -474,4 +474,4 @@ query II
 SELECT (SELECT sql_text FROM tree_catalog.compiled WHERE schema_name = 'a_b' AND tree_name = 'c' AND artifact = 'attribute_columns'),
        (SELECT count(*) FROM tree_catalog.compiled WHERE tree_name = 'ast_shape');
 ----
-["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek","css_classes","is_element","params"]	0
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"},{"name":"semantic_type","type":"UTINYINT"},{"name":"flags","type":"UTINYINT"},{"name":"name","type":"VARCHAR"},{"name":"qualified_name","type":"STRUCT(semantic_type UTINYINT, \"name\" VARCHAR, \"index\" INTEGER)[]"},{"name":"signature_type","type":"VARCHAR"},{"name":"parameters","type":"STRUCT(\"name\" VARCHAR, \"type\" VARCHAR)[]"},{"name":"modifiers","type":"VARCHAR[]"},{"name":"annotations","type":"VARCHAR"},{"name":"file_path","type":"VARCHAR"},{"name":"language","type":"VARCHAR"},{"name":"start_line","type":"UINTEGER"},{"name":"end_line","type":"UINTEGER"},{"name":"parent_id","type":"BIGINT"},{"name":"depth","type":"UINTEGER"},{"name":"sibling_index","type":"INTEGER"},{"name":"children_count","type":"UINTEGER"},{"name":"descendant_count","type":"UINTEGER"},{"name":"scope","type":"STRUCT(\"current\" BIGINT, \"function\" BIGINT, \"class\" BIGINT, module BIGINT, stack STRUCT(id BIGINT, kind UTINYINT)[])"},{"name":"peek","type":"VARCHAR"},{"name":"css_classes","type":"VARCHAR[]"},{"name":"is_element","type":"BOOLEAN"},{"name":"params","type":"INTEGER"}]	0

@@ -43,10 +43,21 @@ WITH t AS (
            OR (semantic).element IS NOT NULL AS has_element,
          EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND s.slot = 'ATTR_MAP')
            OR (semantic).attr_map IS NOT NULL AS has_map,
-         -- the projection's non-canonical columns, recorded at create time: which bare names an
-         -- ATTR clause may resolve to without describing the relation on every query
-         COALESCE((SELECT from_json(c.sql_text, '["VARCHAR"]') FROM tree_catalog.compiled c
-                   WHERE c.database_name = current_database() AND c.schema_name = sch AND c.tree_name = nm AND c.artifact = 'attribute_columns'), []::VARCHAR[]) AS attr_cols
+         -- The projection's non-canonical columns, recorded at create time: which bare names an
+         -- ATTR clause may resolve to, and in what type, without describing the relation on every
+         -- query. Two shapes are read, because the artifact gained its types in the PR #2 fix
+         -- wave and a catalog written before that still says what its columns are called: a list
+         -- of `{name, type}` objects, or a bare list of names, which reads back with a NULL type
+         -- (tree_sql_attr_col_cmp then takes the reading that cannot abort the query). The shape
+         -- is decided by the first element's json_type rather than by a version flag, so an
+         -- artifact and its reader cannot disagree about which they are looking at.
+         COALESCE((SELECT CASE WHEN json_type(c.sql_text, '$[0]') = 'OBJECT'
+                               THEN from_json(c.sql_text, '[{"name": "VARCHAR", "type": "VARCHAR"}]')
+                               ELSE list_transform(from_json(c.sql_text, '["VARCHAR"]'),
+                                                   lambda x: {name: x, "type": NULL::VARCHAR}) END
+                   FROM tree_catalog.compiled c
+                   WHERE c.database_name = current_database() AND c.schema_name = sch AND c.tree_name = nm AND c.artifact = 'attribute_columns'),
+                  []::STRUCT(name VARCHAR, "type" VARCHAR)[]) AS attr_cols
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
 -- The overlay with its macro-, map- and prefix-bound pseudo-classes turned into expression
 -- bodies, exactly as the DDL compilers do before storing them: tree_sql_pseudo_map reads (p).body

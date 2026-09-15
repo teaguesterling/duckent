@@ -89,6 +89,38 @@ CREATE OR REPLACE MACRO tree_sql_builtin_pseudo(name, alias, p, elem) AS
        WHEN name = 'first-child' THEN tree_sql_first_child(alias, p, elem)
        WHEN name = 'last-child'  THEN tree_sql_last_child(alias, p, elem) END;
 
+-- Whether a DESCRIBE column_type names a number. Spelled out rather than pattern-matched: the
+-- alternation a regex would need (U?, INT vs INTEGER, the INT1..INT8 aliases) is longer than the
+-- list, and a near-miss here silently changes how a comparison is compiled.
+CREATE OR REPLACE MACRO tree_sql_is_numeric_type(t) AS
+  upper(COALESCE(t, '')) IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT',
+                             'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT',
+                             'FLOAT', 'DOUBLE', 'REAL', 'INT', 'INT1', 'INT2', 'INT4', 'INT8')
+  OR starts_with(upper(COALESCE(t, '')), 'DECIMAL') OR starts_with(upper(COALESCE(t, '')), 'NUMERIC');
+
+-- How a comparison against a PROJECTED column is spelled, given the column's declared type from
+-- the attribute_columns artifact (NULL when the artifact predates types). The literal is spliced
+-- as written except where that would mean something other than what it says:
+--
+--   * a quoted (or otherwise non-numeric) literal compares as written, as it always did;
+--   * a number against a TEXT column compares as text -- `name = 5` used to compile to `name = 5`,
+--     which DuckDB binds by casting the COLUMN, so the first row whose text is not a number
+--     aborted the query instead of not matching (R7);
+--   * a number against a numeric column keeps the numeric comparison, which is what corpus row
+--     c16 (`.fn[params=2]`) reads;
+--   * anything else -- a type the artifact does not record, or a column that is neither text nor
+--     a number -- takes TRY_CAST, the reading that cannot abort. Same rule, and same reason, as
+--     the ATTR MAP branch below.
+CREATE OR REPLACE MACRO tree_sql_attr_col_cmp(alias, col, ctype, op, arg) AS
+  CASE WHEN tree_sql_literal_type(arg) IS NULL
+         THEN alias || '.' || tree_sql_ident(col) || ' ' || op || ' ' || arg
+       WHEN upper(COALESCE(ctype, '')) = 'VARCHAR'
+         THEN alias || '.' || tree_sql_ident(col) || ' ' || op || ' ' || tree_sql_lit(trim(arg))
+       WHEN tree_sql_is_numeric_type(ctype)
+         THEN alias || '.' || tree_sql_ident(col) || ' ' || op || ' ' || arg
+       ELSE 'TRY_CAST(' || alias || '.' || tree_sql_ident(col) || ' AS ' || tree_sql_literal_type(arg) || ') '
+            || op || ' ' || arg END;
+
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
 -- would rewrite any user text that happened to contain it. Attribute and pseudo filters are
 -- NULL-definite. p is the projection relation text and elem the tree's ELEMENT flag, both only
@@ -108,9 +140,27 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     -- value ('3' > '10' is true as text); a quoted literal compares as text and needs none.
     -- TRY_CAST, not CAST: a row whose map holds text where a number was asked for should not
     -- match, not abort the query. MN13 mutates the cast.
+    --
+    -- The column lookup is CASE-INSENSITIVE, because SQL identifiers are and the projection's
+    -- columns are SQL identifiers: `[Name=x]` on a tree whose column is `name` names that column.
+    -- It used to be a byte comparison against the artifact, which on a MAP-less tree refused a
+    -- mis-cased name outright and on a MAP tree did something worse -- fell past the column into
+    -- the map, which serves every key, and answered no rows. The column is emitted with the
+    -- spelling the projection STORES, so the generated SQL binds whatever the selector wrote.
+    --
+    -- A canonical column is not an attribute: it is the tree's own representation, and P14 says
+    -- MATCH sees the projection's DECLARED attributes. Checked FIRST, before the map, for the
+    -- same reason the case fold matters -- on an ATTR MAP tree `_level` would otherwise be a
+    -- lookup for a key the map cannot hold, which reads as "no such row" rather than as "wrong
+    -- question". WHERE is where a question about the representation belongs, so it is named.
     WHEN 'attr'   THEN CASE
-        WHEN list_contains(attr_cols, value)
-          THEN 'COALESCE(' || alias || '.' || tree_sql_ident(value) || ' ' || op || ' ' || arg || ', false)'
+        WHEN list_contains(tree_canonical_columns(), lower(COALESCE(value, '')))
+          THEN tree_err('tree_match: attribute ' || value || ' is a canonical column, not an attribute; use a WHERE clause')
+        WHEN len(list_filter(attr_cols, lambda c: lower((c).name) = lower(value))) > 0
+          THEN 'COALESCE(' || tree_sql_attr_col_cmp(alias,
+                 (list_filter(attr_cols, lambda c: lower((c).name) = lower(value))[1]).name,
+                 (list_filter(attr_cols, lambda c: lower((c).name) = lower(value))[1])."type",
+                 op, arg) || ', false)'
         WHEN has_map
           THEN 'COALESCE(' || CASE WHEN tree_sql_literal_type(arg) IS NULL
                                    THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'
@@ -185,10 +235,21 @@ WITH t AS (
            OR (semantic).element IS NOT NULL AS has_element,
          EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND s.slot = 'ATTR_MAP')
            OR (semantic).attr_map IS NOT NULL AS has_map,
-         -- the projection's non-canonical columns, recorded at create time: which bare names an
-         -- ATTR clause may resolve to without describing the relation on every query
-         COALESCE((SELECT from_json(c.sql_text, '["VARCHAR"]') FROM tree_catalog.compiled c
-                   WHERE c.database_name = current_database() AND c.schema_name = sch AND c.tree_name = nm AND c.artifact = 'attribute_columns'), []::VARCHAR[]) AS attr_cols
+         -- The projection's non-canonical columns, recorded at create time: which bare names an
+         -- ATTR clause may resolve to, and in what type, without describing the relation on every
+         -- query. Two shapes are read, because the artifact gained its types in the PR #2 fix
+         -- wave and a catalog written before that still says what its columns are called: a list
+         -- of `{name, type}` objects, or a bare list of names, which reads back with a NULL type
+         -- (tree_sql_attr_col_cmp then takes the reading that cannot abort the query). The shape
+         -- is decided by the first element's json_type rather than by a version flag, so an
+         -- artifact and its reader cannot disagree about which they are looking at.
+         COALESCE((SELECT CASE WHEN json_type(c.sql_text, '$[0]') = 'OBJECT'
+                               THEN from_json(c.sql_text, '[{"name": "VARCHAR", "type": "VARCHAR"}]')
+                               ELSE list_transform(from_json(c.sql_text, '["VARCHAR"]'),
+                                                   lambda x: {name: x, "type": NULL::VARCHAR}) END
+                   FROM tree_catalog.compiled c
+                   WHERE c.database_name = current_database() AND c.schema_name = sch AND c.tree_name = nm AND c.artifact = 'attribute_columns'),
+                  []::STRUCT(name VARCHAR, "type" VARCHAR)[]) AS attr_cols
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
 -- The overlay with its macro-, map- and prefix-bound pseudo-classes turned into expression
 -- bodies, exactly as the DDL compilers do before storing them: tree_sql_pseudo_map reads (p).body

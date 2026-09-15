@@ -76,18 +76,27 @@ CREATE OR REPLACE MACRO tree_sql_pseudo_insert(db, sch, nm, pseudo, explicit_sel
               WHEN (x).prefix = tree_shared_pseudo_prefix() AND NOT explicit_sel_prefix THEN '''shared'''
               ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END;
 
--- The attribute_columns artifact: the projection's non-canonical column names, in projection
--- order, as a JSON list. Recorded rather than recomputed because the front-ends (and the CSS
--- lowering M2 adds) need to know which bare names are attributes without describing the
--- relation on every query. The projection macro is described, not the source, so it is right
--- for both storage modes -- a materialized tree's macro selects from its table.
+-- The attribute_columns artifact: the projection's non-canonical columns -- name AND declared
+-- type -- in projection order, as a JSON list of `{"name": ..., "type": ...}` objects. Recorded
+-- rather than recomputed because the front-ends (and the CSS lowering M2 adds) need to know which
+-- bare names are attributes without describing the relation on every query. The projection macro
+-- is described, not the source, so it is right for both storage modes -- a materialized tree's
+-- macro selects from its table.
+--
+-- The TYPE was added by the PR #2 fix wave (R7). Without it the clause compiler could only splice
+-- the literal as written, so an unquoted css number against a text column (`[name=5]`) compiled to
+-- `name = 5`, which DuckDB binds by casting the COLUMN -- and the first row whose text is not a
+-- number aborted the whole query. tree_sql_attr_col_cmp (sql/07_match.sql) reads the type and
+-- picks the comparison; an artifact written before this change is a bare list of names and reads
+-- back with a NULL type, which that macro also handles.
+--
 -- 1.5.5 notes: DESCRIBE takes a statement, not a table-function call ("DESCRIBE proj()" is a
 -- parser error, "DESCRIBE SELECT * FROM proj()" is not), and its output has no column_index,
 -- so projection order is recovered with row_number() OVER () over the describe rows.
 CREATE OR REPLACE MACRO tree_sql_attr_cols_insert(db, sch, nm, proj_name) AS
   'INSERT INTO tree_catalog.compiled SELECT ' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm)
-  || ', ''attribute_columns'', '''', to_json(COALESCE(list(column_name ORDER BY i), []))'
-  || ' FROM (SELECT column_name, row_number() OVER () AS i FROM (DESCRIBE SELECT * FROM ' || proj_name || '()))'
+  || ', ''attribute_columns'', '''', to_json(COALESCE(list({''name'': column_name, ''type'': column_type} ORDER BY i), []))'
+  || ' FROM (SELECT column_name, column_type, row_number() OVER () AS i FROM (DESCRIBE SELECT * FROM ' || proj_name || '()))'
   || ' WHERE column_name NOT LIKE ''\_%'' ESCAPE ''\''';
 
 CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS (
