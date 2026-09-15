@@ -39,9 +39,10 @@ SELECT root_key, epoch, row_count FROM tree_state.partitions WHERE tree_name = '
 ----
 {'file_path': app.py}	1	54
 
-query I
+query I rowsort
 SELECT artifact FROM tree_catalog.compiled WHERE tree_name = 'app';
 ----
+attribute_columns
 projection
 
 # classes introspection is empty for a tree without CLASSES
@@ -364,3 +365,62 @@ statement error
 SELECT * FROM tree_project('main', 'app');
 ----
 proj_4_main_app
+
+# ELEMENT reaches the catalog as an S slot and the projection as a per-row predicate; a
+# macro-bound PSEUDO is expanded to its call expression before it is stored
+statement ok
+CREATE MACRO is_leaf(n) AS n = 0;
+
+statement ok
+CALL tree_ddl_create('main', 'elem', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', element := 'regexp_matches(type, ''^[a-z_]'')', pseudo := [{name: 'leaf', macro: 'is_leaf', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'elem' AND slot = 'ELEMENT';
+----
+regexp_matches(type, '^[a-z_]')
+
+query III
+SELECT name, kind, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'elem';
+----
+leaf	macro	is_leaf(descendant_count)
+
+query I
+SELECT count(*) FILTER (WHERE NOT _element) > 0 FROM tree_project('main', 'elem');
+----
+true
+
+query I
+SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'elem' AND artifact = 'attribute_columns';
+----
+["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek"]
+
+# a prefix-bound PSEUDO binds every catalog macro carrying that prefix, is stored expanded
+# with origin = prefix, and is selectable like any other pseudo-class
+statement ok
+CREATE MACRO sel_x_top(d) AS d = 0;
+
+statement ok
+CALL tree_ddl_create('main', 'pfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'sel_x_', args: 'depth'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query IIII
+SELECT name, kind, body, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'pfx';
+----
+top	macro	sel_x_top(depth)	prefix
+
+query III
+FROM tree_match('main', 'pfx', tree_steps([{pseudo: 'top'}]))
+SELECT count(*), count(*) FILTER (WHERE depth <> 0), (SELECT count(*) FROM tree_project('main', 'pfx'));
+----
+1	0	54
+
+# a projection-mode tree records the artifact too (the projection macro is what gets described,
+# so one statement serves both storage modes), and an abstract tree records nothing
+query II
+SELECT (SELECT sql_text FROM tree_catalog.compiled WHERE schema_name = 'a_b' AND tree_name = 'c' AND artifact = 'attribute_columns'),
+       (SELECT count(*) FROM tree_catalog.compiled WHERE tree_name = 'ast_shape');
+----
+["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek"]	0

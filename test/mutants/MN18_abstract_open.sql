@@ -8,10 +8,22 @@
 CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS (
 WITH base AS (
   SELECT current_database() AS db,
-         tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS shape,
+         tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS merged,
          (spec)."like" IS NOT NULL AND tree_shape_from_catalog(current_database(), sch, (spec)."like") IS NULL AS like_missing,
          EXISTS (SELECT 1 FROM tree_catalog.trees t WHERE t.database_name = current_database() AND t.schema_name = sch AND t.tree_name = nm) AS exists_already,
          (spec).abstract AS abstract, (spec).source AS source, (spec).storage AS storage
+),
+-- Macro-, map- and prefix-bound pseudo-classes become expression bodies here, before validation
+-- and before anything is stored: tree_sql_pseudo_map reads (p).body only, so an unexpanded
+-- binding would compile the pseudo map -- and with it the projection -- to NULL. The catalog
+-- then holds the expanded body, so nothing downstream has to re-expand (and a prefix binding
+-- is resolved once, against the macros that existed at create time).
+expanded AS (
+  SELECT * EXCLUDE (merged),
+    {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
+     sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
+     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape
+  FROM base
 ),
 derived AS (
   SELECT *,
@@ -22,12 +34,19 @@ derived AS (
     COALESCE((shape).semantic.attr, '*') AS attr_text,
     -- A LIKE child has an S group when it declares one or when its parent has one, whatever
     -- slot the parent filled: reading the parent's TYPE alone made an ID-only parent invisible.
+    -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is.
+    -- The first term (this create declared some S group at all) already covers them, so the
+    -- per-slot terms are deliberately redundant: they state the rule against the merged shape,
+    -- so a slot added later cannot be silently missed here.
     (spec).shape.semantic IS NOT NULL
+      OR (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
+      OR (shape).semantic.attr IS NOT NULL OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
+      OR len(COALESCE((shape).semantic.pseudo, [])) > 0
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
     'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
-  FROM base
+  FROM expanded
 ),
 checked AS (
   SELECT *,
@@ -57,6 +76,7 @@ slot_rows AS (
     {b: 'R', s: 'SIBLING_ORDER', e: (shape).sibling_order},
     {b: 'S', s: 'TYPE', e: (shape).semantic.type}, {b: 'S', s: 'ID', e: (shape).semantic.id}, {b: 'S', s: 'CLASSES', e: (shape).semantic.classes},
     {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (shape).semantic.attr_map},
+    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element},
     {b: 'O', s: 'SIZE', e: (shape).size}, {b: 'O', s: 'CHILDREN', e: (shape).children}, {b: 'O', s: 'NEXT', e: (shape).next}
   ], lambda x: (x).e IS NOT NULL) AS rows, * FROM checked
 ),
@@ -71,8 +91,12 @@ built AS (
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
    CASE WHEN len(COALESCE((shape).semantic.pseudo, [])) = 0 THEN NULL ELSE
+   -- kind and origin record how the (already expanded) body was bound: macro when a macro name
+   -- was named, prefix when the entry came from a prefix binding rather than this declaration.
    'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform((shape).semantic.pseudo, lambda x:
-       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', ''expression'', ' || tree_sql_lit((x).body) || ', ''local'', ''unknown'')'), 'string_agg', ', ') END AS s_pseudo,
+       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', '
+       || CASE WHEN (x).macro IS NULL THEN '''expression''' ELSE '''macro''' END || ', ' || tree_sql_lit((x).body) || ', '
+       || CASE WHEN (x).prefix IS NULL THEN '''local''' ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END AS s_pseudo,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
@@ -81,6 +105,7 @@ built AS (
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE
      'INSERT INTO tree_state.partitions SELECT ' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', _root::VARCHAR, 1, count(*), true, now() FROM ' || tbl_name || ' GROUP BY _root' END AS s_partitions,
    CASE WHEN abstract THEN NULL ELSE 'INSERT INTO tree_catalog.compiled VALUES (' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''projection'', ' || tree_sql_lit(proj_name) || ', ' || tree_sql_lit(proj_sql) || ')' END AS s_compiled,
+   CASE WHEN abstract THEN NULL ELSE tree_sql_attr_cols_insert(db, sch, nm, proj_name) END AS s_attr_cols,
    'COMMIT' AS s_commit
   FROM slot_rows WHERE ok
 )
@@ -88,5 +113,5 @@ SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_comm
             -- plain error(), not (SELECT error(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
             THEN error('tree_ddl_create: internal: a required statement compiled to NULL')
-            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_commit], lambda x: x IS NOT NULL) END
+            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);

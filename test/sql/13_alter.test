@@ -64,3 +64,21 @@ statement error
 CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', attr := 'CAST(depth AS BIGINT) _size, name'));
 ----
 shadows a canonical column: _size
+
+# alter runs the same pseudo expansion create does (a macro binding is stored expanded, with
+# kind = macro), records ELEMENT as an S slot, and refreshes the attribute_columns artifact
+# for the narrowed attribute list
+statement ok
+CREATE MACRO is_leaf(n) AS n = 0;
+
+statement ok
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', attr := 'name, depth',
+  element := 'depth > 0', pseudo := [{name: 'leaf', macro: 'is_leaf', args: 'descendant_count'}]));
+
+query IIII
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'ELEMENT'),
+       (SELECT kind || ' ' || body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'app' AND name = 'leaf'),
+       (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'app' AND artifact = 'attribute_columns'),
+       (SELECT count(*) FILTER (WHERE NOT _element) FROM tree_project('main', 'app'));
+----
+depth > 0	macro is_leaf(descendant_count)	["name","depth"]	1

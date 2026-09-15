@@ -1,6 +1,6 @@
 -- sql/07_match.sql
 CREATE OR REPLACE MACRO tree_canonical_columns() AS
-  ['_root', '_pre', '_level', '_parent', '_size', '_children', '_next', '_type', '_id', '_classes', '_attr_map', '_pseudo'];
+  ['_root', '_pre', '_level', '_parent', '_size', '_children', '_next', '_type', '_id', '_classes', '_attr_map', '_element', '_pseudo'];
 
 -- Structural predicate between the previous step alias a and this step alias b. MN14 mutates this to drop the root equality.
 CREATE OR REPLACE MACRO tree_sql_comb(op, a, b) AS

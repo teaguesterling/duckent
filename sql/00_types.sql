@@ -79,10 +79,13 @@ CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
   CASE
     WHEN regexp_matches(COALESCE(attr_text, ''), '(?i)\bAS\s+"?_')
       THEN error(verb || ': ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
-    -- A NULL name or body would compile the pseudo map, and the pseudo_classes INSERT,
-    -- to NULL; both would then be dropped from the statement list instead of refusing.
+    -- A NULL name, or a body with no macro to derive one from, would compile the pseudo map
+    -- and the pseudo_classes INSERT to NULL; both would then be dropped from the statement
+    -- list instead of refusing. A macro-bound entry passes with a NULL body because the DDL
+    -- compilers run tree_expand_pseudo first, which fills the body in from macro(args);
+    -- prefix entries are exempt entirely -- expansion is what gives them their names.
     WHEN len(list_filter(COALESCE((sem).pseudo, []), lambda x: (x).prefix IS NULL AND ((x).name IS NULL OR ((x).body IS NULL AND (x).macro IS NULL)))) > 0
-      THEN error(verb || ': every PSEUDO needs a name and a body')
+      THEN error(verb || ': every PSEUDO needs a name and a body or macro')
     WHEN len(list_distinct(list_transform(COALESCE((sem).pseudo, []), lambda x: (x).name))) <> len(COALESCE((sem).pseudo, []))
       THEN error(verb || ': S-coherence: a pseudo-class is bound twice')
     ELSE true END;
@@ -94,4 +97,4 @@ CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
 CREATE OR REPLACE MACRO tree_sql_shadow_check(rel_sql, verb) AS
   'SELECT CASE WHEN count(*) > 0 THEN error(''' || verb || ': attribute column shadows a canonical column: '' || string_agg(DISTINCT regexp_replace(column_name, ''_[0-9]+$'', ''''), '', '')) END'
   || ' FROM (DESCRIBE ' || rel_sql || ')'
-  || ' WHERE regexp_matches(column_name, ''^_(root|pre|level|parent|size|children|next|type|id|classes|attr_map|pseudo)_[0-9]+$'')';
+  || ' WHERE regexp_matches(column_name, ''^_(root|pre|level|parent|size|children|next|type|id|classes|attr_map|element|pseudo)_[0-9]+$'')';

@@ -21,6 +21,18 @@ CREATE OR REPLACE MACRO tree_sql_pseudo_map(sem) AS
             || '], [' || list_aggregate(list_transform(list_filter((sem).pseudo, lambda p: (p).name IS NOT NULL), lambda p: '(' || (p).body || ')'), 'string_agg', ', ')
             || '])::MAP(VARCHAR, BOOLEAN)' END;
 
+-- The S columns of the projection, one definition for both bases, so the two branches of
+-- tree_compile_projection cannot drift apart. ATTR MAP is cast to the canonical map type
+-- (an undeclared one is a typed NULL of that type, not VARCHAR) and ELEMENT is a per-row
+-- predicate defaulting to true, NULL-definite like every other filter in the language.
+-- MN21 mutates the TYPE default here.
+CREATE OR REPLACE MACRO tree_sql_sem_cols(sem) AS
+  COALESCE((sem).type, '''node''') || ' AS _type, ' || COALESCE((sem).id, 'NULL::VARCHAR') || ' AS _id, '
+  || COALESCE((sem).classes, 'NULL::VARCHAR[]') || ' AS _classes, '
+  || CASE WHEN (sem).attr_map IS NULL THEN 'NULL::MAP(VARCHAR, VARCHAR)' ELSE 'CAST(' || (sem).attr_map || ' AS MAP(VARCHAR, VARCHAR))' END || ' AS _attr_map, '
+  || 'COALESCE(' || COALESCE((sem).element, 'true') || ', false) AS _element, '
+  || tree_sql_pseudo_map(sem) || ' AS _pseudo';
+
 -- Derived parent for level basis: nearest prior row at level - 1 within the root (ASOF join). MN2 mutates this.
 CREATE OR REPLACE MACRO tree_sql_parent_join() AS
   '__p AS (SELECT a.*, b._pre AS _parent FROM __r a ASOF LEFT JOIN __r b ON a._root = b._root AND b._level = a._level - 1 AND b._pre < a._pre), ';
@@ -67,9 +79,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || tree_sql_root((shape).root, '') || ' AS _root, CAST('
      || COALESCE((shape)."order", 'row_number() OVER (PARTITION BY ' || tree_sql_root((shape).root, '') || ' ORDER BY __seq) - 1')
      || ' AS BIGINT) AS _pre, CAST(' || (shape).level || ' AS BIGINT) AS _level, '
-     || COALESCE((shape).semantic.type, '''node''') || ' AS _type, ' || COALESCE((shape).semantic.id, 'NULL::VARCHAR') || ' AS _id, '
-     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL::VARCHAR') || ' AS _attr_map, '
-     || tree_sql_pseudo_map((shape).semantic) || ' AS _pseudo'
+     || tree_sql_sem_cols((shape).semantic)
      || (CASE WHEN (shape).parent IS NOT NULL THEN ', ' || (shape).parent || ' AS __parent_raw' ELSE '' END)
      || (CASE WHEN (shape).size IS NOT NULL THEN ', ' || (shape).size || ' AS __size_raw' ELSE '' END)
      || (CASE WHEN (shape).children IS NOT NULL THEN ', ' || (shape).children || ' AS __children_raw' ELSE '' END)
@@ -90,9 +100,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || '__r0 AS (SELECT ' || (CASE WHEN attr_text = '' THEN '' WHEN attr_text = '*' THEN 's.*, ' ELSE attr_text || ', ' END)
      || 'w._root, CAST(row_number() OVER (PARTITION BY w._root ORDER BY w.__path) - 1 AS BIGINT) AS _pre, '
      || 'CAST(w._level AS BIGINT) AS _level, s.' || (shape).key || ' AS __key, s.' || (shape).parent || ' AS __pkey, '
-     || COALESCE((shape).semantic.type, '''node''') || ' AS _type, ' || COALESCE((shape).semantic.id, 'NULL::VARCHAR') || ' AS _id, '
-     || COALESCE((shape).semantic.classes, 'NULL::VARCHAR[]') || ' AS _classes, ' || COALESCE((shape).semantic.attr_map, 'NULL::VARCHAR') || ' AS _attr_map, '
-     || tree_sql_pseudo_map((shape).semantic) || ' AS _pseudo'
+     || tree_sql_sem_cols((shape).semantic)
      || (CASE WHEN (shape).size IS NOT NULL THEN ', s.' || (shape).size || ' AS __size_raw' ELSE '' END)
      || (CASE WHEN (shape).children IS NOT NULL THEN ', s.' || (shape).children || ' AS __children_raw' ELSE '' END)
      || (CASE WHEN (shape).next IS NOT NULL THEN ', s.' || (shape).next || ' AS __next_raw' ELSE '' END)
