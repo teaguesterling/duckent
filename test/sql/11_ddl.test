@@ -475,3 +475,30 @@ SELECT (SELECT sql_text FROM tree_catalog.compiled WHERE schema_name = 'a_b' AND
        (SELECT count(*) FROM tree_catalog.compiled WHERE tree_name = 'ast_shape');
 ----
 [{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"},{"name":"semantic_type","type":"UTINYINT"},{"name":"flags","type":"UTINYINT"},{"name":"name","type":"VARCHAR"},{"name":"qualified_name","type":"STRUCT(semantic_type UTINYINT, \"name\" VARCHAR, \"index\" INTEGER)[]"},{"name":"signature_type","type":"VARCHAR"},{"name":"parameters","type":"STRUCT(\"name\" VARCHAR, \"type\" VARCHAR)[]"},{"name":"modifiers","type":"VARCHAR[]"},{"name":"annotations","type":"VARCHAR"},{"name":"file_path","type":"VARCHAR"},{"name":"language","type":"VARCHAR"},{"name":"start_line","type":"UINTEGER"},{"name":"end_line","type":"UINTEGER"},{"name":"parent_id","type":"BIGINT"},{"name":"depth","type":"UINTEGER"},{"name":"sibling_index","type":"INTEGER"},{"name":"children_count","type":"UINTEGER"},{"name":"descendant_count","type":"UINTEGER"},{"name":"scope","type":"STRUCT(\"current\" BIGINT, \"function\" BIGINT, \"class\" BIGINT, module BIGINT, stack STRUCT(id BIGINT, kind UTINYINT)[])"},{"name":"peek","type":"VARCHAR"},{"name":"css_classes","type":"VARCHAR[]"},{"name":"is_element","type":"BOOLEAN"},{"name":"params","type":"INTEGER"}]	0
+
+# Tree names are identifiers, and DuckDB identifiers are case-insensitive: App and app would
+# share every generated object. Creating the second must refuse, and dropping a tree that does
+# not exist must not run its DROP statements against a neighbour's objects.
+statement ok
+CREATE TABLE case_a AS SELECT 'A' AS v, 0 AS node_id, 0 AS depth;
+
+statement ok
+CREATE TABLE case_b AS SELECT 'B' AS v, 0 AS node_id, 0 AS depth;
+
+statement ok
+CALL tree_ddl_create('main', 'casey', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'case_a'));
+
+statement error
+CALL tree_ddl_create('main', 'Casey', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'case_b'));
+----
+collides with existing tree main.casey (names are case-insensitive)
+
+statement error
+CALL tree_ddl_drop('main', 'CASEY');
+----
+tree_ddl_drop: tree main.CASEY not found
+
+query II
+SELECT (SELECT list(v) FROM tree_project('main', 'casey')), (SELECT count(*) FROM tree_catalog.trees WHERE tree_name = 'casey');
+----
+[A]	1

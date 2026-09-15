@@ -11,6 +11,14 @@ WITH base AS (
          tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS merged,
          (spec)."like" IS NOT NULL AND tree_shape_from_catalog(current_database(), sch, (spec)."like") IS NULL AS like_missing,
          EXISTS (SELECT 1 FROM tree_catalog.trees t WHERE t.database_name = current_database() AND t.schema_name = sch AND t.tree_name = nm) AS exists_already,
+         -- DuckDB identifiers are case-insensitive, so two trees whose names differ only by case
+         -- would share every generated table and macro name (tree_sql_object_name does not fold
+         -- case). min() picks a deterministic collision partner to name in the refusal; the
+         -- exact-name case is excluded here so a re-create of the same tree keeps the
+         -- "already exists" refusal above instead of this one.
+         (SELECT min(t.schema_name || '.' || t.tree_name) FROM tree_catalog.trees t
+           WHERE t.database_name = current_database() AND lower(t.schema_name) = lower(sch) AND lower(t.tree_name) = lower(nm)
+             AND NOT (t.schema_name = sch AND t.tree_name = nm)) AS collides_with,
          (spec).abstract AS abstract, (spec).source AS source, (spec).storage AS storage
 ),
 -- Macro-, map- and prefix-bound pseudo-classes become expression bodies here, before validation
@@ -64,6 +72,8 @@ checked AS (
       WHEN sch IS NULL OR nm IS NULL THEN tree_err('tree_ddl_create: schema and name are required')
       WHEN abstract IS NULL THEN tree_err('tree_ddl_create: abstract must be true or false')
       WHEN exists_already THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
+      WHEN collides_with IS NOT NULL
+        THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' collides with existing tree ' || collides_with || ' (names are case-insensitive)')
       WHEN like_missing THEN tree_err('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
       WHEN abstract AND source IS NOT NULL THEN tree_err('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
       WHEN NOT abstract AND source IS NULL THEN tree_err('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
