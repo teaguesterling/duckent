@@ -97,28 +97,48 @@ def exists_sql(con, tree, selector):
             "(SELECT file_path || ':' || node_id AS k FROM (%s))" % body)
 
 
-def listspace_sql(p, negated):
-    """The hand-written list-space form of `.fn:has(string)` / `.fn:not(:has(string))`.
-
-    `sub` is the brief's subtree-list CTE; `str` is the string-node list, per root
-    (see the module docstring on why the global form is unsound). A node with no
-    descendants has no `sub` row and a root with no strings has no `str` row, so
-    both joins are LEFT and the list defaults to [] -- which is exactly the
-    NOT EXISTS case that must still answer true under negation."""
-    test = "COALESCE(list_has_any(COALESCE(sub.subtree, []), COALESCE(st.pres, [])), false)"
-    return """
-WITH sub AS (
-  SELECT a._root, a._pre, list(b._pre) AS subtree
+SUB_SQL = """SELECT a._root, a._pre, list(b._pre) AS subtree
   FROM {p} a JOIN {p} b ON b._root = a._root AND b._pre BETWEEN a._pre + 1 AND a._pre + a._size
-  GROUP BY 1, 2),
-st AS (SELECT _root, list(_pre) AS pres FROM {p} WHERE _type = 'string' GROUP BY 1)
-SELECT count(*), md5(string_agg(k, ',' ORDER BY k)) FROM (
+  GROUP BY 1, 2"""
+ST_SQL = "SELECT _root, list(_pre) AS pres FROM {p} WHERE _type = 'string' GROUP BY 1"
+LIST_BODY = """SELECT count(*), md5(string_agg(k, ',' ORDER BY k)) FROM (
   SELECT a.file_path || ':' || a.node_id AS k
   FROM {p} a
-  LEFT JOIN sub ON sub._root = a._root AND sub._pre = a._pre
-  LEFT JOIN st ON st._root = a._root
-  WHERE COALESCE(list_contains(a._classes, 'fn'), false) AND {neg}{test})
-""".format(p=p, test=test, neg="NOT " if negated else "")
+  LEFT JOIN {sub} sub ON sub._root = a._root AND sub._pre = a._pre
+  LEFT JOIN {st} st ON st._root = a._root
+  WHERE COALESCE(list_contains(a._classes, 'fn'), false) AND {neg}{test})"""
+LIST_TEST = "COALESCE(list_has_any(COALESCE(sub.subtree, []), COALESCE(st.pres, [])), false)"
+
+
+def listspace_sql(p, negated, sub="sub", st="st", inline=True):
+    """The hand-written list-space form of `.fn:has(string)` / `.fn:not(:has(string))`.
+
+    `sub` is the brief's subtree-list CTE; `st` is the string-node list, per root
+    (see the module docstring on why the global form is unsound). A node with no
+    descendants has no `sub` row and a root with no strings has no `st` row, so
+    both joins are LEFT and the list defaults to [] -- which is exactly the
+    NOT EXISTS case that must still answer true under negation.
+
+    With `inline=False` the two lists are read from relations built beforehand
+    (--materialized), so the timing excludes the cost of building them."""
+    head = ("WITH sub AS (%s),\nst AS (%s)\n" % (SUB_SQL.format(p=p), ST_SQL.format(p=p))) if inline else ""
+    return "\n" + head + LIST_BODY.format(p=p, sub=sub, st=st, test=LIST_TEST,
+                                          neg="NOT " if negated else "")
+
+
+def materialize(con, tree, p):
+    """Build the two lists as TEMP TABLES once. Returns (sub relation, st relation, seconds).
+
+    This is the most generous reading of the list-space proposal: pay for the subtree lists and
+    the string-node list ONCE, up front, and let every later selector read them for free. It is
+    generous to the point of being unfair to EXISTS -- these tables are stale the moment a row
+    is inserted, so a real implementation would owe their maintenance -- which is the point: if
+    list-space loses even here, it loses."""
+    sub, st = "mat_sub_" + tree, "mat_st_" + tree
+    t0 = time.perf_counter()
+    con.execute("CREATE OR REPLACE TEMP TABLE %s AS %s" % (sub, SUB_SQL.format(p=p)))
+    con.execute("CREATE OR REPLACE TEMP TABLE %s AS %s" % (st, ST_SQL.format(p=p)))
+    return sub, st, time.perf_counter() - t0
 
 
 def _derived_child(source, attr, q):
@@ -161,6 +181,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--derived-timeout", type=float, default=300.0)
+    ap.add_argument("--materialized", action="store_true",
+                    help="also time the list-space form with both lists pre-built as temp tables,"
+                         " so its build cost is paid once instead of per query")
     args = ap.parse_args()
 
     s = runner.Session()
@@ -174,20 +197,39 @@ def main():
         print("%-10s %7d rows, %3d roots" % (tree, n[0], n[1]))
     print()
 
-    print("%-10s %-24s %10s %10s %8s  %s" % ("tree", "selector", "EXISTS s", "list s", "ratio", "same answer"))
-    verdict = []
+    extra = "%10s %8s  " % ("mat s", "ratio") if args.materialized else ""
+    print("%-10s %-24s %10s %10s %8s  %s%s"
+          % ("tree", "selector", "EXISTS s", "list s", "ratio", extra, "same answer"))
+    verdict, mat_verdict, build = [], [], {}
     for tree in SRC:
         p = proj(con, tree)
+        mat = materialize(con, tree, p) if args.materialized else None
+        if mat:
+            build[tree] = mat[2]
         for selector in SELECTORS:
             negated = ":not(" in selector
             e_best, _, e_rows = timeit(con, exists_sql(con, tree, selector), args.reps)
             l_best, _, l_rows = timeit(con, listspace_sql(p, negated), args.reps)
             same = e_rows == l_rows
-            print("%-10s %-24s %10.3f %10.3f %8.2fx  %s  (%d rows)"
+            cells = ""
+            if mat:
+                m_best, _, m_rows = timeit(con, listspace_sql(p, negated, mat[0], mat[1], inline=False),
+                                           args.reps)
+                same = same and m_rows == e_rows
+                cells = "%10.3f %8.2fx  " % (m_best, e_best / m_best if m_best else float("nan"))
+                mat_verdict.append((tree, selector, e_best, m_best))
+            print("%-10s %-24s %10.3f %10.3f %8.2fx  %s%s  (%d rows)"
                   % (tree, selector, e_best, l_best, e_best / l_best if l_best else float("nan"),
-                     "yes" if same else "NO -- " + repr((e_rows, l_rows)), e_rows[0][0]))
+                     cells, "yes" if same else "NO -- " + repr((e_rows, l_rows)), e_rows[0][0]))
             verdict.append((tree, selector, e_best, l_best, same))
     print()
+    for tree, seconds in build.items():
+        print("one-time build of the two lists on %s: %.3f s" % (tree, seconds))
+    if mat_verdict:
+        big = [v for v in mat_verdict if v[0] == "scripts10"]
+        print("pre-materialized, on the larger input: list-space still %.1fx to %.1fx SLOWER"
+              % (min(m / e for _, _, e, m in big), max(m / e for _, _, e, m in big)))
+        print()
 
     big = [v for v in verdict if v[0] == "scripts10"]
     speedup = min(e / l for _, _, e, l, _ in big if l)

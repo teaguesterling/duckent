@@ -113,6 +113,18 @@ Inputs: `scripts.parquet` (14,265 rows, 15 roots) and ten copies of it with dist
 Row counts and key hashes (`md5` over the sorted `file_path:node_id` list) are equal in every
 cell, so the two forms are the same query, not two different questions.
 
+**The most generous reading, measured** (2026-09-15, `test/spike_listspace.py --materialized`).
+The timings above charge list-space for building its lists on every query, which is the honest
+per-query cost but not the strongest form of the proposal. With both lists — every node's subtree
+and the per-root string-node list — **pre-materialized as temp tables**, a one-time 0.529 s on
+the 10× input, the list-space query still runs **about 4.6× slower than `EXISTS`** there
+(0.035–0.037 s against 0.008 s), on the same 380 and 10 rows with the same key hash. On the
+14k-row input it is 1.3–1.5× slower (0.006–0.007 s against 0.004–0.005 s). So the decision holds
+under the reading most favourable to list-space, and that reading is already unfair to `EXISTS`:
+those tables are stale the moment a row is inserted, so a real implementation would owe their
+maintenance on top. (The Task 13 reviewer measured the same thing independently and got 0.52 s,
+0.035 s and 0.007 s — about 5×.)
+
 **Decision: keep `EXISTS`. D-N17 is closed against list-space.** The rule set in advance was
 "adopt unless list-space wins by 3× on the larger input"; it loses by 50× to 60× there, and the
 gap *widens* with size (0.08× at 14k rows, 0.02× at 143k). The reason is structural, not a
@@ -338,6 +350,10 @@ The triage list for the final review. None of these is a wrong answer today; eac
 code and the contract have not been made to agree, and each is written so the next reader can
 decide rather than re-discover.
 
+*(2026-09-15, final fix wave: the six items this list carried that the whole-branch review
+promoted to Critical or Important are struck through below with what closed them. The rest stand,
+and the wave added a few of its own.)*
+
 **Element rows (D-N18), the half that was not finished.**
 
 - The projection's `_next` column is **element-blind** — it is the raw structural next sibling
@@ -347,28 +363,63 @@ decide rather than re-discover.
   decision to make `_next` element-aware and pay for it.
 - `tree_siblings` is unfiltered by element, while `tree_next_sibling`, `tree_prev_sibling`,
   `tree_first_child` and `tree_last_child` are. The same inconsistency, in the traversal surface
-  rather than the projection.
+  rather than the projection. *(2026-09-15: still open as a decision, but no longer undocumented —
+  the M2 design §4 sentence now names siblings as the exception and says why (the sibling set is
+  the structural base the element-aware relations are built on), and `33_navigation.test` pins the
+  current answer on the `elem` tree, so changing it means changing a record on purpose.)*
 
 **Refusals that are narrower than they read.**
 
-- `tree_compile_alter` sets `has_semantic = true` unconditionally, so an alter that changes only
-  ATTR marks an S-less tree as S-ful.
+- ~~`tree_compile_alter` sets `has_semantic = true` unconditionally, so an alter that changes only
+  ATTR marks an S-less tree as S-ful.~~ **Closed** in the final fix wave (I4): alter computes the
+  flag from create's per-slot expression OR the flag the tree already carried. See the new item
+  below on create, which is *not* symmetric with it.
 - "semantic overlay is empty" ignores a `pseudo_args`-only overlay: such an overlay *would* bind
   the shared tier, so refusing it as empty is wrong, if harmlessly so.
-- The compiler does not police `SELF`'s position. §2 of the M2 design says it is legal only as a
-  group's first inner step, and `tree_steps` / `tree_steps_group` enforce that, but the compiler
-  also takes hand-built IR and would compile a `SELF` anywhere.
-- `tree_steps_group`'s `self` guard covers only top-level inner steps.
-- An unknown-kind node that is **not under a step** (under the root, or under a group) is dropped
-  by the compiler rather than refused. Hand-built IR only — the printer refuses it.
-- The printer's own unknown-kind check reads `min(kind)`, which is NULL when the offending node's
-  `kind` is NULL, so a NULL-kind node is silently dropped instead of refused. Same family as the
-  `error(NULL)` audit above — a guard that does not fire — and it wants the same fix.
+- ~~The compiler does not police `SELF`'s position.~~ **Closed** in the final fix wave (I5): the
+  compiler refuses a `SELF` that is not the lowest-id step under a `has`/`not` node, wherever the
+  IR came from.
+- `tree_steps_group`'s `self` guard covers only top-level inner steps. *(2026-09-15: unchanged,
+  but no longer the last line of defence — `tree_compile_match` refuses the misplaced `SELF` the
+  splice would let through, so the hole is a worse message rather than a wrong match.)*
+- ~~An unknown-kind node that is **not under a step** (under the root, or under a group) is
+  dropped by the compiler rather than refused.~~ **Closed** in the final fix wave (I5), together
+  with three more shapes the fold reached through no link: a NULL kind anywhere, an orphan step or
+  group, and the misplaced `SELF` above. One structural rule in `chk` says what may hang off what.
+- ~~The printer's own unknown-kind check reads `min(kind)`, which is NULL when the offending
+  node's `kind` is NULL.~~ **Closed** in the final fix wave (I5): the COALESCE is inside the
+  aggregate and the node is named `<NULL>`.
+- `tree_ddl_create` is **not** symmetric with the alter fix above. Its `has_semantic` expression
+  leads with `(spec).shape.semantic IS NOT NULL`, so `tree_ddl_create(..., semantic :=
+  tree_semantic(attr := 'x'))` — a semantic group that fills no S slot — still marks the tree
+  S-ful, and a `{type: ...}` step on it then compiles against TYPE's `'node'` default and returns
+  nothing. Same silent-empty shape as I4, on the other verb. Out of I4's scope; it wants the same
+  ruling, and `13_alter.test`'s R-only records are the shape a create-side record would take.
+- The shadow check (`tree_sql_shadow_check`) enumerates thirteen canonical columns in its regex
+  and **only `_size` is exercised by a test** (11_ddl, 12_dml, 13_alter all use it). `_element` in
+  particular was added in M2 and its arm has never fired in a test; a typo in that alternative
+  would reopen the back door F3 closed, silently.
 
 **Language and front-end.**
 
 - LIKE patterns are not `%`-escaped in either css front-end, so `[attr^=50%]` means more than it
   says. v0, in both, deliberately.
+
+**Tests and mutants.**
+
+- `44_parsers.test` FREEZES the runner parser's IR as a literal and compares `tree_parse_css` to
+  it, rather than comparing the two front-ends live on each row. The two are equivalent today
+  because `test/import_astcss_eval.py` generates the literal by calling `test/css_parser.py` — but
+  they stop being equivalent the moment the fixture is regenerated from a changed parser, because
+  then both sides of the "IR" record move together and only the second record of each pair (which
+  does re-parse live) is still watching. It is worth one live-versus-live record, or a note in the
+  generator that regeneration is what makes the freeze meaningless.
+- **File size.** The Task 4 review noted `sql/06_selector.sql` at ~200 lines and suggested
+  splitting the printer out in Task 5; it was not done, and the file is ~340 lines now.
+  `sql/09_css.sql` is ~500 and `test/import_astcss_eval.py` ~620. None of them is confusing yet —
+  each is one subject — but the printer really is a separate subject from the constructor, and
+  the split gets more expensive the longer it waits.
+
 **Fixtures and cost.**
 
 - `test/gen_fixtures.py` is not byte-reproducible for `scripts.parquet` and `py_variety.parquet`:

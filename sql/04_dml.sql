@@ -83,6 +83,13 @@ CREATE OR REPLACE MACRO tree_sql_delete_stmt(tbl, root_predicate) AS
 -- COMMIT. tree_compile_insert and _replace escape this only by accident: they also call
 -- tree_compile_projection(x.shape, ...), which forces the context. Reading `x` in a predicate
 -- that cannot fold is what makes the refusal unconditional here.
+--
+-- What the arm SAYS, though, is a backstop and not the tested path. tree_dml_context refuses on
+-- its own account -- tree not found, abstract, projection-mode -- and each of those messages
+-- COALESCEs the identity, so it raises rather than returning NULL; that is the message 12_dml
+-- pins, and it is the message a caller sees. `x IS NULL` therefore fires only if the context
+-- macro ever returns NULL without raising, which nothing here can currently make it do. It says
+-- "internal" because reaching it is a duckent bug, not a user error.
 CREATE OR REPLACE MACRO tree_compile_delete(sch, nm, root_predicate) AS (
   WITH c AS (SELECT tree_dml_context('tree_delete', sch, nm) AS x)
   SELECT CASE WHEN x IS NULL THEN tree_err('tree_delete: internal: no DML context') ELSE

@@ -96,14 +96,25 @@ retired host-escape number, and one that waits on the selector-language work. A 
 is fixed by a test, never by a manifest edit, and a manifest states what a mutant does rather
 than what one hopes it does.
 
+A mutant of the copy-and-edit kind is *that macro, with one edit*, and that claim does not hold
+by itself: a sweep over the sources leaves the copies quoting macros that no longer exist, and
+they go on being killed, because a macro from two commits ago fails the same tests a wrong one
+does. So the copies are generated (`test/mutants/regen.py`) from the macro plus a declared edit,
+`--check` refuses a drifted one before any suite runs, and each generated mutant has a
+`.control.sql` — the same copy with the edit left out — which the harness applies and requires to
+PASS. A kill with no passing control is reported, not counted.
+
 ## Running the prototype
 
 ```bash
 pip install duckdb==1.5.5 pyyaml
 python3 test/run.py test/sql          # the suites
-python3 test/run_mutants.py           # every planted mutant must die
+python3 test/run_mutants.py           # every planted mutant must die, and each kill is
+                                      #   verified against its control (--no-verify skips)
+python3 test/mutants/regen.py         # rewrite the generated mutant copies and controls
 python3 test/test_css_parser.py       # unit tests for the runner's css parser
 python3 test/spike_listspace.py       # the D-N17 measurement; prints timings, changes nothing
+                                      #   --materialized also times the pre-built list form
 python3 test/import_astcss_eval.py    # regenerates the corpus suites 40-44; idempotent
 python3 test/gen_fixtures.py          # only to regenerate fixtures; needs sitting_duck and markdown
 ```

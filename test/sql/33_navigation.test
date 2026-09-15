@@ -58,6 +58,20 @@ SELECT (SELECT _pre FROM tree_next_sibling('main', 'elem', '{''file_path'': app.
 ----
 14	13
 
+# ...but tree_siblings is NOT element-filtered, and that is deliberate rather than an oversight:
+# "siblings" is every row sharing a parent, and it is the structural base tree_sql_after,
+# tree_sql_before, next, prev, first-child and last-child each build on by ADDING the _element
+# conjunct. Asking for the sibling SET is a structural question. So node 9's siblings on `elem`
+# are the same four as on `app` -- including the ':' token at 13 that `next` skipped one record
+# above. The inconsistency this leaves (tree_siblings unfiltered beside tree_next_sibling
+# filtered) is an open item in FINDINGS; this record is what a decision to change it has to
+# change, so it cannot be changed by accident.
+query II
+SELECT (SELECT list(_pre ORDER BY _pre) FROM tree_siblings('main', 'elem', '{''file_path'': app.py}', 9)),
+       (SELECT count(*) FILTER (WHERE NOT _element) FROM tree_siblings('main', 'elem', '{''file_path'': app.py}', 9));
+----
+[7, 8, 13, 14]	1
+
 # the same distinction through the match compiler, which picks the element-aware form from its own
 # has_element flag rather than the traversal macros' unconditional true. node_id is the ORDER
 # column, so node_id = _pre; _pre itself is excluded from a match result.
