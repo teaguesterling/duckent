@@ -10,7 +10,10 @@
 | planner-side use of O, EXPLAIN benchmark | out of M3 in macros; they belong to the C++ port | the macro prototype has no planner; the compiled SQL already uses `_size` ranges and the O(1) sibling forms |
 | what `_pre` holds | the dense rank of ORDER within ROOT: `row_number() OVER (PARTITION BY root ORDER BY order) - 1` | every O(1) form assumes a 0-based, gap-free position per root; ORDER may then be any orderable expression |
 | what `_next` and `tree_siblings` mean | structural: the successor position `_pre + _size + 1`, and every row sharing a parent; the element-aware relations live in the fragments | cheap to verify, and what a declared NEXT must equal |
-| how `_size` is derived | a level-expanded ASOF join, replacing the correlated scan | exact on every fixture, linear; 19.7 s → 0.24 s on one 143k-row root |
+| how `_size` is derived | a level-expanded ASOF join, replacing the correlated scan | exact on every fixture; cost is rows × depth (§2.3): 19.7 s → 0.24 s on one 143k-row root, but 15 s on a 2k-deep spine beside 100k shallow rows, where SIZE should be declared |
+| what R0°, R1 and R2 default to | ROOT: one forest; ORDER: frozen insertion order; LEVEL: 0. Several level-0 rows are anonymous trees; a table declaring none of the three is a plain SQL table | structure is something added to a table, not a precondition (§2.6) |
+| how sibling and positional relations are computed | a window CTE over element rows (`lead`/`lag` per `(_root, _parent)`) and equality forms; no range `NOT EXISTS` | measured 262 s → 0.01 s (next element sibling, 10k siblings) and 14.9 s → 0.03 s (last child, 40k) |
+| how an attribute literal compares | by its spelling: a quoted literal as text, an unquoted number as DOUBLE through `TRY_CAST`, identically for columns and ATTR MAP | one rule instead of three (§7.1 W1) |
 | one projection per query | the compiled SQL and the traversal text open with a plain `WITH __proj AS (…)`; the engine decides whether to materialize | measured: same benefit as `MATERIALIZED` on projection-mode trees, no pushdown loss on stored trees |
 | the MN3 / MN4 numbering | the M2 file named MN03 becomes MN04 (its edit is MN4's claim); MN03 is re-planted as the handover states it | permanent ids must mean what the handover says they mean |
 
@@ -31,7 +34,7 @@ Example, one root with a gapped ORDER:
 
 Measured on 143k rows with a gapped, offset ORDER: the window costs 0.04 s and every root starts at 0.
 
-**2.2 Declared PARENT and NEXT are values in ORDER space.** The projection translates them to positions with one join on `__order` within the root instead of casting them. A declared NEXT that names no row (the last subtree of a partition) falls back to `_pre + _size + 1`, the handover's O4 default. SIZE and CHILDREN are counts and pass through unchanged. Measured: a declared PARENT translated through the normalization equals the derived parent on 142,650 of 142,650 rows.
+**2.2 Declared PARENT and NEXT are values in ORDER space.** The projection translates them to positions with one join on `__order` within the root instead of casting them. A declared NEXT that names no row is kept as `_pre + _size + 1` in the column, and §3.1 counts it as a disagreement unless that position is past the end of the partition; a fallback that silently accepted it would hide a corrupted NEXT. In the parent basis NEXT is a value in KEY space and is translated through the key instead of `__order`. SIZE and CHILDREN are counts and pass through unchanged. Measured: a declared PARENT translated through the normalization equals the derived parent on 142,650 of 142,650 rows.
 
 **2.3 Derived `_size`.** One fragment, `tree_sql_size_join()`, replaces `tree_sql_size_expr()` in both bases:
 
@@ -45,29 +48,37 @@ __s AS (SELECT a.*, COALESCE(e.__nx, m.__mp + 1) - a._pre - 1 AS _size
         FROM __p a JOIN __mx m USING (_root) LEFT JOIN __end e USING (_root, _pre))
 ```
 
-Each row is a candidate subtree boundary for every level at or below its own depth, so the nearest later candidate at a row's own level is the first row after its subtree. The expansion is `n × (max level − level + 1)` rows, about 8× on the fixtures; the join is linear. Measured against the declared `descendant_count`: 0 mismatches on `scripts` (14,265 rows), `py_variety` (3,272), and a 10× forest (142,650). Against the correlated scan on a single root: 0.21 s → 0.03 s at 14k rows, 19.7 s → 0.24 s at 143k.
+Each row is a candidate subtree boundary for every level at or below its own depth, so the nearest later candidate at a row's own level is the first row after its subtree. The expansion is `Σ (max level of the root − level + 1)` rows: about 8× on the fixtures, `n²/2` on a pure chain, and worst when a deep spine shares a root with many shallow rows, each of which expands to the spine's depth. Measured on DuckDB 1.5.5: a 5,000-deep chain 0.83 s; a flat 200k-row root 0.04 s; a root with a 2,000-deep spine and 100k shallow rows 15.4 s. That last shape is the documented limit of the macro derivation: declare SIZE for it, and the C++ stack walk removes it. Measured against the declared `descendant_count`: 0 mismatches on `scripts` (14,265 rows), `py_variety` (3,272), and a 10× forest (142,650). Against the correlated scan on a single root: 0.21 s → 0.03 s at 14k rows, 19.7 s → 0.24 s at 143k.
 
 **2.4 Derived `_children`** becomes a grouped count joined back (`count(*) … GROUP BY _root, _parent`) instead of a correlated subquery, so the conformance check and the projection share one shape.
 
 **2.5 `_next` stays structural.** The column comment and the M2 spec's §4 say so: `_next` is the successor position, the element-aware next sibling is `tree_sql_next_sibling`, and `tree_siblings` is the structural sibling set the element-aware relations are built on.
 
+**2.6 Defaults for R0°, R1 and R2** (amends handover v21 §R). Each block of R has a default, so structure is something added to a table:
+
+- **R2**: LEVEL defaults to `0` when neither LEVEL nor PARENT is declared. `tree_ddl_create` stops refusing that shape (`declare LEVEL or PARENT (R2)`).
+- **R1**: ORDER defaults to frozen insertion order, as today, and still refuses when `preserve_insertion_order` is off.
+- **R0°**: ROOT defaults to one forest. It is required only when trees must be identifiable across ingests, for tree-granular DML and attachments, not whenever the relation holds more than one tree.
+
+Several level-0 rows in one forest are anonymous trees, and relations between them hold: they are ordered siblings within `_root`, so `heading + table` relates two top-level blocks. A table that declares none of the three is every row a one-node tree, a plain SQL table; one with only an all-zero LEVEL is the same; adding rows at level > 0 after a level-0 row makes a materialized adjacency tree. No tree-identity column is added: matching never needs one (containment ends at `_size`, siblings compare within `_root`), and `count(*) FILTER (WHERE _level = 0) OVER (PARTITION BY _root ORDER BY _pre) - 1` numbers anonymous trees when a caller wants to. DML on a ROOT-less tree keeps treating its single forest as one partition, replaced whole.
+
 Everything above stays inside the projection's SQL text, so `tree_compile_projection` remains a pure expression that `query()` accepts. ORDER ties are refused at ingest (§3), not here.
 
 ## 3. O conformance at ingest (`sql/04_dml.sql`, `sql/03_ddl.sql`)
 
-**3.1 One compiler.** `tree_compile_o_conformance(shape, source_sql, label, has_root)` compiles the projection twice, as declared and with SIZE, PARENT, CHILDREN and NEXT stripped to their derived defaults, joins the two on `(_root, _pre)`, and raises on the first disagreement in `(_root, _pre)` order:
+**3.1 One compiler.** `tree_compile_o_conformance(shape, rel_sql, label)` derives SIZE, PARENT, CHILDREN and NEXT from the `(_root, _pre, _level)` of the relation being ingested (the `__duckent_new` temp table at insert and replace, the fresh projection at create and alter), never by re-reading a possibly volatile source, joins the derived values to the declared ones on `(_root, _pre)`, compares each with `IS DISTINCT FROM`, and raises through `tree_err` on the first disagreement in `(_root, _pre)` order, naming the ORDER value as well as the position:
 
 ```
-O conformance violated in tree main.t: SIZE disagrees with its derived default at root <key>, row <pre>: declared 8, derived 9 (a corrupted encoding, not a fast path)
+O conformance violated in tree main.t: SIZE disagrees with its derived default at root <key>, ORDER <value> (position <pre>): declared 8, derived 9 (a corrupted encoding, not a fast path)
 ```
 
 Only declared slots are compared; a tree with no O override compiles to no statement. PARENT and NEXT are compared after the §2.2 translation. In the parent basis PARENT is R2, not an override, so only SIZE, CHILDREN and NEXT are compared there.
 
-**3.2 ORDER ties** refuse in the same statement when ORDER is declared: `ORDER is not a traversal in tree main.t: root <key> has <n> rows with ORDER value <v>`. This keeps the handover's rule that an unpartitioned, resetting ORDER column is rejected.
+**3.2 ORDER is checked on its own**, whenever ORDER is declared, whatever else is: a separate compiled statement, `tree_compile_order_check(shape, source_sql, label)`, over the source's ROOT and ORDER expressions, refuses a NULL ORDER value (`ORDER is NULL in tree main.t at root <key>`) and a value repeated within a root (`ORDER is not a traversal in tree main.t: root <key> has <n> rows with ORDER value <v>`). It runs before P13, so a tie is not reported as a level jump, and it runs at create for projection-mode trees too, because a tie there makes `_pre` change between queries. This keeps the handover's rule that an unpartitioned, resetting ORDER column is rejected.
 
-**3.3 Where it runs.** Immediately after the P13 statement, for materialized trees, in `tree_compile_create`, `tree_compile_alter`, `tree_compile_insert` and `tree_compile_replace`, inside the same transaction, so a refusal rolls the statement list back. Projection-mode trees are not checked at create (their source can change afterwards); P13 still is, as today.
+**3.3 Where it runs.** The ORDER check first, then P13, then conformance; conformance for materialized trees, in `tree_compile_create`, `tree_compile_alter`, `tree_compile_insert` and `tree_compile_replace`, inside the same transaction, so a refusal rolls the statement list back. Projection-mode trees are not checked at create (their source can change afterwards); P13 still is, as today.
 
-**3.4 On demand.** `tree_check` accepts projection-mode trees for assertions (DML still refuses them), runs P13 and conformance over the live projection, and records one row per declared slot in `tree_state.assertions`: `assert_o_size`, `assert_o_parent`, `assert_o_children`, `assert_o_next`, beside `assert_p13`.
+**3.4 On demand.** `tree_check` accepts projection-mode trees for assertions (DML still refuses them), runs the ORDER check, P13 and conformance over the live projection, and records, never raises, one row per check (`ok` or `violated` with a detail naming the first disagreement) in `tree_state.assertions`: `assert_o_size`, `assert_o_parent`, `assert_o_children`, `assert_o_next`, beside `assert_p13`.
 
 **3.5 The module boundary.** Matching never reads `tree_state` or the O slot rows of `tree_catalog.slots`; MN03 (§6) proves it.
 
@@ -75,9 +86,11 @@ Only declared slots are compared; a tree with no O override compiles to no state
 
 **4.1** The compiled SQL opens with `WITH __proj AS (SELECT * FROM <projection macro call>)`, and the projection text the compiler passes to every fragment is `__proj`: step aliases, HAS/NOT subqueries, and element scans all read it. A per-query `semantic` overlay moves inside the CTE (`SELECT * REPLACE (…) FROM <projection macro call>`) instead of being repeated at each reference. `tree_nav` builds its `query()` text the same way.
 
+**4.1b Sibling and positional relations read a window.** When a selector uses `next`, `after`, a positional built-in, or their traversal counterparts, the compiled query adds `__sib AS (SELECT _root, _pre, lead(_pre) OVER w AS __next_el, lag(_pre) OVER w AS __prev_el FROM __proj WHERE _element WINDOW w AS (PARTITION BY _root, _parent ORDER BY _pre))`, and the element-aware fragments become equality lookups against it: next element sibling is `b._pre = s.__next_el`, first child is `s.__prev_el IS NULL`, last child `s.__next_el IS NULL`, `after`/`before` compare `_pre` within the same `(_root, _parent)` of element rows. Without ELEMENT the O(1) forms stay, and last child becomes the equality `NOT EXISTS (… x._pre = a._pre + a._size + 1 AND x._level = a._level)`. No fragment keeps a range `NOT EXISTS`. Measured on one flat root: next element sibling 262 s → 0.01 s at 10k siblings; last child 14.9 s → 0.03 s at 40k.
+
 **4.2 No forced materialization.** Observed on DuckDB 1.5.5: a CTE referenced more than once is materialized without being asked. Measured on a projection-mode `scripts` tree, three-reference selectors: 0.34 s through repeated macro references, 0.16 s with a plain CTE, 0.15 s with `MATERIALIZED`, 0.33 s with `NOT MATERIALIZED`. On a 285k-row stored tree every form costs 0.00–0.03 s, so a plain CTE neither helps nor hurts there and does not block scan pushdown.
 
-**4.3** Nothing observable changes: output columns, captures and provenance are the same. The byte-for-byte linear SQL pin in `31_match.test` moves once, deliberately, and the MN06 copy is regenerated.
+**4.3** Output columns, captures and provenance do not change; the compiled SQL text that `tree_explain(...).sql` shows does. The byte-for-byte linear SQL pin in `31_match.test` moves once, deliberately, and the MN06 copy is regenerated.
 
 ## 5. Parked M2 items closed
 
@@ -92,7 +105,7 @@ Only declared slots are compared; a tree with no O override compiles to no state
 | MN03 (re-planted) | a semantics-path function reads an O accessor: the compiler looks up whether SIZE is declared in `tree_catalog.slots` and emits a different descendant form when it is not | 42's new boundary record: for every app corpus selector, the compiled SQL for `app_declared` and `app_derived` is identical apart from the projection name and the `_match_tree` literal |
 | MN04 (the M2 file formerly named MN03) | the declared SIZE path of the projection returns `size + 1` | conformance at create (11_ddl, 12_dml records that create or insert a declared-SIZE tree) and 42 |
 
-The M2 file's rename is recorded in FINDINGS: the number MN3 was used for MN4's claim in M2, corrected here so a permanent id keeps the handover's meaning. MN01, MN02 and MN14 touch the fragments §2 rewrites and are regenerated with `test/mutants/regen.py`.
+The M2 file's rename is recorded in FINDINGS: the number MN3 was used for MN4's claim in M2, corrected here so a permanent id keeps the handover's meaning. MN01, MN02 and MN14 touch the fragments §2 and §4 rewrite and are regenerated with `test/mutants/regen.py`; MN14 stops overriding `tree_sql_size_expr`, which §2.3 removes.
 
 Records (all in existing suites unless named):
 
@@ -115,7 +128,7 @@ A review from the duck_block_utils side (2026-09-15, all suites and mutants gree
 
 | # | defect | rule |
 |---|---|---|
-| W1 | a numeric literal compared through `TRY_CAST(… AS BIGINT)` rounds: `[n=2]` matches `'1.5'` and `'2.4'` (*verified*; `tree_sql_attr_col_cmp`'s TRY_CAST arm and the ATTR MAP arm of `tree_sql_clause`) | every cast of a stored value for a numeric literal targets `DOUBLE`; `tree_sql_literal_type` keeps classifying literals, and a new `tree_sql_numeric_cast_type(arg)` returns `DOUBLE` for both integer and decimal literals and NULL otherwise |
+| W1 | a numeric literal compared through `TRY_CAST(… AS BIGINT)` rounds: `[n=2]` matches `'1.5'` and `'2.4'` (*verified*); a quoted literal against a numeric column aborts the query (`Could not convert string 'x' to INT32`); a number against a VARCHAR column compares as text, so `'10' > '5'` is false while ATTR MAP says true | the literal's spelling decides the domain, the same for projected columns and ATTR MAP: a quoted literal compares `CAST(<value> AS VARCHAR) <op> '<text>'`; an unquoted number compares `TRY_CAST(<value> AS DOUBLE) <op> <number>`; a boolean literal compares `TRY_CAST(<value> AS BOOLEAN)`. Nothing rounds and nothing aborts |
 | W2 | an empty affix value (`[a^=""]`, `$=""`, `*=""`) lowers to `LIKE '%'`-style patterns and matches every row (*verified*) | in CSS an empty affix value matches nothing; both front-ends lower it to an `attr` clause with `op = 'LIKE'` and `arg = 'NULL'`, which the clause's `COALESCE(…, false)` makes false; the printer shows `ATTR a LIKE NULL` |
 | W3 | `:first-child` wrong on a gapped or offset ORDER (*verified*) | closed by §2.1 |
 | W4 | a capture named `@__c` collides with the compiler's own `__c` subquery alias and turns `+` into `~` | aliases beginning `__` are reserved like `s<N>`: refused by `tree_steps`, `tree_steps_group`, both css front-ends and the compiler's `bad_alias` (`alias __c is reserved: names beginning with __ belong to the compiler`) |
@@ -148,6 +161,16 @@ A ROOT partition with several level-0 rows is **not** refused. The handover allo
 
 **7.8 Mutants.** The review's harness findings change what a kill means (§7.6) but plant no new ids. W2, W4, W6, 7.2 and 7.4 each get a record that fails under a hand-reverted fix during implementation; none is promoted to a permanent mutant id.
 
+**7.9 The second review** (panduck, 2026-09-15, at `242acdc`) confirmed W3, W4, 7.3, 7.4 and 7.6 independently and added:
+
+- **Refusals missing from the printer and compiler.** A capture inside a group and an empty group are refused only by the constructors: the printer drops an empty group (`'HAS ( ' || NULL`), and the compiler silently discards an inner alias. A duplicate user alias compiles and then fails in DuckDB's binder. Rule: all three are refused by `tree_steps`, `tree_steps_group`, the printer and the compiler, with the same messages.
+- **Corpus independence.** 216 of 40_corpus's 252 records compare the Python parser with itself, because the frozen `treeql_ir` came from `css_parser`. Rule: the importer freezes the IR from `tree_parse_css` (the SQL lowering, run under sitting_duck at import time), so 40 compares two front-ends while still running without sitting_duck.
+- **What a kill needs.** `run_mutants.py` counts a kill when any listed suite fails, while the manifest says every listed file must. Rule: every suite in `expect_fail` must fail with at least one record; suites that only sometimes see a mutant move to `also_kills`.
+- **41b** passes when both engines return zero rows, which is exactly sitting_duck #127's symptom, and its combinator skip ignores combinators inside `:has`/`:not`. Rule: each live record also requires the reference count to be nonzero, and the skip covers nested combinators.
+- **Mutant hygiene.** `regen.py --check` never looks at the hand-written MN01, MN02, MN14 and MN15; it now checks that every macro they override exists in `sql/`. `run_mutants.py` runs its subprocesses with `cwd` set to the repository root, refuses an unknown `--only` id, and the manifest's MN22 note counts 252 records, not 250.
+- **Evidence behind claims.** The 3,444-selector front-end differential and the §7.5 sweep are committed as `test/sweep_selectors.py`, so the number has a script behind it.
+- **Doc drift**, corrected in the core and M2 specs and FINDINGS: ATTR MAP is `MAP(VARCHAR, VARCHAR)` only, not "compiled by its type"; a local and a prefix pseudo-class with the same name refuse (S-coherence), which is what the code does; selector-bodied pseudo-classes are not built and are listed as carried; the M2 footgun table's citations point at rows that exist (refusals live in 37 and 38, #141 is `c12` on `py_variety`, no corpus row uses a capture); FINDINGS' description of `tree_catalog.compiled` and its `_match_language` formula; deferred mutant ids are listed in the manifest as the core spec says.
+
 ## 8. What M3 does not fix: compile cost
 
 Profiled on the corpus suites (2026-09-15): a 40_corpus record spends 67–107 ms in `tree_compile_match`, 29–59 ms in the printer and 2–10 ms executing the match; a `tree_steps` literal costs 28 ms. The suites are slow because DuckDB binds very large macro expansions, not because of the derivation or the joins. The C++ port removes this cost; M3 records the numbers and does not chase them (no compiled-selector cache: it would be state consulted by matching).
@@ -158,4 +181,4 @@ Profiled on the corpus suites (2026-09-15): a 40_corpus record spends 67–107 m
 
 ## 10. Open decisions carried
 
-D-N9, D-N10, D-N13, D-N15, D-N16, D-N19, D-N20 unchanged. New: **D-N21** whether projection-mode trees should run conformance at create as P13 does (M3 checks them on demand only; the asymmetry is deliberate and one line to change). **D-N22** whether duckent models a block's body (duck_blocks spec-1.4 metadata and value subtrees) or leaves it to the vocabulary.
+D-N9, D-N10, D-N13, D-N15, D-N16, D-N19, D-N20 unchanged. New: **D-N21** whether projection-mode trees should run conformance at create as P13 does (M3 runs their ORDER check and P13 at create and conformance on demand only; the asymmetry is deliberate and one line to change). **D-N22** whether duckent models a block's body (duck_blocks spec-1.4 metadata and value subtrees) or leaves it to the vocabulary.
