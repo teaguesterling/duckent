@@ -258,6 +258,19 @@ SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{comb: 'self', 
 ----
 true
 
+# c18  .fn:has(> block[params=0])  [app]  portable nested attr has_attr
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'app', tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block', attr: 'params = 0'}]}])))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'app', '.fn:has(> block[params=0])', language := 'css'));
+----
+true
+
+query I
+SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block', attr: 'params = 0'}]}]))
+     = (tree_explain('main', 'app', '.fn:has(> block[params=0])', language := 'css')).treeql;
+----
+true
+
 # --------------------------------------------------------------------------------------
 # astcss-eval accepted pairs: test/corpus/astcss_eval.jsonl
 # --------------------------------------------------------------------------------------

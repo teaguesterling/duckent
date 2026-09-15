@@ -137,6 +137,15 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
 ----
 true
 
+# c18  .fn:has(> block[params=0])  portable nested attr has_attr
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_col', '.fn:has(> block[params=0])', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_expr', '.fn:has(> block[params=0])', language := 'css'));
+----
+true
+
 # --------------------------------------------------------------------------------------
 # (b) promotion: one predicate as a PSEUDO body, and as a CLASSES list the source computes
 # --------------------------------------------------------------------------------------
@@ -335,6 +344,15 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
         FROM tree_match('main', 'rep_elem_col', '.fn:not(:nope)', language := 'css'))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
         FROM tree_match('main', 'rep_elem_stub', '.fn:not(:nope)', language := 'css'));
+----
+true
+
+# c18  .fn:has(> block[params=0])  portable nested attr has_attr
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_elem_col', '.fn:has(> block[params=0])', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'rep_elem_stub', '.fn:has(> block[params=0])', language := 'css'));
 ----
 true
 

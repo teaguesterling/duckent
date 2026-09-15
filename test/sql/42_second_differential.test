@@ -163,3 +163,12 @@ SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
 ----
 true
 
+# c18  .fn:has(> block[params=0])  portable nested attr has_attr
+query I
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'app_declared', '.fn:has(> block[params=0])', language := 'css'))
+     = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id)
+        FROM tree_match('main', 'app_derived', '.fn:has(> block[params=0])', language := 'css'));
+----
+true
+

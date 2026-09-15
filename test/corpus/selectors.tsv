@@ -16,3 +16,4 @@ c14	tree_steps([{type: 'block'}, {comb: 'child', type: 'expression_statement', p
 c15	tree_steps([{class: 'def', "not": [{comb: 'self', class: 'fn'}]}])	.def:not(.fn)	app	portable nested self
 c16	tree_steps([{class: 'fn', attr: 'params = 2'}])	.fn[params=2]	scripts	portable sitting_duck_supported attr params
 c17	tree_steps([{class: 'fn', "not": [{comb: 'self', pseudo: 'nope'}]}])	.fn:not(:nope)	app	portable nested self pseudo unknown_pseudo
+c18	tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block', attr: 'params = 0'}]}])	.fn:has(> block[params=0])	app	portable nested attr has_attr

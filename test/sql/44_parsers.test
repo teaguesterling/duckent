@@ -273,6 +273,19 @@ SELECT tree_selector_to_treeql(tree_parse_css('.fn:not(:nope)'))
 ----
 true
 
+# c18  .fn:has(> block[params=0])  [app]  portable nested attr has_attr
+query I
+SELECT tree_parse_css('.fn:has(> block[params=0])')
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'attr', value: 'params', op: '=', arg: '0', alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:has(> block[params=0])'))
+     = (tree_explain('main', 'app', '.fn:has(> block[params=0])', language := 'css')).treeql;
+----
+true
+
 # --------------------------------------------------------------------------------------
 # astcss-eval accepted pairs: test/corpus/astcss_eval.jsonl
 # --------------------------------------------------------------------------------------

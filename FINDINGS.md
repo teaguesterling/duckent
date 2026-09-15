@@ -177,7 +177,19 @@ emits it as a commented no-op naming the reason). 107 of 108 references are asse
   right. This is not one of the tracked issues (#127, #128, #130, #133, #134, #141); it is a new
   upstream bug, and the reason the corpus's other bare-type rows (`with_statement`,
   `while_statement`, `decorated_definition`, `continue_statement`) pass is only that no other
-  type in those fixtures shares their prefix.
+  type in those fixtures shares their prefix. *(2026-09-15, PR #2 fix wave: **filed upstream as
+  sitting_duck #151** — https://github.com/teaguesterling/sitting_duck/issues/151. The corpus tag
+  stays `divergent:sd-type-prefix-match`; the M2 design's §5.1 footgun table carries the row.)*
+
+- **`.import` and issue #139, an inheritance note rather than a divergence.** sitting_duck #139
+  says a `.class` selector matches the sub-nodes of the construct it names and misses the
+  construct itself. duckent's `CLASSES` is **declared data**, so nothing here decides that — but
+  our fixtures' `css_classes` column was generated *from sitting_duck* at fixture time
+  (`test/gen_fixtures.py`), so it reproduces sitting_duck's alias test as it stood. The corpus
+  rows that use `.import` (t1-p06, t3-p10, t3-p11, t3-p22) therefore **inherit #139's semantics
+  by construction**, and their frozen references agree with us for that reason and not because
+  the semantics are right. Recorded so that regenerating the fixtures against a fixed upstream
+  reads as a change to the DATA, not as a break in the matcher.
 
 - **Embedding multiplicity, not a divergence: `.import ~ .class` (t3-p11, 9 rows vs 3),
   `.import ~ .fn` (t3-p22, 126 vs 27), `.fn ~ .class` (t3-p38, 6 vs 5), `.loop .call#print`
@@ -379,8 +391,12 @@ and the wave added a few of its own.)*
   'x'))` marked an S-less tree S-ful by the other road.~~ **Also closed**, in the same wave:
   create reads exactly the expression alter reads, and `11_ddl` and `13_alter` carry the twin
   records.
-- "semantic overlay is empty" ignores a `pseudo_args`-only overlay: such an overlay *would* bind
-  the shared tier, so refusing it as empty is wrong, if harmlessly so.
+- ~~"semantic overlay is empty" ignores a `pseudo_args`-only overlay: such an overlay *would* bind
+  the shared tier, so refusing it as empty is wrong, if harmlessly so.~~ **Closed** in the PR #2
+  fix wave (R11): the question "does this SEMANTIC declare an S slot?" is one predicate,
+  `tree_semantic_declares`, read by create, by alter and by the compiler's overlay check — the
+  three hand-copied expressions had already drifted, and the compiler's was the one that had
+  dropped `PSEUDO_ARGS`. Record in 36_pseudo.
 - ~~The compiler does not police `SELF`'s position.~~ **Closed** in the final fix wave (I5): the
   compiler refuses a `SELF` that is not the lowest-id step under a `has`/`not` node, wherever the
   IR came from.
@@ -401,8 +417,11 @@ and the wave added a few of its own.)*
 
 **Language and front-end.**
 
-- LIKE patterns are not `%`-escaped in either css front-end, so `[attr^=50%]` means more than it
-  says. v0, in both, deliberately.
+- ~~LIKE patterns are not `%`-escaped in either css front-end, so `[attr^=50%]` means more than it
+  says. v0, in both, deliberately.~~ **Closed** in the PR #2 fix wave (R5): both front-ends escape
+  `\`, `%` and `_` in the value and emit the pattern with `ESCAPE '\'` inside the clause's `arg`.
+  It was not harmless after all — `[name$="_t"]` matched `greet` — and it took hand corpus row
+  c11's TREEQL twin with it, which now spells the escape explicitly.
 
 **Tests and mutants.**
 
@@ -430,3 +449,26 @@ and the wave added a few of its own.)*
   the per-level ASOF form (and the C++ port's stack walk).
 - Create and alter still run the compiled projection more than once (once per guard, plus the
   materialization). Named in the PR #1 review and still open.
+- The projection macro is spliced once **per step alias**, so an n-step selector inlines it n
+  times; a `WITH __p AS MATERIALIZED` would compute it once. Measured as roughly linear in the
+  number of references, so it is a cost item rather than a correctness one.
+- `test/run_mutants.py --verify` re-runs a full baseline per control (~246 s each). The baseline
+  for a given suite is the same for every control that copies the same macro, so memoizing it per
+  suite would cut the harness roughly in half. (`suite_passes` already memoizes per
+  (test, overlay); what is missing is sharing across overlays that are no-ops.)
+- `tree_css_ppath(lvl, i0, a0, i1, a1)` is exactly `tree_css_path(lvl, i0, a0, i1, a1, 0, 0)`;
+  aliasing one to the other would remove a second copy of the level→slot mapping.
+
+**Raised by the PR #2 review as PLAUSIBLE, and left as written.** Each is a real seam; none is a
+wrong answer today, and each is recorded so the next reader decides rather than re-discovers.
+
+- `explicit_sel_prefix` (sql/03_ddl.sql) is computed from the tree's own unexpanded `PSEUDO`, and
+  a LIKE child whose parent declared `{prefix: 'sel_'}` is labelled by the parent's marker rather
+  than by its own declaration. The label is provenance (`origin`), not behaviour.
+- A tree whose `attribute_columns` row is missing — deleted by hand, or a catalog written by
+  something other than the DDL compilers — resolves every attribute name to `ATTR MAP` or refuses
+  it; there is no `DESCRIBE` fallback. The artifact is written inside create's transaction, so
+  this is a hand-edited catalog, not a state the compilers produce.
+- `test/mutants/regen.py`'s macro extractor tracks `'` and `"` quoting but not `$$`
+  dollar-quoting. No macro in `sql/` uses `$$`; one that did could be cut short at a `;` inside
+  it, and the mistake would be visible as a mutant body that does not parse.
