@@ -24,13 +24,22 @@
 #      comes from the difference between mutant and control. `--no-verify` skips this half;
 #      an explicit `control:` key overrides the file name.
 #
+# A kill needs EVERY suite in expect_fail to fail with a FAIL record; a suite that sees the
+# mutant only sometimes belongs in also_kills.
+#
 # MN08 has no control, because its mutation is not a macro override at all -- there is nothing to
-# leave out. Verify it by hand: unset DUCKENT_MUTANT and run the two suites in its expect_fail
-# list; they must PASS. That is the same procedure as the automated one, run by a person.
+# leave out. Its manifest row carries `control: manual`: run_mutants.py reports it as a manual
+# verification rather than counting it as verified against a control. Verify it by hand: unset
+# DUCKENT_MUTANT and run the two suites in its expect_fail list; they must PASS. That is the same
+# procedure as the automated one, run by a person.
 - id: MN01
   file: MN01_encoder_tiebreak_desc.sql
   what: reverse the source-order tiebreak in DFS derivation
-  expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+  expect_fail: [test/sql/20_derivations.test]
+  also_kills: 10_projection.test does NOT fail under this mutant -- checked under the
+    every-suite-must-fail rule (test/run.py test/sql/10_projection.test --mutant
+    MN01_encoder_tiebreak_desc.sql PASSes) -- its records happen not to distinguish the
+    reversed source-order tiebreak on this fixture, so it moved out of expect_fail here.
 - id: MN02
   file: MN02_parent_same_level.sql
   what: derive parent as nearest prior row at the same level, not level - 1
@@ -70,6 +79,7 @@
   what: the runner parser records a child combinator as a descendant, so `a > b c` is grouped
     the way `a b c` is
   env: {DUCKENT_MUTANT: MN08}
+  control: manual
   # Python-side: the SQL file is comment-only and the mutation is the DUCKENT_MUTANT hook in
   # test/css_parser.py. 44 catches it on the live-parser side of every row with a `>`.
   expect_fail: [test/sql/44_parsers.test, test/sql/37_css_parser.test]
@@ -118,7 +128,7 @@
   expect_fail: [test/sql/44_parsers.test]
   # 44 carries the bait: one partition row, p13_ok = false, for a tree name nothing declares.
   # The kill is total by construction, not incidental: every record in 44 calls tree_parse_css
-  # and the bait row is inserted before the first of them, so all 250 fail while it is there.
+  # and the bait row is inserted before the first of them, so all 252 fail while it is there.
   # Deleting the bait would leave this mutant alive, which is why the insert is commented in
   # the generated file and templated in test/import_astcss_eval.py's write_44_parsers.
   also_kills: nothing else -- 40_corpus was checked and PASSES under this mutant. Its

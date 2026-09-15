@@ -114,13 +114,20 @@ def string_literal(text):
 NAMED_ARG_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.*)$", re.S)
 
 
+class MutantLoadError(RuntimeError):
+    pass
+
+
 class Session:
     def __init__(self, mutant=None):
         self.con = duckdb.connect()
         for path in sorted(glob.glob(os.path.join(SQL_DIR, "*.sql"))):
             self.run_script(open(path).read(), path)
         if mutant:
-            self.run_script(open(mutant).read(), mutant)
+            try:
+                self.run_script(open(mutant).read(), mutant)
+            except Exception as e:
+                raise MutantLoadError(str(e)) from e
         self.in_txn = False
 
     def run_script(self, text, label):
@@ -257,33 +264,54 @@ def parse_records(lines):
         yield header, "\n".join(body), expected, lineno
 
 
+def error_message(e):
+    """DuckDB's message without the SQL it echoes back ("\nLINE 1: ..."), so an expected error
+    can only match what the error SAYS, never the statement that raised it."""
+    return str(e).split("\nLINE ")[0]
+
+
 def run_file(path, mutant=None):
     lines = open(path).read().split("\n")
     sess = None
     failures = []
+    asserted = 0          # query records and `statement error` records executed
+    seen_record = False
     for header, body, expected, lineno in parse_records(lines):
         words = header.split()
         if words[0] == "require":
+            if seen_record:
+                failures.append((lineno, "require must come before the first record", header))
+                continue
             probe = duckdb.connect()
-            try: probe.execute(f"LOAD {words[1]}")
+            try:
+                probe.execute(f"LOAD {words[1]}")
             except Exception:
+                if os.environ.get("DUCKENT_NO_SKIP") == "1":
+                    print(f"FAIL {path}: SKIP refused under DUCKENT_NO_SKIP (require {words[1]})")
+                    return [(lineno, "skipped under DUCKENT_NO_SKIP", header)]
                 print(f"SKIP {path} (require {words[1]})"); return []
             continue
-        if sess is None: sess = Session(mutant)
+        seen_record = True
+        if sess is None:
+            sess = Session(mutant)
         kind = words[0]
         try:
             if kind == "statement":
                 want_error = words[1] == "error"
+                if want_error:
+                    asserted += 1
                 try:
                     sess.execute(body)
                     if want_error:
                         failures.append((lineno, "expected error, statement succeeded", body))
                 except Exception as e:
+                    msg = error_message(e)
                     if not want_error:
                         failures.append((lineno, f"unexpected error: {e}", body))
-                    elif expected and not any(exp.strip() in str(e) for exp in expected):
-                        failures.append((lineno, f"error text mismatch\n    got: {e}\n    want: {expected}", body))
+                    elif expected and not any(exp.strip() in msg for exp in expected):
+                        failures.append((lineno, f"error text mismatch\n    got: {msg}\n    want: {expected}", body))
             elif kind == "query":
+                asserted += 1
                 cur = sess.execute(body)
                 rows = [[fmt(v) for v in r] for r in cur.fetchall()]
                 if "rowsort" in words: rows.sort()
@@ -294,6 +322,8 @@ def run_file(path, mutant=None):
                 failures.append((lineno, f"unknown directive {header}", body))
         except Exception as e:
             failures.append((lineno, f"runner error: {e}", body))
+    if asserted == 0:
+        failures.append((0, "the file asserts nothing (no query and no statement error record ran)", path))
     for lineno, msg, body in failures:
         print(f"FAIL {path}:{lineno}: {msg}\n    sql: {body[:300]}")
     print(("PASS " if not failures else "FAIL ") + path)
@@ -309,8 +339,12 @@ def main():
     for p in args.paths:
         files += sorted(glob.glob(os.path.join(p, "*.test"))) if os.path.isdir(p) else [p]
     total = 0
-    for f in files:
-        total += len(run_file(f, args.mutant))
+    try:
+        for f in files:
+            total += len(run_file(f, args.mutant))
+    except MutantLoadError as e:
+        print(f"MUTANT DID NOT LOAD: {e}")
+        sys.exit(3)
     sys.exit(1 if total else 0)
 
 

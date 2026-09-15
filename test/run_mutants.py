@@ -32,15 +32,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _cache = {}
 
 
-def suite_passes(test, overlay, env):
-    """Run one test file with `overlay` applied as --mutant. True when it PASSES. Memoized:
-    several mutants copy the same macro, so their controls are the same file."""
+def suite_result(test, overlay, env):
+    """'pass', 'fail' (exit 1 with at least one FAIL record) or 'broken' (the overlay did not
+    load, or the suite failed without a FAIL record). Memoized on the overlay's path."""
     key = (test, overlay, tuple(sorted((k, v) for k, v in env.items() if k.startswith("DUCKENT_"))))
     if key not in _cache:
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "test/run.py"),
-                            os.path.join(ROOT, test), "--mutant", overlay],
-                           capture_output=True, text=True, env=env)
-        _cache[key] = r.returncode == 0
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "test/run.py"), os.path.join(ROOT, test),
+                            "--mutant", overlay], capture_output=True, text=True, env=env, cwd=ROOT)
+        if r.returncode == 0:
+            _cache[key] = "pass"
+        elif r.returncode == 1 and any(l.startswith("FAIL ") and ".test:" in l for l in r.stdout.splitlines()):
+            _cache[key] = "fail"
+        else:
+            _cache[key] = "broken"
     return _cache[key]
 
 
@@ -65,49 +69,72 @@ def main():
                  "says nothing about the planted edit. Run python3 test/mutants/regen.py")
 
     manifest = yaml.safe_load(open(os.path.join(ROOT, "test/mutants/manifest.yaml")))
-    alive, unverified, uncontrolled = [], [], []
-    for m in manifest:
-        if args.only and m["id"] not in args.only:
-            continue
+    unknown = set(args.only or []) - {m["id"] for m in manifest}
+    if unknown:
+        sys.exit("unknown mutant id " + ", ".join(sorted(unknown)))
+
+    alive, unverified, uncontrolled, broken_mutants, manual, verified_ok = [], [], [], [], [], []
+    processed = [m for m in manifest if not args.only or m["id"] in args.only]
+    for m in processed:
         path = os.path.join(ROOT, "test/mutants", m["file"])
         # A mutant whose mutation is PYTHON-side (the runner's own css parser, say) cannot be
         # expressed as a CREATE OR REPLACE MACRO override, so the manifest may carry an `env` map
         # that is added to the environment of every subprocess run for that mutant; its SQL file is
         # then comment-only. Keys are read by the runner, not by the SQL: see MN08.
         env = dict(os.environ, **{k: str(v) for k, v in (m.get("env") or {}).items()})
-        killed_by = [t for t in m["expect_fail"] if not suite_passes(t, path, env)]
-        status = "KILLED" if killed_by else "SURVIVED"
-        note = f"  (by {', '.join(killed_by)})" if killed_by else ""
-        if not killed_by:
+        results = {t: suite_result(t, path, env) for t in m["expect_fail"]}
+        broken = [t for t, v in results.items() if v == "broken"]
+        if broken:
+            status = f"BROKEN (did not load or failed without a FAIL record): {', '.join(broken)}"
+            broken_mutants.append(m["id"])
+            note = ""
+        elif all(v == "fail" for v in results.values()):
+            status = "KILLED"
+            note = f"  (by {', '.join(m['expect_fail'])})"
+        else:
+            survived_in = [t for t, v in results.items() if v != "fail"]
+            status = f"SURVIVED in {', '.join(survived_in)}"
             alive.append(m["id"])
+            note = ""
 
         # the control: the same copy without the planted edit. `control:` in the manifest names
         # one explicitly; otherwise it is <file>.control.sql, which regen.py writes.
-        control = os.path.join(ROOT, "test/mutants", m["control"]) if m.get("control") \
-            else path[:-len(".sql")] + ".control.sql"
-        if args.verify and killed_by:
+        is_manual = m.get("control") == "manual"
+        if is_manual:
+            manual.append(m["id"])
+            note += "  [manual control]"
+        elif args.verify and status == "KILLED":
+            control = os.path.join(ROOT, "test/mutants", m["control"]) if m.get("control") \
+                else path[:-len(".sql")] + ".control.sql"
             if not os.path.exists(control):
                 uncontrolled.append(m["id"])
                 note += "  [no control]"
             else:
-                broken = [t for t in m["expect_fail"] if not suite_passes(t, control, env)]
-                if broken:
+                control_broken = [t for t in m["expect_fail"] if suite_result(t, control, env) != "pass"]
+                if control_broken:
                     unverified.append(m["id"])
-                    note += f"  [CONTROL FAILS {', '.join(broken)} -- the kill is not evidence" \
+                    note += f"  [CONTROL FAILS {', '.join(control_broken)} -- the kill is not evidence" \
                             f" about the planted edit; regenerate with test/mutants/regen.py]"
                 else:
+                    verified_ok.append(m["id"])
                     note += "  [control passes]"
         print(f"{m['id']} {status}: {m['what']}{note}")
 
+    if broken_mutants:
+        print("broken mutants (did not load, or failed without a FAIL record):", ", ".join(broken_mutants))
     if uncontrolled:
         print("no control file (kill cause not proved automatically):", ", ".join(uncontrolled))
     if alive:
         print("surviving mutants:", ", ".join(alive))
     if unverified:
         print("unverified kills:", ", ".join(unverified))
-    if alive or unverified:
+    if alive or unverified or broken_mutants:
         sys.exit(1)
-    print("all mutants killed" + (", every kill verified against its control" if args.verify else ""))
+    if args.verify:
+        print("all mutants killed; %d of %d kills verified against a control; manual: %s" % (
+            len(verified_ok), len(processed), ", ".join(manual) if manual else "none"))
+    else:
+        print("all mutants killed")
 
 
 if __name__ == "__main__":
