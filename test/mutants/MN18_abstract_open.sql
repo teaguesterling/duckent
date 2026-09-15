@@ -22,7 +22,8 @@ expanded AS (
   SELECT * EXCLUDE (merged),
     {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
      sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
-     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape
+     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape,
+    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
   FROM base
 ),
 derived AS (
@@ -44,7 +45,7 @@ derived AS (
     (spec).shape.semantic IS NOT NULL
       OR (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
       OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
-      OR len(COALESCE((shape).semantic.pseudo, [])) > 0
+      OR len(COALESCE((shape).semantic.pseudo, [])) > 0 OR (shape).semantic.pseudo_args IS NOT NULL
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
@@ -79,7 +80,7 @@ slot_rows AS (
     {b: 'R', s: 'SIBLING_ORDER', e: (shape).sibling_order},
     {b: 'S', s: 'TYPE', e: (shape).semantic.type}, {b: 'S', s: 'ID', e: (shape).semantic.id}, {b: 'S', s: 'CLASSES', e: (shape).semantic.classes},
     {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (shape).semantic.attr_map},
-    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element},
+    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element}, {b: 'S', s: 'PSEUDO_ARGS', e: (shape).semantic.pseudo_args},
     {b: 'O', s: 'SIZE', e: (shape).size}, {b: 'O', s: 'CHILDREN', e: (shape).children}, {b: 'O', s: 'NEXT', e: (shape).next}
   ], lambda x: (x).e IS NOT NULL) AS rows, * FROM checked
 ),
@@ -93,7 +94,7 @@ built AS (
      || tree_sql_lit(storage) || ', ' || tree_sql_lit(order_source) || ', ' || has_semantic || ', NULL)' AS s_trees,
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
-   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo) AS s_pseudo,
+   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo, explicit_sel_prefix) AS s_pseudo,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,

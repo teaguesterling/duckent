@@ -52,3 +52,69 @@ query I
 SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
 ----
 treeql
+
+# sel_ast_leafy and sel_ast_deep (above) are no longer needed and would otherwise contaminate
+# the shared tier below: the shared tier scans every catalog macro named sel_<rest>, and both
+# names start with the literal "sel_" prefix (not just "sel_ast_"), so leaving them defined
+# would bind two extra, untested pseudo-classes on every tree created from here on.
+statement ok
+DROP MACRO sel_ast_leafy;
+
+statement ok
+DROP MACRO sel_ast_deep;
+
+# shared tier: sel_* macros bind with the tree's pseudo_args unless shadowed
+statement ok
+CREATE MACRO sel_leaf(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_leaf(n) AS n < 0;
+
+statement ok
+CALL tree_ddl_create('main', 'shadow', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo_args := 'descendant_count', pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}, {name: 'busy', body: 'children_count > 2'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shadow';
+----
+busy	local	children_count > 2
+leaf	prefix	sel_ast_leaf(descendant_count)
+
+# :leaf resolves to the prefix binding (n < 0: nothing), not the shared sel_leaf (n = 0: every leaf)
+query I
+SELECT count(*) FROM tree_match('main', 'shadow', tree_steps([{pseudo: 'leaf'}]));
+----
+0
+
+# a shared-tier name with no local or prefix binding is bound
+statement ok
+CREATE MACRO sel_deep(n) AS n > 20;
+
+statement ok
+CALL tree_ddl_create('main', 'shared', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo_args := 'descendant_count')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT origin, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shared' AND name = 'deep';
+----
+shared	sel_deep(descendant_count)
+
+# independently verified: read_parquet('test/data/app.parquet') WHERE descendant_count > 20
+# groups as (function_definition, 2), (module, 1)
+query I rowsort
+FROM tree_match('main', 'shared', tree_steps([{pseudo: 'deep'}])) SELECT type;
+----
+function_definition
+function_definition
+module
+
+# LIKE provenance: a child that does not redeclare 'leaf' inherits shadow's prefix-bound entry
+# (not a fresh local one) and pseudo_args, so the shared tier still applies at the child too
+statement ok
+CALL tree_ddl_create('main', 'shadow_like', tree_spec(tree_shape(), "like" := 'shadow', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT name, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shadow_like' AND name = 'leaf';
+----
+leaf	prefix

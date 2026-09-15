@@ -19,8 +19,15 @@ CREATE OR REPLACE MACRO tree_shape_from_catalog(db, sch, nm) AS (
       attr: max(expression) FILTER (WHERE slot = 'ATTR'),
       attr_map: max(expression) FILTER (WHERE slot = 'ATTR_MAP'),
       element: max(expression) FILTER (WHERE slot = 'ELEMENT'),
-      pseudo_args: NULL::VARCHAR,
-      pseudo: (SELECT list({name: name, body: body, macro: NULL::VARCHAR, args: NULL::VARCHAR, prefix: NULL::VARCHAR} ORDER BY name)
+      pseudo_args: max(expression) FILTER (WHERE slot = 'PSEUDO_ARGS'),
+      -- macro is not recoverable from body alone (it would need parsing), so it is dropped here;
+      -- origin IS recoverable and is carried back as a provenance-only prefix marker, so a LIKE
+      -- child re-inserting this entry (tree_sql_pseudo_insert) records the right origin instead
+      -- of flattening every inherited row to 'local'. 'sel_' specifically reuses
+      -- tree_expand_pseudo's own shared-tier marker; any other non-NULL value just needs to be
+      -- distinct from 'sel_' so the origin CASE falls through to 'prefix'.
+      pseudo: (SELECT list({name: name, body: body, macro: NULL::VARCHAR, args: NULL::VARCHAR,
+                            prefix: CASE origin WHEN 'shared' THEN 'sel_' WHEN 'prefix' THEN 'prefix' ELSE NULL END} ORDER BY name)
                FROM tree_catalog.pseudo_classes p WHERE p.database_name = db AND p.schema_name = sch AND p.tree_name = nm)
     }::TREE_SEMANTIC }::TREE_SHAPE END
   FROM tree_catalog.slots WHERE database_name = db AND schema_name = sch AND tree_name = nm);
@@ -45,14 +52,24 @@ CREATE OR REPLACE MACRO tree_shape_merge(p, c) AS
 -- The pseudo_classes rows for an already expanded pseudo list, shared by create and alter so the
 -- two cannot record a binding differently. NULL when there is nothing to insert (the caller's
 -- statement list drops NULLs). kind and origin record how the body was bound: macro when a macro
--- name was named, prefix when the entry came from a prefix binding rather than a named one.
--- purity is not computed yet.
-CREATE OR REPLACE MACRO tree_sql_pseudo_insert(db, sch, nm, pseudo) AS
+-- name was named, prefix when the entry came from a prefix binding, shared when it came from the
+-- sel_* shared tier. tree_expand_pseudo marks every prefix-derived entry's `prefix` field with
+-- the literal prefix that produced it (or, for the shared tier specifically, with 'sel_' -- its
+-- own marker); a NULL prefix means the entry was bound locally (or, for a LIKE-inherited
+-- expression/macro row, was already local at the parent). A prefix of exactly 'sel_' is
+-- ambiguous on its own: it also marks the case where the tree itself declared an explicit
+-- {prefix: 'sel_'} binding (a legitimate, if unusual, prefix form). `explicit_sel_prefix` --
+-- computed by the caller from the tree's own unexpanded PSEUDO declaration, never from a
+-- merged/inherited one -- breaks the tie: shared only when the tree did not itself ask for that
+-- literal prefix. purity is not computed yet.
+CREATE OR REPLACE MACRO tree_sql_pseudo_insert(db, sch, nm, pseudo, explicit_sel_prefix) AS
   CASE WHEN len(COALESCE(pseudo, [])) = 0 THEN NULL ELSE
   'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform(pseudo, lambda x:
       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', '
       || CASE WHEN (x).macro IS NULL THEN '''expression''' ELSE '''macro''' END || ', ' || tree_sql_lit((x).body) || ', '
-      || CASE WHEN (x).prefix IS NULL THEN '''local''' ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END;
+      || CASE WHEN (x).prefix IS NULL THEN '''local'''
+              WHEN (x).prefix = 'sel_' AND NOT explicit_sel_prefix THEN '''shared'''
+              ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END;
 
 -- The attribute_columns artifact: the projection's non-canonical column names, in projection
 -- order, as a JSON list. Recorded rather than recomputed because the front-ends (and the CSS
@@ -85,7 +102,12 @@ expanded AS (
   SELECT * EXCLUDE (merged),
     {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
      sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
-     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape
+     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape,
+    -- Tested against this create's own declared PSEUDO, never the LIKE-merged one: a parent's
+    -- already-resolved shared/prefix rows round-trip with a provenance marker of their own
+    -- (tree_shape_from_catalog), and that marker must never be mistaken for a fresh explicit
+    -- declaration by this tree.
+    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
   FROM base
 ),
 derived AS (
@@ -107,7 +129,7 @@ derived AS (
     (spec).shape.semantic IS NOT NULL
       OR (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
       OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
-      OR len(COALESCE((shape).semantic.pseudo, [])) > 0
+      OR len(COALESCE((shape).semantic.pseudo, [])) > 0 OR (shape).semantic.pseudo_args IS NOT NULL
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
@@ -142,7 +164,7 @@ slot_rows AS (
     {b: 'R', s: 'SIBLING_ORDER', e: (shape).sibling_order},
     {b: 'S', s: 'TYPE', e: (shape).semantic.type}, {b: 'S', s: 'ID', e: (shape).semantic.id}, {b: 'S', s: 'CLASSES', e: (shape).semantic.classes},
     {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (shape).semantic.attr_map},
-    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element},
+    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element}, {b: 'S', s: 'PSEUDO_ARGS', e: (shape).semantic.pseudo_args},
     {b: 'O', s: 'SIZE', e: (shape).size}, {b: 'O', s: 'CHILDREN', e: (shape).children}, {b: 'O', s: 'NEXT', e: (shape).next}
   ], lambda x: (x).e IS NOT NULL) AS rows, * FROM checked
 ),
@@ -156,7 +178,7 @@ built AS (
      || tree_sql_lit(storage) || ', ' || tree_sql_lit(order_source) || ', ' || has_semantic || ', NULL)' AS s_trees,
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
-   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo) AS s_pseudo,
+   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo, explicit_sel_prefix) AS s_pseudo,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
@@ -204,8 +226,12 @@ WITH t AS (
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm
 ),
 -- Same expansion create does, for the same reason: the stored body and the compiled pseudo
--- map are expression text, never a macro name (00_types.sql, tree_expand_pseudo).
-ex AS (SELECT *, tree_expand_pseudo(semantic) AS sem FROM t),
+-- map are expression text, never a macro name (00_types.sql, tree_expand_pseudo). Tested
+-- against this alter's own `semantic` argument (never `sem`, its expansion): an explicit
+-- {prefix: 'sel_'} declaration is what this flag means, not the shared tier's own marker.
+ex AS (SELECT *, tree_expand_pseudo(semantic) AS sem,
+              len(list_filter(COALESCE((semantic).pseudo, []), lambda p: (p).prefix = 'sel_')) > 0 AS explicit_sel_prefix
+       FROM t),
 n AS (
   SELECT *,
     {root: (old_shape).root, "order": (old_shape)."order", key: (old_shape).key, level: (old_shape).level, parent: (old_shape).parent, sibling_order: (old_shape).sibling_order,
@@ -221,7 +247,7 @@ c AS (
     list_filter([
       {b: 'S', s: 'TYPE', e: (sem).type}, {b: 'S', s: 'ID', e: (sem).id}, {b: 'S', s: 'CLASSES', e: (sem).classes},
       {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (sem).attr_map},
-      {b: 'S', s: 'ELEMENT', e: (sem).element}], lambda x: (x).e IS NOT NULL) AS rows
+      {b: 'S', s: 'ELEMENT', e: (sem).element}, {b: 'S', s: 'PSEUDO_ARGS', e: (sem).pseudo_args}], lambda x: (x).e IS NOT NULL) AS rows
   FROM n
 )
 SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; nothing to alter')
@@ -246,7 +272,7 @@ SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; 
    'DELETE FROM tree_catalog.pseudo_classes WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', '),
-   tree_sql_pseudo_insert(db, sch, nm, (sem).pseudo),
+   tree_sql_pseudo_insert(db, sch, nm, (sem).pseudo, explicit_sel_prefix),
    'UPDATE tree_catalog.trees SET has_semantic = true WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE OR REPLACE TABLE ' || tbl_name || ' AS ' || proj_sql END,
    CASE WHEN is_abstract THEN NULL WHEN storage = 'materialized' THEN 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE SELECT * FROM ' || tbl_name
