@@ -53,10 +53,21 @@ New fragment macros in `sql/07_match.sql`, each returning predicate text over tw
 | `tree_sql_subtree(a, b)` | `b._root = a._root AND b._pre BETWEEN a._pre + 1 AND a._pre + a._size` |
 | `tree_sql_children(a, b)` | `b._root = a._root AND b._parent = a._pre` |
 | `tree_sql_siblings(a, b)` | `b._root = a._root AND b._parent IS NOT DISTINCT FROM a._parent AND b._pre <> a._pre` |
-| `tree_sql_next_sibling(a, b)` | `tree_sql_siblings(a, b) AND b._pre = a._pre + a._size + 1` |
-| `tree_sql_after(a, b)` | `tree_sql_siblings(a, b) AND b._pre > a._pre` |
+| `tree_sql_after(a, b)` | `tree_sql_siblings(a, b) AND b._pre > a._pre AND b.<element>` |
+| `tree_sql_next_sibling(a, b)` | `tree_sql_after(a, b) AND NOT EXISTS (a sibling c with a._pre < c._pre < b._pre AND c.<element>)`; with no element predicate this reduces to `b._pre = a._pre + a._size + 1` |
+| `tree_sql_before(a, b)` | `tree_sql_siblings(a, b) AND b._pre < a._pre AND b.<element>` |
+| `tree_sql_prev_sibling(a, b)` | the mirror of `tree_sql_next_sibling` |
+| `tree_sql_parent(a, b)` | `b._root = a._root AND b._pre = a._parent` |
+| `tree_sql_ancestors(a, b)` | `b._root = a._root AND a._pre BETWEEN b._pre + 1 AND b._pre + b._size` (the mirror of subtree) |
+| `tree_sql_first_child(a)` | `a._pre = a._parent + 1` when there is no element predicate; otherwise no element sibling precedes it |
+| `tree_sql_last_child(a)` | no element sibling follows it |
+| `tree_sql_root(a)` | `a._level = 0` |
 
-`tree_sql_comb` dispatches to these; the group compiler uses them for the anchor relation; `tree_descendants`, `tree_children`, `tree_next_sibling`, and a new `tree_siblings` table macro are rewritten to `SELECT b.* FROM P a, P b WHERE a.<key> AND <fragment(a, b)>`. MN14 (cross-partition) now has one fragment to mutate for every surface.
+This is the complete set of relations the basis can express with `_pre`, `_level`, `_parent`, `_size`: containment in both directions, parenthood in both directions, and sibling order in both directions, plus the two positional predicates and the root test. CSS v0 uses subtree, children, next, after, and first-child; the reverse axes (parent, ancestors, before, prev) exist so that TREEQL's `PARENT` and `ANCESTOR` steps and xpath's reverse axes cost nothing later, and so that `tree_ancestors` shares its definition with everything else.
+
+**Element rows (D-N18, adopted for M2).** sitting_duck issue #141 shows the trap: `identifier + identifier` never matches because the comma between them is a sibling row. In the DOM, text nodes do not count as siblings; the analogue here is a shape-declared element predicate. `TREE_SEMANTIC` gains `element` (a row-scope boolean expression, default `true`), the projection emits `_element`, and the sibling relations and the positional predicates consider element rows only. `:first-child` then means "first element child", and the sitting_duck shape declares `element := is_construct(flags)` so punctuation and keyword tokens are invisible to `+`, `~`, `:first-child` and `:last-child`, exactly as they are to `.class` already. Subtree and children relations are unaffected: containment counts every row.
+
+`tree_sql_comb` dispatches to these; the group compiler uses them for the anchor relation; every traversal table macro (`tree_descendants`, `tree_children`, `tree_ancestors`, `tree_next_sibling`, `tree_prev_sibling`, `tree_siblings`, `tree_parent`, `tree_first_child`, `tree_last_child`) is rewritten to `SELECT b.* FROM P a, P b WHERE a.<key> AND <fragment(a, b)>`. MN14 (cross-partition) now has one fragment to mutate for every surface.
 
 **List-space spike.** A throwaway experiment, not shipped code: materialize `list(_pre)` of each node's subtree as a column, express `:has` as `list_has_any(subtree_pres, <matching pres>)`, and time both forms on `scripts.parquet` (14,265 rows) and on one larger local parse (a sitting_duck parse of the DuckDB source tree if available, else ten concatenated copies of the fixture). The numbers go to FINDINGS; the compiler keeps `EXISTS` unless list-space wins by a factor that survives the larger input.
 
@@ -81,6 +92,20 @@ Two parsers, one IR, one differential between them.
 
 It is registered in `tree_catalog.selector_languages` as `css` with `parser = 'tree_css_lower'` and `bare_safe = true`, and is exercised only under `require sitting_duck`.
 
+**Known footguns, from sitting_duck's open selector bugs and the astcss-eval findings.** Each is a corpus row or a refusal in both parsers, not a note:
+
+| upstream | defect there | duckent's rule, and where it is tested |
+|---|---|---|
+| #127 | `.class` aliases ignored as combinator steps; chains of 3+ steps return nothing | the compiler treats every step alike; corpus rows with alias steps and 3-, 4-, 5-step chains on both fixtures (40) |
+| #128, astcss-eval | malformed selectors silently over-match or return 0: unclosed `[`, `:nonsense(`, `>>`, trailing junk, `[WHERE` | both parsers refuse with a positioned message; the corpus has a `refusals` set every parser must reject (44) |
+| #130 | child combinator joins parents across files | every fragment carries `b._root = a._root` (MN14; 40, 41) |
+| #133 | inside `:has`, `.class` also matches syntax-only keyword tokens | one accessor, consulted everywhere: the sitting_duck shape declares `CLASSES` as `CASE WHEN is_syntax_only(flags) THEN [] ELSE <aliases> END`, so `:has(.fn)` cannot see a `def` token because `.fn` never does (41) |
+| #134 | `.comment` is kind-level and undocumented | vocabulary, not semantics: the sitting_duck shape's alias list is generated from `ast_type_map()`, and the corpus avoids `.comment` until upstream settles it |
+| #141 | `A + B` counts punctuation as siblings | element rows (§4, D-N18); corpus rows `identifier + identifier` on both fixtures (40, 41 once upstream matches) |
+| astcss-eval | captures `@f` silently ignored by `ast_select` | the differential strips captures before comparing key sets; capture semantics are tested only on duckent's side (40) |
+| astcss-eval | attribute filters and pseudo-classes inside `:has` refused upstream | excluded from the `sitting_duck_supported` subset; tested on duckent's side only |
+| astcss-eval | an unknown `.class` silently matches nothing | correct by the data/code doctrine (classes are data), and `tree_catalog_classes` is how you learn what exists; `tree_explain` reports classes named in the selector that occur nowhere in the tree |
+
 **5.2 The runner parser (stand-in for the built-in).** `test/css_parser.py`: a recursive-descent parser for the v0 grammar (type, `.class`, `#id`, `[attr op value]`, compounds, the four combinators, `:not(...)`, `:has(...)` with a relative anchor allowed, `:first-child`, other pseudo-classes, postfix `@name`) producing the same `TREE_SELECTOR` rows. `test/run.py` rewrites `tree_match(sch, nm, '<css text>', language := 'css')` by parsing the literal and substituting the IR value, exactly as the C++ table function will bind. The parser is deliberately small and has its own unit test file.
 
 **5.3 The parser differential (MN8).** For every css row of the corpus, both parsers must produce identical IR (compared as printed TREEQL and as row lists). A disagreement is a FINDING with adjudication; the corpus records which side was right.
@@ -97,13 +122,22 @@ Whether a name is a projected column is known at compile time from the compiled 
 
 Before this lands, the semantic-column text of both projection branches is factored into `tree_sql_sem_cols(sem)`; the `ATTR MAP` cast is then one edit in one place.
 
-## 7. `PSEUDO PREFIX` and shared pseudo-classes
+## 7. Pseudo-class bindings: expression, macro, map, and parameterized prefix
 
-`PSEUDO PREFIX 'sel_ast_'` records origin `prefix` in `tree_catalog.pseudo_classes` for every scalar macro in the catalog whose name starts with the prefix, body `<macro>(<row-scope args>)`; resolution order at compile is tree-local, then prefix, then the shared `sel_*` tier, then `pseudo_unknown`. A name bound in more than one tier resolves to the most local; MN12 plants the reverse. Selector-bodied pseudo-classes (a macro whose body is a css selector) are inlined into the IR at compile with a cycle check; expression-bodied ones stay in `_pseudo`.
+Four binding forms, all landing as rows in `tree_catalog.pseudo_classes` and all compiled into the projection's `_pseudo` map:
+
+| form | spelling | stored as |
+|---|---|---|
+| expression | `pseudo := [{name: 'leaf', body: 'descendant_count = 0'}]` | `kind = expression`, `body` |
+| macro | `pseudo := [{name: 'docblock', macro: 'has_docblock', args: 'file_path, node_id'}]` | `kind = macro`, `body = 'has_docblock(file_path, node_id)'` |
+| map | `pseudo_map := MAP {'docblock': 'has_docblock', 'busy': 'is_busy'}` with `pseudo_args := 'file_path, node_id'` | one `macro` row per entry, all with the shared `args` |
+| prefix | `pseudo := [{prefix: 'sel_ast_', args: 'file_path, node_id'}]` | one `macro` row per catalog scalar macro whose name starts with the prefix, `name` = the remainder, `origin = prefix` |
+
+The prefix form is parameterized by its `args`: the row-scope argument list every bound macro is called with, so a library of `sel_ast_*(file_path, node_id)` macros binds in one line. `TREE_SEMANTIC.pseudo` becomes `STRUCT(name, body, macro, args, prefix)[]`; `tree_semantic(...)` gains `pseudo_map` and `pseudo_args` and flattens the map into the list. Resolution order at compile is tree-local (expression, macro, map), then prefix, then the shared `sel_*` tier, then `pseudo_unknown`; a name bound in more than one tier resolves to the most local, and MN12 plants the reverse. Selector-bodied pseudo-classes (a macro whose body is a css selector) are inlined into the IR at compile with a cycle check; all other forms stay in `_pseudo`.
 
 ## 8. The differential harness
 
-`test/corpus/selectors.tsv`: columns `id`, `treeql` (a `tree_steps` literal), `css`, `fixture` (`app` or `scripts`), `tags` (space-separated: `portable`, `sitting_duck_supported`, `nested`, `sibling`, `attr`, `pseudo`). Every row has both spellings.
+Two corpus sources. `test/corpus/selectors.tsv` is hand-written: columns `id`, `treeql` (a `tree_steps` literal), `css`, `fixture`, `tags` (space-separated: `portable`, `sitting_duck_supported`, `nested`, `sibling`, `attr`, `pseudo`, `refusal`); every row has both spellings. `test/corpus/astcss_eval.jsonl` is imported from the Tiiny work's astcss-eval set (`~/Projects/astcss-eval/pairs/accepted-*.jsonl`, 108 execution-verified pairs over tiers 1 to 4, 98 distinct selectors) with provenance: each pair carries its css, its fixture, and a frozen reference (a node set with a hash) produced by sitting_duck at a pinned commit. Two fixtures come with it: `repo-small-py` is sitting_duck's `scripts/` directory, which `scripts.parquet` already pins, and `py-variety` is sitting_duck's `test/data/python`, added as `py_variety.parquet` at the manifest's commit. The frozen references make the sitting_duck differential runnable without sitting_duck installed: suite 41 compares against the frozen sets first and against live `ast_select_from` only under `require`. The import fills each pair's empty `treeql` twin from our lowering, which feeds back to astcss-eval as its P22 fixtures.
 
 Suites:
 
@@ -146,4 +180,4 @@ Each is a one-fragment override where a fragment exists; the ones that are not (
 
 ## 12. Open decisions carried
 
-D-N9 (capture collisions; `s<N>` already refused), D-N10 (language registration API; the `selector_languages` row is its placeholder), D-N13 (`FOLLOWING` for `~`), D-N15 (bare identifiers versus string literals in TREEQL; the constructor takes strings, the css lowering emits strings), D-N16 (`ATTR` spelling; unchanged). New: **D-N17** whether list-space navigation replaces `EXISTS` (decided by the spike's numbers).
+D-N9 (capture collisions; `s<N>` already refused), D-N10 (language registration API; the `selector_languages` row is its placeholder), D-N13 (`FOLLOWING` for `~`), D-N15 (bare identifiers versus string literals in TREEQL; the constructor takes strings, the css lowering emits strings), D-N16 (`ATTR` spelling; unchanged). New: **D-N17** whether list-space navigation replaces `EXISTS` (decided by the spike's numbers); **D-N18** element rows (adopted for M2: a shape-declared element predicate governs sibling and positional relations; default true).

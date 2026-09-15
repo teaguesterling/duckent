@@ -13,10 +13,10 @@ The name: Ents speak Tree, and Treebeard's policy of never saying anything unles
 Your ASTs were rows all along. A tree stored as its own depth-first traversal needs only two things to be selectable: **row order** and a **nesting column** (a `level`, or a `parent` from which level is derived). That encoding has a name and a history (pre/size/level, from the XML-database era), and sitting_duck's `node_id` / `depth` / `descendant_count` rebuilt it column for column.
 
 ```sql
--- Today, with sitting_duck:
-FROM read_ast('src/**/*.py')
-SELECT name, start_line
-WHERE ast_select(node, '.fn:not(:has(:docblock))');
+-- Today, with sitting_duck (ast_select is a table macro; :docblock and
+-- pseudo-classes inside :has() arrive with duckent's pseudo registry):
+FROM ast_select('src/**/*.py', '.fn:not(:has(string))')
+SELECT name, start_line;
 
 -- Where duckent is headed (DuckDB 2.0 PEG parser):
 CREATE TREE sitting_duck_ast (
