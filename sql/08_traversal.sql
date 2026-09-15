@@ -7,9 +7,15 @@
 -- table macro, and the anchor key and pre are spliced in as literals.
 CREATE OR REPLACE MACRO tree_proj_sql(sch, nm) AS 'tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()';
 
+-- root_key is quoted by tree_sql_lit and pre is forced through BIGINT before it reaches the text:
+-- a bare '|| pre ||' splices whatever the caller passed straight into the WHERE clause, so
+-- tree_children(..., '6 OR true') would return the whole partition. A non-numeric anchor now fails
+-- the cast legibly instead. COALESCE, because query() rejects a NULL argument outright
+-- ("Parser Error: syntax error at or near NULL"); the literal text NULL compiles to
+-- a._pre = NULL, which matches nothing -- the no-rows answer the M1 macros gave.
 CREATE OR REPLACE MACRO tree_nav(sch, nm, root_key, pre, rel) AS TABLE
   FROM query('SELECT b.* FROM ' || tree_proj_sql(sch, nm) || ' a, ' || tree_proj_sql(sch, nm) || ' b WHERE a._root::VARCHAR = '
-             || tree_sql_lit(root_key) || ' AND a._pre = ' || pre || ' AND ' || rel);
+             || tree_sql_lit(root_key) || ' AND a._pre = ' || COALESCE(CAST(CAST(pre AS BIGINT) AS VARCHAR), 'NULL') || ' AND ' || rel);
 
 -- The element flag passed to the fragments is always true here. Deciding it properly needs a
 -- catalog lookup, and a subquery in the body would make query() refuse the text; true is correct

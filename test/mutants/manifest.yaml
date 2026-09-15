@@ -15,8 +15,11 @@
   expect_fail: [test/sql/31_match.test]
 - id: MN14
   file: MN14_cross_partition.sql
-  what: descendant test crosses ROOT partitions
-  expect_fail: [test/sql/12_dml.test, test/sql/31_match.test]
+  what: descendant, child and sibling tests cross ROOT partitions
+  # 12_dml.test was listed here but has never failed under this mutant (verified against the
+  # pre-M2 base): its fixtures do not reach a cross-partition comparison. 33_navigation.test
+  # covers the sibling guard, which the containment suites cannot see.
+  expect_fail: [test/sql/31_match.test, test/sql/33_navigation.test]
 - id: MN15
   file: MN15_p13_disabled.sql
   what: INSERT of a partition violating P13 accepted

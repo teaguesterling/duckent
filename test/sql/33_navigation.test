@@ -2,7 +2,9 @@
 # description: one fragment per relation; element rows govern sibling and positional relations
 
 statement ok
-CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'read_parquet(''test/data/app.parquet'')'));
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
 
 # reverse axes agree with the forward ones
 query I
@@ -55,3 +57,51 @@ query II
 SELECT (SELECT _pre FROM tree_next_sibling('main', 'elem', '{''file_path'': app.py}', 9)), (SELECT _pre FROM tree_next_sibling('main', 'app', '{''file_path'': app.py}', 9));
 ----
 14	13
+
+# the same distinction through the match compiler, which picks the element-aware form from its own
+# has_element flag rather than the traversal macros' unconditional true. node_id is the ORDER
+# column, so node_id = _pre; _pre itself is excluded from a match result.
+# Both `parameters` nodes (greet's at 9, shout's at 33) land on their `block` sibling...
+query I
+SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'elem', tree_steps([{type: 'parameters'}, {comb: 'next'}]));
+----
+[14, 38]
+
+# ...while with no element predicate the same selector stops at the ':' token before each block
+query I
+SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'next'}]));
+----
+[13, 37]
+
+# the anchor pre is cast, not spliced: a non-numeric anchor cannot smuggle SQL into the WHERE
+# clause, a string digit still names its row, and a NULL anchor selects nothing (as it did in M1)
+query I
+SELECT count(*) FROM tree_children('main', 'app', '{''file_path'': app.py}', NULL);
+----
+0
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_children('main', 'app', '{''file_path'': app.py}', '6');
+----
+[7, 8, 9, 13, 14]
+
+statement error
+SELECT count(*) FROM tree_children('main', 'app', '{''file_path'': app.py}', '6 OR true');
+----
+Could not convert string '6 OR true' to INT64
+
+# sibling relations stay inside their own ROOT partition: two copies of the fixture under distinct
+# root keys give node 8 the same four siblings it has alone, not eight
+statement ok
+CREATE TABLE two AS
+  SELECT * REPLACE ('a.py' AS file_path) FROM read_parquet('test/data/app.parquet')
+  UNION ALL
+  SELECT * REPLACE ('b.py' AS file_path) FROM read_parquet('test/data/app.parquet');
+
+statement ok
+CALL tree_ddl_create('main', 'pair', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'two'));
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_siblings('main', 'pair', '{''file_path'': a.py}', 8);
+----
+[7, 9, 13, 14]
