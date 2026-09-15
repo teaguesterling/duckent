@@ -97,3 +97,61 @@ statement error
 CALL tree_ddl_alter('main', NULL, tree_semantic(id := 'name'));
 ----
 tree_ddl_alter: tree main.<NULL> not found
+
+# has_semantic says whether the tree has an S GROUP -- which is what tree_match reads to decide
+# whether an S clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. Alter used to set
+# it to true unconditionally, so an ATTR-only alter -- which declares no S slot; ATTR names the
+# projected columns -- marked an R-only tree S-ful. The S clause then compiled against TYPE's
+# `'node'` default and returned zero rows, which reads as "no such node" rather than as "this
+# tree has no types". The flag is now create's own per-slot expression: declared here, or already
+# there.
+statement ok
+CALL tree_ddl_create('main', 'ronly', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src'));
+
+query I
+SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly';
+----
+false
+
+statement ok
+CALL tree_ddl_alter('main', 'ronly', tree_semantic(attr := 'node_id, type'));
+
+query I
+SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly';
+----
+false
+
+statement error
+FROM tree_match('main', 'ronly', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
+# the ATTR alter did land -- the narrowed attribute list is what the projection now carries --
+# and an ATTR CLAUSE is refused with the same sentence, because ATTR is an S clause in the match
+# compiler whatever ATTR the shape declares. That is the point of the flag: the tree is still
+# R-only, so it says so instead of answering with an empty result.
+query I
+SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'ronly' AND artifact = 'attribute_columns';
+----
+["node_id","type"]
+
+statement error
+SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{attr: 'node_id = 0'}]));
+----
+has no SEMANTIC group
+
+# a combinator-and-WHERE selector is what an R-only tree does have, and it still works
+query I
+SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{"where": 'node_id = 0'}]));
+----
+1
+
+# ...and an alter that DOES declare an S slot sets the flag, as it always did
+statement ok
+CALL tree_ddl_alter('main', 'ronly', tree_semantic(type := 'type', attr := 'node_id, type'));
+
+query II
+SELECT (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly'),
+       (SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{type: 'function_definition'}])));
+----
+true	2

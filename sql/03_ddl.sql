@@ -227,6 +227,7 @@ CREATE OR REPLACE MACRO tree_compile_drop(sch, nm) AS (
 CREATE OR REPLACE MACRO tree_compile_alter(sch, nm, semantic) AS (
 WITH t AS (
   SELECT current_database() AS db, tr.storage, tr.source_sql, tr.is_abstract,
+         COALESCE(tr.has_semantic, false) AS old_has_semantic,
          tree_shape_from_catalog(current_database(), sch, nm) AS old_shape
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm
 ),
@@ -242,6 +243,16 @@ n AS (
     {root: (old_shape).root, "order": (old_shape)."order", key: (old_shape).key, level: (old_shape).level, parent: (old_shape).parent, sibling_order: (old_shape).sibling_order,
      size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: sem}::TREE_SHAPE AS shape,
     COALESCE((sem).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
+    -- Whether the tree has an S GROUP after this alter, which is what tree_match reads to decide
+    -- whether an S clause may be asked for. Create's per-slot expression, read here on the alter's
+    -- own semantic: ATTR is deliberately NOT one of the slots -- every tree stores an S/ATTR slot
+    -- ('' closed, '*' open), so counting it would mark an R-only tree S-ful on an ATTR-only alter
+    -- and its TYPE clauses would then compile against the 'node' default and return nothing. The
+    -- last term is the flag the tree already carried: alter adds to what create declared.
+    (sem).type IS NOT NULL OR (sem).id IS NOT NULL OR (sem).classes IS NOT NULL
+      OR (sem).attr_map IS NOT NULL OR (sem).element IS NOT NULL
+      OR len(COALESCE((sem).pseudo, [])) > 0 OR (sem).pseudo_args IS NOT NULL
+      OR old_has_semantic AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
     'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
   FROM ex
@@ -280,7 +291,7 @@ SELECT CASE WHEN semantic IS NULL THEN tree_err('tree_ddl_alter: semantic is NUL
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', '),
    tree_sql_pseudo_insert(db, sch, nm, (sem).pseudo, explicit_sel_prefix),
-   'UPDATE tree_catalog.trees SET has_semantic = true WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
+   'UPDATE tree_catalog.trees SET has_semantic = ' || has_semantic || ' WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE OR REPLACE TABLE ' || tbl_name || ' AS ' || proj_sql END,
    CASE WHEN is_abstract THEN NULL WHEN storage = 'materialized' THEN 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE SELECT * FROM ' || tbl_name
         ELSE 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE ' || proj_sql END,
