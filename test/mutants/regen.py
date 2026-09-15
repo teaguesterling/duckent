@@ -60,9 +60,11 @@ SPEC = {
          "    ELSE tree_err('tree_match: unknown combinator ' || COALESCE(op, '<NULL>')) END;",
          "    -- ... which is a predicate that never raises and never matches\n"
          "    ELSE 'false' END;", 1),
-        ("              WHEN ir.kind = 'step' AND ir.op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'\n"
+        ("              WHEN (SELECT profile FROM t) = 'sibling_free'\n"
+         "                   AND ((ir.kind = 'step' AND ir.op IN ('next', 'after'))\n"
+         "                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value)))\n"
          "              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free"
-         " (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')\n",
+         " (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable')\n",
          "              -- the mutation, half two: the sibling-free refusal branch is gone\n", 1)]),
 
     "MN07": ("sql/07_match.sql", ["tree_sql_clause"], [

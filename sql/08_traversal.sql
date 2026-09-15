@@ -7,15 +7,26 @@
 -- table macro, and the anchor key and pre are spliced in as literals.
 CREATE OR REPLACE MACRO tree_proj_sql(sch, nm) AS 'tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()';
 
--- root_key is quoted by tree_sql_lit and pre is forced through BIGINT before it reaches the text:
--- a bare '|| pre ||' splices whatever the caller passed straight into the WHERE clause, so
--- tree_children(..., '6 OR true') would return the whole partition. A non-numeric anchor now fails
--- the cast legibly instead. COALESCE, because query() rejects a NULL argument outright
--- ("Parser Error: syntax error at or near NULL"); the literal text NULL compiles to
--- a._pre = NULL, which matches nothing -- the no-rows answer the M1 macros gave.
+-- Both anchors are forced through a cast before they reach the text, and both are COALESCEd to
+-- the literal word NULL, because query() rejects a NULL argument outright ("Parser Error: syntax
+-- error at or near NULL") and one NULL anywhere in a concatenation makes the WHOLE text NULL.
+-- The literal NULL compiles to `= NULL`, which matches nothing -- the no-rows answer the M1
+-- macros gave for an anchor that is not there, and the answer a caller asking about a partition
+-- or a row that does not exist is owed.
+--
+-- root_key is quoted by tree_sql_lit, which is itself NULL for a NULL key: without the COALESCE
+-- a NULL root key did not select nothing, it made query() refuse a NULL argument, in a parser
+-- error from inside a macro the caller never wrote.
+--
+-- pre goes through DOUBLE. A bare '|| pre ||' would splice whatever the caller passed straight
+-- into the WHERE clause, so tree_children(..., '6 OR true') would return the whole partition; the
+-- cast makes a non-numeric anchor fail legibly instead. It was BIGINT, which ROUNDS: `5.7` became
+-- 6 and the traversal answered about an anchor the caller never named, silently. DOUBLE keeps the
+-- value the caller gave -- `'6'` still equals 6, `5.7` equals nothing, since a tree's _pre values
+-- are integers -- and still refuses text that is not a number at all.
 CREATE OR REPLACE MACRO tree_nav(sch, nm, root_key, pre, rel) AS TABLE
   FROM query('SELECT b.* FROM ' || tree_proj_sql(sch, nm) || ' a, ' || tree_proj_sql(sch, nm) || ' b WHERE a._root::VARCHAR = '
-             || tree_sql_lit(root_key) || ' AND a._pre = ' || COALESCE(CAST(CAST(pre AS BIGINT) AS VARCHAR), 'NULL') || ' AND ' || rel);
+             || COALESCE(tree_sql_lit(root_key), 'NULL') || ' AND a._pre = ' || COALESCE(CAST(CAST(pre AS DOUBLE) AS VARCHAR), 'NULL') || ' AND ' || rel);
 
 -- The element flag passed to the fragments is always true here. Deciding it properly needs a
 -- catalog lookup, and a subquery in the body would make query() refuse the text; true is correct

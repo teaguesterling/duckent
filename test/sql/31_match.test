@@ -395,6 +395,27 @@ FROM tree_match('main', 'cats', tree_steps([{"where": 'name = ''tools'''}, {comb
 ----
 SIBLING_ORDER
 
+# ... and so do the built-in POSITIONAL pseudo-classes, which the refusal used to miss: it
+# tested the combinator alone, so `:first-child` on a tree with no order among its siblings
+# compiled to `_pre = _parent + 1` over a _pre nothing orders and answered with whatever rows
+# happened to land there. "First" means nothing without SIBLING_ORDER, so it refuses, in the
+# sentence that already names what is missing.
+statement error
+FROM tree_match('main', 'cats', tree_steps([{pseudo: 'first-child'}]));
+----
+tree main.cats is sibling-free (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+
+statement error
+FROM tree_match('main', 'cats', tree_steps([{pseudo: 'last-child'}]));
+----
+SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+
+# and inside a group, where every other refusal is read too
+statement error
+FROM tree_match('main', 'cats', tree_steps([{"where": 'true', has: [{pseudo: 'first-child'}]}]));
+----
+:first-child and :last-child are unavailable
+
 # structural matching on a parent-basis tree
 statement ok
 CALL tree_ddl_create('main', 'org', tree_spec(tree_shape(key := 'email', parent := 'manager_email', sibling_order := 'hire_date', semantic := tree_semantic(type := 'role', id := 'email')), source := 'read_csv(''test/data/employees.csv'')'));

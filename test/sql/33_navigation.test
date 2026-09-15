@@ -102,7 +102,30 @@ SELECT list(_pre ORDER BY _pre) FROM tree_children('main', 'app', '{''file_path'
 statement error
 SELECT count(*) FROM tree_children('main', 'app', '{''file_path'': app.py}', '6 OR true');
 ----
-Could not convert string '6 OR true' to INT64
+Could not convert string '6 OR true' to DOUBLE
+
+# ... and the cast is to DOUBLE, not BIGINT, because BIGINT ROUNDS: `5.7` became 6 and the
+# traversal answered with node 6's children -- an anchor the caller never named, silently. A
+# fractional pre names no row of a tree whose _pre values are integers, so it matches nothing,
+# which is the same answer a pre past the end of the partition gives.
+query I
+SELECT count(*) FROM tree_children('main', 'app', '{''file_path'': app.py}', 5.7);
+----
+0
+
+# the ROOT KEY is spliced through tree_sql_lit, which is NULL for a NULL key -- and a NULL
+# anywhere in the text makes the WHOLE text NULL, which query() refuses outright ("syntax error
+# at or near NULL"). A caller asking about a partition that is not there is owed the empty
+# answer M1 gave, not a parser error from inside a macro it never wrote.
+query I
+SELECT count(*) FROM tree_children('main', 'app', NULL, 6);
+----
+0
+
+query I
+SELECT count(*) FROM tree_descendants('main', 'app', NULL, 0);
+----
+0
 
 # sibling relations stay inside their own ROOT partition: two copies of the fixture under distinct
 # root keys give node 8 the same four siblings it has alone, not eight
@@ -119,3 +142,55 @@ query I
 SELECT list(_pre ORDER BY _pre) FROM tree_siblings('main', 'pair', '{''file_path'': a.py}', 8);
 ----
 [7, 9, 13, 14]
+
+# ---------------------------------------------------------------------------------------
+# The two forms of :first-child / :last-child agree, ROOT ROWS INCLUDED
+# ---------------------------------------------------------------------------------------
+#
+# Each positional relation has two spellings: the O(1) one that reads _pre and _parent, used
+# when no row can be a non-element, and the scan that looks for a nearer element sibling, used
+# when ELEMENT is declared. They are meant to be the same relation, so a tree that declares
+# `element := 'true'` -- where every row is an element and the scan therefore asks exactly what
+# the arithmetic asks -- must answer identically to one that declares no ELEMENT at all.
+#
+# They did not. A level-0 row has a NULL _parent, so the O(1) first-child form `_pre = _parent + 1`
+# was NULL, which reads as false: the first ROOT of a partition was a first child under the scan
+# and not under the arithmetic. A partition's first root IS its parent's first child in the only
+# sense the tree has -- it is the first row at level 0 -- so the O(1) form says so now
+# (`COALESCE(_pre = _parent + 1, _pre = 0)`). last-child already agreed, because its O(1) form is
+# the scan without the element conjunct, and this record is what keeps that true.
+statement ok
+CALL tree_ddl_create('main', 'ne', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement ok
+CALL tree_ddl_create('main', 'el', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type', element := 'true')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the row sets, not just their sizes
+query II
+SELECT (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'first-child'}])))
+     = (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'el', tree_steps([{pseudo: 'first-child'}]))),
+       (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'last-child'}])))
+     = (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'el', tree_steps([{pseudo: 'last-child'}])));
+----
+true	true
+
+# ... and the totals, so that a change breaking both forms the same way still shows up here.
+# app.py is one partition of 54 rows: 21 of them are a first child and 21 a last child, the
+# module at node 0 (the partition's only level-0 row) counting as both. `ne` answered 20 and 21
+# before the fix -- the one missing row being that module.
+query IIII
+SELECT (SELECT count(*) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'first-child'}]))),
+       (SELECT count(*) FROM tree_match('main', 'el', tree_steps([{pseudo: 'first-child'}]))),
+       (SELECT count(*) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'last-child'}]))),
+       (SELECT count(*) FROM tree_match('main', 'el', tree_steps([{pseudo: 'last-child'}])));
+----
+21	21	21	21
+
+# the root row itself, named: node 0 is app.py's module, the partition's only level-0 row
+query II
+SELECT (SELECT count(*) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'first-child', "where": 'node_id = 0'}]))),
+       (SELECT count(*) FROM tree_match('main', 'el', tree_steps([{pseudo: 'first-child', "where": 'node_id = 0'}])));
+----
+1	1

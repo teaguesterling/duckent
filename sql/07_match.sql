@@ -43,9 +43,20 @@ CREATE OR REPLACE MACRO tree_sql_prev_sibling(a, b, p, elem) AS
                         || ' AND __c._pre < ' || a || '._pre AND __c._pre > ' || b || '._pre AND __c._element)'
        ELSE tree_sql_siblings(a, b) || ' AND ' || a || '._pre = ' || b || '._pre + ' || b || '._size + 1' END;
 -- Positional fragments constrain the row a alone: combine with tree_sql_children to anchor it.
+--
+-- Each has two spellings of ONE relation -- the O(1) arithmetic, and the scan for a nearer
+-- element sibling that a tree declaring ELEMENT needs -- so they have to agree wherever both are
+-- legal, and the place they did not was the ROOT row. A level-0 row has a NULL _parent, so
+-- `_pre = _parent + 1` is NULL, which reads as false: a partition's first root was a first child
+-- under the scan (no earlier level-0 sibling -- tree_sql_siblings relates level-0 rows through
+-- IS NOT DISTINCT FROM, deliberately) and not under the arithmetic. It IS one in the only sense
+-- the tree has -- the first row at level 0 -- so the COALESCE says so, and _pre = 0 is that row
+-- because _pre is the partition's preorder index. last_child needs nothing: its O(1) form is the
+-- scan with the element conjunct dropped, so it already answers the same on roots. 33_navigation
+-- pins both, as row sets and as totals, against a tree that declares `element := 'true'`.
 CREATE OR REPLACE MACRO tree_sql_first_child(a, p, elem) AS
   CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre < ' || a || '._pre AND __c._element)'
-       ELSE a || '._pre = ' || a || '._parent + 1' END;
+       ELSE 'COALESCE(' || a || '._pre = ' || a || '._parent + 1, ' || a || '._pre = 0)' END;
 CREATE OR REPLACE MACRO tree_sql_last_child(a, p, elem) AS
   CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre AND __c._element)'
        ELSE 'NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre)' END;
@@ -403,8 +414,15 @@ n AS (
          CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
                    AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
-              WHEN ir.kind = 'step' AND ir.op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
-              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
+              -- The sibling-free refusal, which covers the POSITIONAL built-ins too: "first" and
+              -- "last" mean nothing among siblings nothing orders. It tested the combinator
+              -- alone, so `:first-child` on such a tree compiled to `_pre = _parent + 1` over a
+              -- _pre no SIBLING_ORDER governs and answered with whatever rows happened to land
+              -- there -- the one thing the sibling-free profile exists to prevent.
+              WHEN (SELECT profile FROM t) = 'sibling_free'
+                   AND ((ir.kind = 'step' AND ir.op IN ('next', 'after'))
+                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value)))
+              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable')
               ELSE true END AS ok
   FROM ir),
 -- (step node id, part node id, part text) for every clause: the same at every level. A child of a

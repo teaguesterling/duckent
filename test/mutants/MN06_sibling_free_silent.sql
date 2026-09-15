@@ -211,6 +211,11 @@ n AS (
          CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
                    AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
+              -- The sibling-free refusal, which covers the POSITIONAL built-ins too: "first" and
+              -- "last" mean nothing among siblings nothing orders. It tested the combinator
+              -- alone, so `:first-child` on such a tree compiled to `_pre = _parent + 1` over a
+              -- _pre no SIBLING_ORDER governs and answered with whatever rows happened to land
+              -- there -- the one thing the sibling-free profile exists to prevent.
               -- the mutation, half two: the sibling-free refusal branch is gone
               ELSE true END AS ok
   FROM ir),

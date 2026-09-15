@@ -214,8 +214,15 @@ n AS (
          CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
                    AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
-              WHEN ir.kind = 'step' AND ir.op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
-              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
+              -- The sibling-free refusal, which covers the POSITIONAL built-ins too: "first" and
+              -- "last" mean nothing among siblings nothing orders. It tested the combinator
+              -- alone, so `:first-child` on such a tree compiled to `_pre = _parent + 1` over a
+              -- _pre no SIBLING_ORDER governs and answered with whatever rows happened to land
+              -- there -- the one thing the sibling-free profile exists to prevent.
+              WHEN (SELECT profile FROM t) = 'sibling_free'
+                   AND ((ir.kind = 'step' AND ir.op IN ('next', 'after'))
+                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_pseudos(), ir.value)))
+              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable')
               ELSE true END AS ok
   FROM ir),
 -- (step node id, part node id, part text) for every clause: the same at every level. A child of a
