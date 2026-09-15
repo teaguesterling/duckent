@@ -51,7 +51,7 @@ css	true
 query I
 SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
 ----
-treeql
+css
 
 # sel_ast_leafy and sel_ast_deep (above) are no longer needed and would otherwise contaminate
 # the shared tier below: the shared tier scans every catalog macro named sel_<rest>, and both

@@ -82,3 +82,18 @@ SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND 
        (SELECT count(*) FILTER (WHERE NOT _element) FROM tree_project('main', 'app'));
 ----
 depth > 0	macro is_leaf(descendant_count)	["name","depth"]	1
+
+# error(NULL) audit (Task 13): F11 made the existence check fire outside the FROM so that an
+# alter on a missing tree refuses instead of returning NULL. A NULL schema or name defeated it
+# again by a different route -- the check fired, but its message concatenated the NULL and
+# error(NULL) evaluates to NULL in 1.5.5, so the compiler returned NULL all the same. The
+# identity is COALESCEd into the message now, and every refusal goes through tree_err().
+statement error
+CALL tree_ddl_alter(NULL, 'app', tree_semantic(id := 'name'));
+----
+tree_ddl_alter: tree <NULL>.app not found
+
+statement error
+CALL tree_ddl_alter('main', NULL, tree_semantic(id := 'name'));
+----
+tree_ddl_alter: tree main.<NULL> not found

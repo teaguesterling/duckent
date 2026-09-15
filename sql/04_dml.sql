@@ -12,12 +12,19 @@ CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root) AS
   || ''') END FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ') WHERE ' || tree_sql_p13_pred();
 
 -- helper: the tree row and its shape, or an error
+--
+-- The identity is COALESCEd into every message: a NULL schema or name makes the lookup empty,
+-- so the FIRST branch is the one that fires -- and without the COALESCE its message would be
+-- NULL, error(NULL) evaluates to NULL in 1.5.5, the whole context struct would be NULL, every
+-- statement the verb builds from it would be NULL, and list_filter would drop them. The verb
+-- would then run BEGIN ... COMMIT over nothing instead of refusing. tree_err covers the case
+-- where the message goes NULL for some other reason; this covers the one we know about.
 CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
-  SELECT CASE WHEN count(*) = 0 THEN error(verb || ': tree ' || sch || '.' || nm || ' not found')
+  SELECT CASE WHEN count(*) = 0 THEN tree_err(COALESCE(verb, '<NULL>') || ': tree ' || COALESCE(sch, '<NULL>') || '.' || COALESCE(nm, '<NULL>') || ' not found')
               -- an abstract tree records storage = materialized but owns no table, so without
               -- this the verb fails with a raw "table t_... does not exist" catalog error
-              WHEN bool_or(is_abstract) THEN error(verb || ': tree ' || sch || '.' || nm || ' is SHAPE ONLY (abstract); it has no storage')
-              WHEN max(storage) <> 'materialized' THEN error(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; '
+              WHEN bool_or(is_abstract) THEN tree_err(verb || ': tree ' || sch || '.' || nm || ' is SHAPE ONLY (abstract); it has no storage')
+              WHEN max(storage) <> 'materialized' THEN tree_err(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; '
                                                              || CASE WHEN verb = 'tree_check' THEN 'assertions need' ELSE 'DML needs' END || ' storage := materialized')
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
                     order_source: max(order_source),
@@ -68,19 +75,30 @@ CREATE OR REPLACE MACRO tree_compile_replace(sch, nm, source) AS (
 CREATE OR REPLACE MACRO tree_sql_delete_stmt(tbl, root_predicate) AS
   'DELETE FROM ' || tbl || ' WHERE _root IN (SELECT _root FROM (SELECT DISTINCT _root, _root.* FROM ' || tbl || ') WHERE ' || root_predicate || ')';
 
+-- `CASE WHEN x IS NULL` is not dead code, and neither is its twin in tree_compile_check.
+-- Every statement below is pure string concatenation over the identity, so when the identity is
+-- NULL each one constant-folds to NULL *before* anything reads `x` -- and 1.5.5 then prunes the
+-- column that holds tree_dml_context out of the plan, so the refusal inside it is never
+-- evaluated at all. The verb returns a list of NULLs and the executor runs BEGIN, nothing,
+-- COMMIT. tree_compile_insert and _replace escape this only by accident: they also call
+-- tree_compile_projection(x.shape, ...), which forces the context. Reading `x` in a predicate
+-- that cannot fold is what makes the refusal unconditional here.
 CREATE OR REPLACE MACRO tree_compile_delete(sch, nm, root_predicate) AS (
   WITH c AS (SELECT tree_dml_context('tree_delete', sch, nm) AS x)
-  SELECT ['BEGIN TRANSACTION',
+  SELECT CASE WHEN x IS NULL THEN tree_err('tree_delete: internal: no DML context') ELSE
+   ['BEGIN TRANSACTION',
     'CREATE TEMP TABLE __duckent_gone AS SELECT DISTINCT _root::VARCHAR AS root_key FROM (SELECT DISTINCT _root, _root.* FROM ' || x.tbl || ') WHERE ' || root_predicate,
     tree_sql_delete_stmt(x.tbl, root_predicate),
     'DELETE FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT root_key FROM __duckent_gone)',
     'DROP TABLE __duckent_gone',
-    'COMMIT'] FROM c);
+    'COMMIT'] END FROM c);
 
 -- Run the assertions and record them. P13 only for now; O assertions arrive in M3.
 CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS (
   WITH c AS (SELECT tree_dml_context('tree_check', sch, nm) AS x)
-  SELECT ['BEGIN TRANSACTION',
+  -- see tree_compile_delete on why the context is read in a predicate
+  SELECT CASE WHEN x IS NULL THEN tree_err('tree_check: internal: no DML context') ELSE
+   ['BEGIN TRANSACTION',
     'DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_p13''',
     'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_p13'', CASE WHEN count(*) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) || '' violating rows'' FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || x.tbl || ') WHERE ' || tree_sql_p13_pred(),
-    'COMMIT'] FROM c);
+    'COMMIT'] END FROM c);

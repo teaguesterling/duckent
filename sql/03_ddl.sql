@@ -146,18 +146,18 @@ checked AS (
     CASE
       -- NULL in any value interpolated into a generated statement would compile that whole
       -- statement to NULL and drop it from the list, so identity and storage are checked first.
-      WHEN sch IS NULL OR nm IS NULL THEN error('tree_ddl_create: schema and name are required')
-      WHEN abstract IS NULL THEN error('tree_ddl_create: abstract must be true or false')
-      WHEN exists_already THEN error('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
-      WHEN like_missing THEN error('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
-      WHEN abstract AND source IS NOT NULL THEN error('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
-      WHEN NOT abstract AND source IS NULL THEN error('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
-      WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN error('tree_ddl_create: storage must be materialized or projection')
-      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN error('tree_ddl_create: declare LEVEL or PARENT (R2)')
-      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN error('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
-      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN error('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
-      WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN error('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
-      WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN error('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
+      WHEN sch IS NULL OR nm IS NULL THEN tree_err('tree_ddl_create: schema and name are required')
+      WHEN abstract IS NULL THEN tree_err('tree_ddl_create: abstract must be true or false')
+      WHEN exists_already THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
+      WHEN like_missing THEN tree_err('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
+      WHEN abstract AND source IS NOT NULL THEN tree_err('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
+      WHEN NOT abstract AND source IS NULL THEN tree_err('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
+      WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN tree_err('tree_ddl_create: storage must be materialized or projection')
+      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN tree_err('tree_ddl_create: declare LEVEL or PARENT (R2)')
+      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
+      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
+      WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN tree_err('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
+      WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN tree_err('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
       ELSE tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
     CASE WHEN abstract THEN NULL ELSE tree_compile_projection(shape, source, attr_text) END AS proj_sql
   FROM derived
@@ -197,9 +197,9 @@ built AS (
   FROM slot_rows WHERE ok
 )
 SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_commit IS NULL
-            -- plain error(), not (SELECT error(...)): an uncorrelated scalar subquery is
+            -- plain tree_err(), not (SELECT tree_err(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
-            THEN error('tree_ddl_create: internal: a required statement compiled to NULL')
+            THEN tree_err('tree_ddl_create: internal: a required statement compiled to NULL')
             ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);
 
@@ -255,10 +255,12 @@ c AS (
       {b: 'S', s: 'ELEMENT', e: (sem).element}, {b: 'S', s: 'PSEUDO_ARGS', e: (sem).pseudo_args}], lambda x: (x).e IS NOT NULL) AS rows
   FROM n
 )
-SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; nothing to alter')
+SELECT CASE WHEN semantic IS NULL THEN tree_err('tree_ddl_alter: semantic is NULL; nothing to alter')
   -- evaluated outside FROM c: when the tree does not exist c has no rows, and a compiler
-  -- that returns NULL instead of refusing hands the executor nothing to run
-  WHEN NOT EXISTS (SELECT 1 FROM t) THEN error('tree_ddl_alter: tree ' || sch || '.' || nm || ' not found') ELSE
+  -- that returns NULL instead of refusing hands the executor nothing to run (F11). The
+  -- COALESCEs close the same hole by the other route: a NULL schema or name makes this the
+  -- branch that fires AND makes its message NULL, and error(NULL) is NULL in 1.5.5.
+  WHEN NOT EXISTS (SELECT 1 FROM t) THEN tree_err('tree_ddl_alter: tree ' || COALESCE(sch, '<NULL>') || '.' || COALESCE(nm, '<NULL>') || ' not found') ELSE
   (SELECT list_filter(['BEGIN TRANSACTION',
    CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE
    'SELECT CASE WHEN count(*) > 0 THEN error(''tree_ddl_alter: tree ' || replace(sch || '.' || nm, '''', '''''')

@@ -205,3 +205,37 @@ query I
 SELECT (SELECT count(*) FROM tree_project('main', 'frozen')) = (SELECT count(*) FROM src);
 ----
 true
+
+# error(NULL) audit (Task 13): tree_dml_context's "not found" refusal concatenates the identity
+# it was given, and a NULL schema or name makes the lookup empty AND the message NULL. Before
+# the fix the whole context struct evaluated to NULL, every statement built from it compiled to
+# NULL, list_filter dropped them, and the verb ran BEGIN ... COMMIT over nothing -- a silent
+# no-op where a refusal was owed. This is the DML face of the same 1.5.5 hazard sql/09_css.sql
+# met (error(NULL) evaluates to NULL instead of raising).
+statement error
+CALL tree_insert(NULL, 'app', 'first_file');
+----
+tree_insert: tree <NULL>.app not found
+
+statement error
+CALL tree_replace('main', NULL, 'first_file');
+----
+tree_replace: tree main.<NULL> not found
+
+# tree_delete and tree_check went one worse, and by a second 1.5.5 mechanism: every statement
+# they build is pure string concatenation over the identity, so with a NULL identity each one
+# constant-folds to NULL before anything reads the DML context -- and the planner then prunes
+# the column holding it, so the refusal inside tree_dml_context was never evaluated at all.
+# CALL tree_check('main', NULL) reached the executor as [BEGIN, NULL, NULL, COMMIT] and died on
+# an INTERNAL "Attempted to dereference shared_ptr that is NULL". Both now read the context in a
+# predicate that cannot fold. (tree_insert and tree_replace above escaped it only by accident:
+# they also call tree_compile_projection(x.shape, ...), which forces the context.)
+statement error
+CALL tree_delete('main', NULL, 'true');
+----
+tree_delete: tree main.<NULL> not found
+
+statement error
+CALL tree_check('main', NULL);
+----
+tree_check: tree main.<NULL> not found

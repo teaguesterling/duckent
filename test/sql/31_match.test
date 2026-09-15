@@ -364,3 +364,49 @@ query I
 FROM tree_match('main', 'app', tree_steps([{type: 'module'}]), language := 'css') SELECT _match_language;
 ----
 css
+
+# --------------------------------------------------------------------------------------
+# error(NULL) audit (Task 13)
+# --------------------------------------------------------------------------------------
+# 1.5.5 evaluates error(NULL) to NULL instead of raising, so a refusal whose message
+# concatenates a value that turns out to be NULL hands the caller a NULL fragment instead of
+# an error -- and a NULL fragment propagates silently through the whole compiled text. That is
+# the worst way for a matcher to fail: no answer where a refusal was owed. sql/09_css.sql met
+# this first (tree_css_err); these are the sites the Task 13 audit found outside it. Each is
+# reachable either with a NULL identity or with an IR node built by hand rather than by
+# tree_steps -- which the compiler already says it does not trust (see chk in 07_match.sql).
+# Every refusal in the macro files now goes through tree_err(), which raises whatever the
+# message turned out to be; the operands below are COALESCEd as well, so the message still
+# names what was wrong instead of falling back to the internal one.
+
+statement error
+SELECT tree_sql_comb(NULL, 'a', 'b', 'P', false);
+----
+unknown combinator <NULL>
+
+statement error
+SELECT tree_sql_clause(NULL, 'v', NULL, NULL, 's1', [], false, 'P', false);
+----
+unknown clause kind <NULL>
+
+statement error
+SELECT tree_sql_clause('attr', NULL, '=', '1', 's1', [], false, 'P', false);
+----
+attribute <NULL> is neither a projected column nor served by ATTR MAP
+
+statement error
+FROM tree_match(NULL, 'app', tree_steps([{type: 'module'}]));
+----
+tree <NULL>.app not found
+
+statement error
+FROM tree_match('main', NULL, tree_steps([{type: 'module'}]));
+----
+tree main.<NULL> not found
+
+# tree_err's own backstop: a refusal whose message is NULL for a reason the audit did not
+# anticipate still raises, with the internal message, rather than evaluating to NULL.
+statement error
+SELECT tree_err(NULL);
+----
+internal: refusal with a NULL message

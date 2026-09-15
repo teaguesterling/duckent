@@ -60,7 +60,10 @@
 -- Refuse with `msg`, and refuse even when building `msg` went wrong. `error(NULL)` does not raise
 -- in 1.5.5 -- it evaluates to NULL -- so a refusal whose message concatenates a value that turns
 -- out to be NULL would silently hand the caller a NULL TREE_SELECTOR instead of an error. Every
--- refusal in this file goes through here, so that failure mode cannot come back.
+-- refusal in this file goes through here, so that failure mode cannot come back. The Task 13
+-- audit found the same hazard outside this file and answered it with `tree_err` (sql/00_types.sql);
+-- this one stays because its fallback names the css parse, which is the only thing that can
+-- have gone wrong here.
 CREATE OR REPLACE MACRO tree_css_err(msg) AS
   error(COALESCE(msg, 'css: internal: a refusal built a NULL message; the parse shape was not anticipated'));
 

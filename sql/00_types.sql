@@ -27,6 +27,22 @@ CREATE TYPE TREE_STEP_L2 AS STRUCT(
   comb VARCHAR, type VARCHAR, id VARCHAR, class VARCHAR, attr VARCHAR, pseudo VARCHAR, "where" VARCHAR, "as" VARCHAR,
   has TREE_STEP_L1[], "not" TREE_STEP_L1[]);
 
+-- Refuse with `msg`, and refuse even when building `msg` went wrong.
+--
+-- 1.5.5: error(NULL) does NOT raise -- it evaluates to NULL. A refusal whose message
+-- concatenates a value that turns out to be NULL therefore hands its caller a NULL where an
+-- exception was owed, and a NULL propagates: a NULL fragment makes the whole compiled query
+-- NULL, a NULL context struct makes every statement built from it NULL and list_filter drops
+-- them, so a verb that should have refused runs BEGIN ... COMMIT over nothing. sql/09_css.sql
+-- met this first and answered it with tree_css_err; this is the same guard for the rest of the
+-- macro files, and every refusal outside 09_css.sql goes through it. Sites whose operand can
+-- actually be NULL (an identity, a hand-built IR node's kind or op) COALESCE that operand to
+-- '<NULL>' as well, so the message still names what was wrong; this is the backstop for the
+-- ones nobody anticipated. It deliberately does not name the caller -- it has no way to know
+-- one -- which is why the text says "internal": reaching it is a duckent bug, not a user error.
+CREATE OR REPLACE MACRO tree_err(msg) AS
+  error(COALESCE(msg, 'duckent: internal: refusal with a NULL message; see FINDINGS on error(NULL) in 1.5.5'));
+
 -- pseudo: a list of any of {name, body} | {name, macro, args} | {prefix, args}; pseudo_map: MAP of name -> macro
 -- with pseudo_args shared by every entry; the constructor flattens the map into the list.
 CREATE OR REPLACE MACRO tree_semantic(type := NULL, id := NULL, classes := NULL, attr := NULL, attr_map := NULL, element := NULL,
@@ -134,16 +150,16 @@ CREATE OR REPLACE MACRO tree_sql_object_name(kind, sch, nm) AS
 CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
   CASE
     WHEN regexp_matches(COALESCE(attr_text, ''), '(?i)\bAS\s+"?_')
-      THEN error(verb || ': ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
+      THEN tree_err(verb || ': ATTR alias collides with the canonical prefix: ' || regexp_extract(attr_text, '(?i)\bAS\s+("?_[A-Za-z0-9_]*)', 1))
     -- A NULL name, or a body with no macro to derive one from, would compile the pseudo map
     -- and the pseudo_classes INSERT to NULL; both would then be dropped from the statement
     -- list instead of refusing. A macro-bound entry passes with a NULL body because the DDL
     -- compilers run tree_expand_pseudo first, which fills the body in from macro(args);
     -- prefix entries are exempt entirely -- expansion is what gives them their names.
     WHEN len(list_filter(COALESCE((sem).pseudo, []), lambda x: (x).prefix IS NULL AND ((x).name IS NULL OR ((x).body IS NULL AND (x).macro IS NULL)))) > 0
-      THEN error(verb || ': every PSEUDO needs a name and a body or macro')
+      THEN tree_err(verb || ': every PSEUDO needs a name and a body or macro')
     WHEN len(list_distinct(list_transform(COALESCE((sem).pseudo, []), lambda x: (x).name))) <> len(COALESCE((sem).pseudo, []))
-      THEN error(verb || ': S-coherence: a pseudo-class is bound twice')
+      THEN tree_err(verb || ': S-coherence: a pseudo-class is bound twice')
     ELSE true END;
 
 -- Structural companion to the ATTR-alias regex above: the regex only sees an explicit

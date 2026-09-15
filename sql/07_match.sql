@@ -66,7 +66,10 @@ CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
     WHEN 'self'  THEN tree_sql_self(a, b)
     WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
     WHEN 'after' THEN tree_sql_after(a, b)
-    ELSE error('tree_match: unknown combinator ' || op) END;
+    -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain
+    -- defaults that one before it gets here, so a NULL arriving is hand-built IR -- which is
+    -- exactly the case that must be told what is wrong instead of receiving a NULL fragment.
+    ELSE tree_err('tree_match: unknown combinator ' || COALESCE(op, '<NULL>')) END;
 
 -- The pseudo-classes the language itself defines. They are structural, so every tree has them
 -- whatever its SEMANTIC group binds, and they are never reported as unknown. One list, read by
@@ -104,14 +107,16 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
                                    THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'
                                    ELSE 'TRY_CAST(' || alias || '._attr_map[' || tree_sql_lit(value) || '] AS ' || tree_sql_literal_type(arg) || ')' END
                || ' ' || op || ' ' || arg || ', false)'
-        ELSE error('tree_match: attribute ' || value || ' is neither a projected column nor served by ATTR MAP') END
+        ELSE tree_err('tree_match: attribute ' || COALESCE(value, '<NULL>') || ' is neither a projected column nor served by ATTR MAP') END
     -- One level only: recursive := true flattens _root's struct into its component columns, so
     -- _root itself stops being addressable and falls through to an enclosing step alias
     -- (ambiguous, or worse, silently the wrong row). Unqualified names resolve to this step's
     -- own row first; another step's alias is legal when qualified (spec 6.2).
     WHEN 'where'  THEN 'EXISTS (SELECT 1 FROM (SELECT unnest(' || alias || ', recursive := false)) __w WHERE ' || value || ')'
     WHEN 'pseudo_unknown' THEN 'false'
-    ELSE error('tree_match: unknown clause kind ' || kind) END;
+    -- COALESCE for the same reason as the combinator above: a NULL kind is an IR node nothing
+    -- in this codebase builds, so its refusal is the one a hand-built selector most needs.
+    ELSE tree_err('tree_match: unknown clause kind ' || COALESCE(kind, '<NULL>')) END;
 
 -- One step chain as FROM text. `steps` is STRUCT(node_id, alias, op, pred)[] in chain order and
 -- `anchor` is the alias of the enclosing step when the chain is a group's, NULL when it is the
@@ -125,7 +130,7 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
 -- steps contributes no row to the fold's group pass, so nothing would call this for it. That case
 -- is refused in chk. This branch is what stops a direct caller emitting a FROM with no relation.
 CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
-  CASE WHEN steps IS NULL OR len(steps) = 0 THEN error('tree_match: empty group') ELSE
+  CASE WHEN steps IS NULL OR len(steps) = 0 THEN tree_err('tree_match: empty group') ELSE
     list_aggregate(list_transform(steps, lambda s, i:
         CASE WHEN i = 1 THEN p || ' ' || (s).alias
              ELSE 'JOIN ' || p || ' ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, p, elem)
@@ -206,19 +211,23 @@ bad_clause AS (
   WHERE c.kind IN ('type', 'id', 'class', 'attr', 'pseudo', 'where')
     AND NOT EXISTS (SELECT 1 FROM ir s WHERE s.node_id = c.parent_id AND s.kind = 'step')),
 chk AS (SELECT CASE
-  WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found')
+  -- COALESCE: a NULL schema or name leaves t empty, so this is the branch that fires, and its
+  -- message would otherwise be NULL -- which in 1.5.5 means the compiler returns NULL and the
+  -- caller runs nothing at all. The later branches need no COALESCE: they are reached only
+  -- when the tree was found, and a found tree has a non-NULL identity.
+  WHEN (SELECT count(*) FROM t) = 0 THEN tree_err('tree_match: tree ' || COALESCE(sch, '<NULL>') || '.' || COALESCE(nm, '<NULL>') || ' not found')
   -- an overlay is an S group for this query only; it cannot widen the projection, and an
   -- overlay that sets nothing (or a selector with no steps) used to compile to NULL
-  WHEN (semantic).attr IS NOT NULL THEN error('tree_match: a per-query SEMANTIC overlay cannot add attribute columns; use tree_ddl_alter')
+  WHEN (semantic).attr IS NOT NULL THEN tree_err('tree_match: a per-query SEMANTIC overlay cannot add attribute columns; use tree_ddl_alter')
   WHEN semantic IS NOT NULL AND (semantic).type IS NULL AND (semantic).id IS NULL AND (semantic).classes IS NULL
        AND (semantic).attr_map IS NULL AND (semantic).pseudo IS NULL AND (semantic).element IS NULL
-       THEN error('tree_match: semantic overlay is empty')
-  WHEN (SELECT count(*) FROM ir WHERE kind = 'step') = 0 THEN error('tree_match: selector has no steps')
+       THEN tree_err('tree_match: semantic overlay is empty')
+  WHEN (SELECT count(*) FROM ir WHERE kind = 'step') = 0 THEN tree_err('tree_match: selector has no steps')
   WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
-    THEN error('tree_match: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
-  WHEN (SELECT n FROM bad_empty) > 0 THEN error('tree_match: empty group')
+    THEN tree_err('tree_match: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+  WHEN (SELECT n FROM bad_empty) > 0 THEN tree_err('tree_match: empty group')
   WHEN (SELECT k FROM bad_clause) IS NOT NULL
-    THEN error('tree_match: clause ' || (SELECT k FROM bad_clause) || ' is not attached to a step')
+    THEN tree_err('tree_match: clause ' || (SELECT k FROM bad_clause) || ' is not attached to a step')
   ELSE true END AS ok),
 -- The relation every step alias ranges over: the stored projection, or a REPLACE over it when
 -- the query carries an overlay. Each replaced column is spelled the way sql/02_projection.sql
@@ -258,9 +267,9 @@ n AS (
                    AND (semantic IS NULL OR NOT list_contains((SELECT names FROM ovp), value)) THEN 'pseudo_unknown' ELSE kind END AS kind,
          value, op, arg, COALESCE(alias, 's' || node_id) AS alias,
          CASE WHEN kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
-              THEN error('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
+              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
               WHEN kind = 'step' AND op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free'
-              THEN error('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
+              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free (no SIBLING_ORDER declared); SIBLING and FOLLOWING are unavailable')
               ELSE true END AS ok
   FROM ir),
 -- (step node id, part node id, part text) for every clause: the same at every level. A child of a

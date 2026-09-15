@@ -239,9 +239,35 @@ FROM tree_match('main', 'app', '.fn:not(> block)', language := 'css');
 ----
 :not() takes a compound selector in v0
 
-# treeql text is refused until M-LANG; with no language the runner reads
-# tree_catalog.settings, which still says treeql
+# TREEQL text is refused until M-LANG. It has to be ASKED for now: the last M2 task flipped
+# tree_catalog.settings.tree_default_selector_language to css, so the runner no longer reaches
+# the TREEQL branch on its own.
+statement error
+FROM tree_match('main', 'app', '(TYPE ''fn'')', language := 'treeql');
+----
+M-LANG
+
+# The flip itself, from the other side: a bare text selector -- no language := -- is parsed by
+# the css front-end and matches exactly what the explicit spelling matches. This record is the
+# reason the one above needs its argument.
+query I
+SELECT (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', '.fn:not(:has(string))'))
+     = (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', '.fn:not(:has(string))', language := 'css'));
+----
+true
+
+# ...and a bare selector that css cannot parse refuses as css, which is what "the default is
+# css" means: the settings row picks the PARSER. It does not touch provenance -- _match_language
+# is COALESCE(language, 'treeql') and never reads the catalog, because a selector reaches the
+# compiler as IR and the compiler cannot know what text, if any, it was parsed from. So the
+# language a match reports is the one its caller declared, and a bare selector declares none.
 statement error
 FROM tree_match('main', 'app', '(TYPE ''fn'')');
 ----
-M-LANG
+unexpected
+
+query II
+SELECT (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn')),
+       (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn', language := 'css'));
+----
+treeql	css

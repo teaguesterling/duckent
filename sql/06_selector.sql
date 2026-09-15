@@ -161,20 +161,20 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     SELECT n.node_id, p.node_id AS parent_id, n.kind, n.value, n.op, n.arg, n.alias
     FROM numbered n LEFT JOIN numbered p ON p.path = n.ppath)
   SELECT CASE
-    WHEN (SELECT k FROM bad_key) IS NOT NULL THEN error('tree_steps: unknown step field ' || (SELECT k FROM bad_key))
+    WHEN (SELECT k FROM bad_key) IS NOT NULL THEN tree_err('tree_steps: unknown step field ' || (SELECT k FROM bad_key))
     WHEN (SELECT n FROM bad_depth) > 0
-      THEN error('tree_steps: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+      THEN tree_err('tree_steps: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     -- a group with no steps tests nothing; accepting it would leave a node in the IR that the
     -- printer has no text for and the compiler no predicate for
-    WHEN (SELECT n FROM bad_empty) > 0 THEN error('tree_steps: empty HAS/NOT group')
+    WHEN (SELECT n FROM bad_empty) > 0 THEN tree_err('tree_steps: empty HAS/NOT group')
     -- a step inside HAS/NOT is a test, not a row of the result, so there is nothing to name
-    WHEN (SELECT a FROM bad_capture) IS NOT NULL THEN error('tree_steps: capture inside HAS/NOT has no row to bind')
-    WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN error('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
+    WHEN (SELECT a FROM bad_capture) IS NOT NULL THEN tree_err('tree_steps: capture inside HAS/NOT has no row to bind')
+    WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN tree_err('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
     WHEN (SELECT n FROM bad_self) > 0
-      THEN error('tree_steps: SELF is only legal as the first step of a HAS/NOT group')
+      THEN tree_err('tree_steps: SELF is only legal as the first step of a HAS/NOT group')
     -- s<N> is what the match compiler names step N when the user names nothing; a user
     -- alias of that shape would collide with another step's generated alias
-    WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN error('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
   FROM parented);
 
@@ -212,22 +212,22 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
                                 arg: (r).arg, alias: (r).alias} ORDER BY (r).node_id), [])
           FROM i WHERE (r).kind <> 'selector'))::TREE_SELECTOR AS v)
   SELECT CASE
-    WHEN kind IS NULL OR kind NOT IN ('has', 'not') THEN error('tree_steps_group: kind must be has or not')
+    WHEN kind IS NULL OR kind NOT IN ('has', 'not') THEN tree_err('tree_steps_group: kind must be has or not')
     -- a NULL alias matches no step, and concatenating it into the message would make the whole
     -- refusal NULL, so the message names it explicitly
     WHEN (SELECT node_id FROM target) IS NULL
-      THEN error('tree_steps_group: no step aliased ' || COALESCE(step_alias, 'NULL'))
-    WHEN (SELECT n FROM inner_steps) = 0 THEN error('tree_steps_group: inner selector has no steps')
+      THEN tree_err('tree_steps_group: no step aliased ' || COALESCE(step_alias, 'NULL'))
+    WHEN (SELECT n FROM inner_steps) = 0 THEN tree_err('tree_steps_group: inner selector has no steps')
     -- the same reason tree_steps refuses a capture written inside a group
     WHEN (SELECT cap FROM inner_steps) IS NOT NULL
-      THEN error('tree_steps_group: capture inside HAS/NOT has no row to bind')
+      THEN tree_err('tree_steps_group: capture inside HAS/NOT has no row to bind')
     WHEN (SELECT bad_self FROM inner_steps) > 0
-      THEN error('tree_steps_group: SELF is only legal as the first step of a HAS/NOT group')
+      THEN tree_err('tree_steps_group: SELF is only legal as the first step of a HAS/NOT group')
     -- the splice adds a group level below the target step, so an inner selector that already nests
     -- groups can push the result past what the printer and the compiler unroll. Measuring the
     -- spliced result rather than the parts counts the target step's own depth for free.
     WHEN tree_selector_group_depth((SELECT v FROM spliced)) > tree_group_depth_limit()
-      THEN error('tree_steps_group: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+      THEN tree_err('tree_steps_group: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE (SELECT v FROM spliced) END);
 
 CREATE OR REPLACE MACRO tree_treeql_comb(op) AS
@@ -299,8 +299,8 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
     FROM n s WHERE s.kind = 'step')
   SELECT CASE
     WHEN (SELECT k FROM bad_kind) IS NOT NULL
-      THEN error('tree_selector_to_treeql: unknown node kind ' || (SELECT k FROM bad_kind))
+      THEN tree_err('tree_selector_to_treeql: unknown node kind ' || (SELECT k FROM bad_kind))
     WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
-      THEN error('tree_selector_to_treeql: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
+      THEN tree_err('tree_selector_to_treeql: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE (SELECT string_agg(tree_treeql_step(op, body, alias), chr(10) ORDER BY node_id)
           FROM stepC WHERE parent_id IN (SELECT node_id FROM n WHERE kind = 'selector')) END);
