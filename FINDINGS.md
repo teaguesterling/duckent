@@ -2,6 +2,50 @@
 
 What first contact showed. Newest first. Every oracle divergence gets an entry with adjudication before any test changes.
 
+## M2 differential adjudications
+
+The corpus import (`test/import_astcss_eval.py`) runs all 108 accepted astcss-eval pairs against
+their frozen references. References are never edited: where we disagree, the row is adjudicated
+here, and only a row adjudicated **against** upstream loses its assertion (it is tagged
+`divergent:<reason>` in `test/corpus/astcss_eval.jsonl` and `41_differential_sitting_duck.test`
+emits it as a commented no-op naming the reason). 107 of 108 references are asserted and pass.
+
+- **`lambda` on `repo-small-py` (t1-p21) — 2 rows here, 3 in the reference; the reference is
+  wrong. Tagged `divergent:sd-type-prefix-match`.** The reference's extra node is
+  `update_test_names.py:247`, whose `type` is `lambda_parameters`, not `lambda`. Reproduced live
+  against the installed sitting_duck on the same fixture: `ast_select_from(rs, 'lambda')` returns
+  3 rows, `ast_select_from(rs, 'lambda_parameters')` returns exactly that node, and the probe
+  `ast_select_from(rs, 'lambd')` returns **both** types — so sitting_duck's bare type selector is
+  a *prefix* match, not equality. (`with` likewise selects `with_item`, `with_statement`, `with`
+  and `with_clause`; `while` selects `while` and `while_statement`.) A css type selector is
+  equality on the node type — `lambda` cannot silently mean `lambda*` — so duckent's 2 rows are
+  right. This is not one of the tracked issues (#127, #128, #130, #133, #134, #141); it is a new
+  upstream bug, and the reason the corpus's other bare-type rows (`with_statement`,
+  `while_statement`, `decorated_definition`, `continue_statement`) pass is only that no other
+  type in those fixtures shares their prefix.
+
+- **Embedding multiplicity, not a divergence: `.import ~ .class` (t3-p11, 9 rows vs 3),
+  `.import ~ .fn` (t3-p22, 126 vs 27), `.fn ~ .class` (t3-p38, 6 vs 5), `.loop .call#print`
+  (t3-p39, 20 vs 19).** The node *sets* are identical in all four; only the row counts differ.
+  duckent's match is a join and its contract is "one output row per full-pattern embedding"
+  (core design §6.3) — that is what makes a `@capture` a joinable relation alias — so a node with
+  three preceding `.import` siblings is three rows here and one row in sitting_duck, which emits
+  the subject set. The M2 design already specifies the sitting_duck differential as *identical
+  `(file_path, node_id)` sets, checked by `EXCEPT` in both directions* (§8), so
+  `41_differential_sitting_duck.test` aggregates its keys from `SELECT DISTINCT file_path,
+  node_id`. That is a projection of our bag to its set, not a relaxation of the reference: the
+  key list and the sha256 are still compared against the reference verbatim.
+
+- **Scoping note for `41b_live_sitting_duck.test`: the installed sitting_duck has regressed on
+  issue #127.** All 31 corpus rows whose chain has a combinator (`.loop .call`, `.mod > .fn`,
+  `.import + .import`, …) return **0 rows** from today's `ast_select_from`, while their frozen
+  references — captured on the `sd-20260914-1835` build, which had #127 fixed — carry 21, 26 and
+  16 nodes. duckent matches the *frozen* references on all 31 (modulo the multiplicity above), so
+  41 keeps them; 41b covers the 76 single-compound rows the installed engine still answers, and
+  lists the skipped rows with their reason at the foot of the file. When upstream is fixed again,
+  deleting the `top_level_combinator` skip in the importer and regenerating restores full live
+  coverage.
+
 ## Spec deviations in this milestone
 
 Where the prototype knowingly differs from `docs/superpowers/specs/2026-09-13-duckent-core-design.md`. Each is a deviation to carry forward or close in M2, not an accident.
