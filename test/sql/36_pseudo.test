@@ -205,3 +205,45 @@ statement error
 FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]), semantic := tree_semantic());
 ----
 semantic overlay is empty
+
+# ---------------------------------------------------------------------------------------
+# A PSEUDO prefix that binds nothing is a typo, not a declaration of nothing
+# ---------------------------------------------------------------------------------------
+#
+# A prefix entry names a NAMESPACE of catalog macros, and expansion replaces it with one
+# binding per macro that carries the prefix. When none does, expansion replaces it with
+# nothing: the tree was created, the S/PSEUDO rows were empty, and every `:name` the author
+# meant to mint was an unknown pseudo-class compiling to false. Nothing said so -- not at
+# create, not at match -- so `pseudo := [{prefix: 'sel_ats_', ...}]` read as a tree with no
+# pseudo-classes rather than as a misspelling of `sel_ast_`. It is checked against the live
+# catalog at create time, which is when the prefix is resolved.
+statement error
+CALL tree_ddl_create('main', 'nopfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'nosuch_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+tree_ddl_create: PSEUDO prefix nosuch_ binds no macro
+
+# the tree is not half-created: the refusal is in the compiler, before any statement runs
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'nopfx';
+----
+0
+
+# alter runs the same check, in its own verb's words
+statement error
+CALL tree_ddl_alter('main', 'bare', tree_semantic(type := 'type', pseudo := [{prefix: 'nosuch_', args: 'descendant_count'}]));
+----
+tree_ddl_alter: PSEUDO prefix nosuch_ binds no macro
+
+# a prefix that DOES bind is unaffected, and so is a local binding whose NAME happens to look
+# like a prefix (only an entry with a prefix and no name is a prefix declaration)
+statement ok
+CALL tree_ddl_create('main', 'okpfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT name, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'okpfx' AND origin = 'prefix';
+----
+leaf	prefix

@@ -198,6 +198,30 @@ CREATE OR REPLACE MACRO tree_sql_check_semantic(sem, attr_text, verb) AS
       THEN tree_err(verb || ': S-coherence: a pseudo-class is bound twice')
     ELSE true END;
 
+-- The second half of the S validation ladder, and the one that has to read the UNEXPANDED
+-- semantic: a PSEUDO prefix entry names a NAMESPACE of catalog macros, and tree_expand_pseudo
+-- replaces it with one binding per macro carrying that prefix. When none does, expansion replaces
+-- it with NOTHING -- so by the time tree_sql_check_semantic sees the group, a prefix that bound
+-- no macro is indistinguishable from one that was never written. The tree was created with an
+-- empty PSEUDO block and every `:name` its author meant to mint was an unknown pseudo-class
+-- compiling to false, silently: `{prefix: 'sel_ats_'}` read as "this tree has no pseudo-classes"
+-- rather than as a misspelling of `sel_ast_`.
+--
+-- Only a freshly declared entry ({prefix, args} with no name) is a prefix declaration; a
+-- round-tripped catalog row (tree_shape_from_catalog, for a LIKE child) carries a provenance-only
+-- prefix marker AND a name, and is not re-resolved. Reads duckdb_functions(), so this is called by
+-- the DDL compilers (runner-executed), like tree_expand_pseudo itself. Returns true or raises;
+-- both compilers call it alongside tree_sql_check_semantic so the two verbs cannot drift.
+CREATE OR REPLACE MACRO tree_sql_check_prefixes(sem, verb) AS (
+  WITH px AS (SELECT unnest(list_filter(COALESCE((sem).pseudo, []),
+                                        lambda p: (p).prefix IS NOT NULL AND (p).name IS NULL)) AS p),
+       m AS (SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'macro'),
+       bad AS (SELECT min((px.p).prefix) AS pre FROM px
+               WHERE NOT EXISTS (SELECT 1 FROM m WHERE starts_with(m.function_name, (px.p).prefix)))
+  SELECT CASE WHEN (SELECT pre FROM bad) IS NOT NULL
+              THEN tree_err(verb || ': PSEUDO prefix ' || (SELECT pre FROM bad) || ' binds no macro')
+              ELSE true END);
+
 -- Structural companion to the ATTR-alias regex above: the regex only sees an explicit
 -- "AS _x", so an implicit or quoted alias still reaches the projection. DESCRIBE the
 -- compiled relation instead -- DuckDB renames the displaced duplicate of a canonical

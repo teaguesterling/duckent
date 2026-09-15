@@ -20,6 +20,9 @@ WITH base AS (
 -- is resolved once, against the macros that existed at create time).
 expanded AS (
   SELECT * EXCLUDE (merged),
+    -- the group as WRITTEN, kept alongside the expanded one for tree_sql_check_prefixes: a prefix
+    -- that bound no macro leaves no trace in the expansion (sql/00_types.sql)
+    (merged).semantic AS raw_semantic,
     {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
      sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
      semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape,
@@ -70,7 +73,10 @@ checked AS (
       WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
       WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN tree_err('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
       WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN tree_err('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
-      ELSE tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
+      -- both halves of the S ladder: the prefix check reads the group as written (a prefix that
+      -- bound nothing is gone from the expansion), the rest reads the expanded one
+      ELSE tree_sql_check_prefixes(raw_semantic, 'tree_ddl_create')
+           AND tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
     CASE WHEN abstract THEN NULL ELSE tree_compile_projection(shape, source, attr_text) END AS proj_sql
   FROM derived
 ),
