@@ -1,0 +1,54 @@
+# name: test/sql/36_pseudo.test
+# description: pseudo-class binding forms expand to expression bodies
+
+query I
+SELECT (tree_semantic(element := 'is_construct(flags)')).element;
+----
+is_construct(flags)
+
+# macro form: body is macro(args)
+query II
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{name: 'docblock', macro: 'has_docblock', args: 'file_path, node_id'}]))).pseudo) AS p);
+----
+docblock	has_docblock(file_path, node_id)
+
+# map form with shared args
+query II rowsort
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo_map := MAP {'busy': 'is_busy', 'leaf': 'is_leaf'}, pseudo_args := 'node_id'))).pseudo) AS p);
+----
+busy	is_busy(node_id)
+leaf	is_leaf(node_id)
+
+# prefix form: every catalog scalar macro starting with the prefix, name = the remainder
+statement ok
+CREATE MACRO sel_ast_leafy(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_deep(n) AS n > 3;
+
+query III rowsort
+SELECT (p).name, (p).body, (p).prefix FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}]))).pseudo) AS p);
+----
+deep	sel_ast_deep(descendant_count)	sel_ast_
+leafy	sel_ast_leafy(descendant_count)	sel_ast_
+
+# expression form passes through unchanged
+query I
+SELECT (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{name: 'x', body: 'a > 1'}]))).pseudo) AS p);
+----
+a > 1
+
+query IIII
+SELECT tree_sql_literal_type('100'), tree_sql_literal_type('-2.5'), tree_sql_literal_type('true'), tree_sql_literal_type('''x''') IS NULL;
+----
+BIGINT	DOUBLE	BOOLEAN	true
+
+query II
+SELECT language, bare_safe FROM tree_catalog_languages() WHERE language = 'css';
+----
+css	true
+
+query I
+SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
+----
+treeql

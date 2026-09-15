@@ -18,7 +18,9 @@ CREATE OR REPLACE MACRO tree_shape_from_catalog(db, sch, nm) AS (
       classes: max(expression) FILTER (WHERE slot = 'CLASSES'),
       attr: max(expression) FILTER (WHERE slot = 'ATTR'),
       attr_map: max(expression) FILTER (WHERE slot = 'ATTR_MAP'),
-      pseudo: (SELECT list({name: name, body: body, prefix: NULL::VARCHAR} ORDER BY name)
+      element: max(expression) FILTER (WHERE slot = 'ELEMENT'),
+      pseudo_args: NULL::VARCHAR,
+      pseudo: (SELECT list({name: name, body: body, macro: NULL::VARCHAR, args: NULL::VARCHAR, prefix: NULL::VARCHAR} ORDER BY name)
                FROM tree_catalog.pseudo_classes p WHERE p.database_name = db AND p.schema_name = sch AND p.tree_name = nm)
     }::TREE_SEMANTIC }::TREE_SHAPE END
   FROM tree_catalog.slots WHERE database_name = db AND schema_name = sch AND tree_name = nm);
@@ -33,6 +35,8 @@ CREATE OR REPLACE MACRO tree_shape_merge(p, c) AS
       type: COALESCE((c).semantic.type, (p).semantic.type), id: COALESCE((c).semantic.id, (p).semantic.id),
       classes: COALESCE((c).semantic.classes, (p).semantic.classes), attr: COALESCE((c).semantic.attr, (p).semantic.attr),
       attr_map: COALESCE((c).semantic.attr_map, (p).semantic.attr_map),
+      element: COALESCE((c).semantic.element, (p).semantic.element),
+      pseudo_args: COALESCE((c).semantic.pseudo_args, (p).semantic.pseudo_args),
       pseudo: list_concat(
         list_filter(COALESCE((p).semantic.pseudo, []), lambda x: NOT list_contains(list_transform(COALESCE((c).semantic.pseudo, []), lambda y: (y).name), (x).name)),
         COALESCE((c).semantic.pseudo, []))

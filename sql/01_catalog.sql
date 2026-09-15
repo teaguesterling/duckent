@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS tree_catalog.pseudo_classes(
 CREATE TABLE IF NOT EXISTS tree_catalog.selector_languages(
   language VARCHAR PRIMARY KEY, parser VARCHAR, printer VARCHAR, bare_safe BOOLEAN);
 INSERT INTO tree_catalog.selector_languages VALUES ('treeql', NULL, 'tree_selector_to_treeql', true) ON CONFLICT DO NOTHING;
+INSERT INTO tree_catalog.selector_languages VALUES ('css', 'tree_css_lower', 'tree_selector_to_treeql', true) ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS tree_catalog.settings(name VARCHAR PRIMARY KEY, value VARCHAR);
+INSERT INTO tree_catalog.settings VALUES ('tree_default_selector_language', 'treeql') ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS tree_catalog.attachments(child_tree VARCHAR, parent_tree VARCHAR, join_sql VARCHAR);
 
