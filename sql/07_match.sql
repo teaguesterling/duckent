@@ -2,15 +2,61 @@
 CREATE OR REPLACE MACRO tree_canonical_columns() AS
   ['_root', '_pre', '_level', '_parent', '_size', '_children', '_next', '_type', '_id', '_classes', '_attr_map', '_element', '_pseudo'];
 
--- Structural predicate between the previous step alias a and this step alias b. MN14 mutates this to drop the root equality.
-CREATE OR REPLACE MACRO tree_sql_comb(op, a, b) AS
+-- One fragment per relation, each the single definition shared by combinators, groups and traversal.
+-- a and b are step aliases; p is the projection relation text (needed where a third row is scanned);
+-- elem says whether the tree declares ELEMENT, in which case the sibling and positional relations
+-- must scan for the nearest *element* neighbour instead of using the O(1) pre/size arithmetic.
+-- Every fragment is a pure expression with no SELECT of its own: sql/08_traversal.sql splices the
+-- text into query(), which in DuckDB 1.5.5 only accepts text from macros whose body has no
+-- SELECT or subquery.
+CREATE OR REPLACE MACRO tree_sql_subtree(a, b) AS
+  b || '._root = ' || a || '._root AND ' || b || '._pre BETWEEN ' || a || '._pre + 1 AND ' || a || '._pre + ' || a || '._size';
+CREATE OR REPLACE MACRO tree_sql_children(a, b) AS
+  b || '._root = ' || a || '._root AND ' || b || '._parent = ' || a || '._pre';
+CREATE OR REPLACE MACRO tree_sql_parent(a, b) AS
+  b || '._root = ' || a || '._root AND ' || b || '._pre = ' || a || '._parent';
+-- Ancestors are the subtree relation read backwards: b contains a. No recursion (I1).
+CREATE OR REPLACE MACRO tree_sql_ancestors(a, b) AS tree_sql_subtree(b, a);
+-- IS NOT DISTINCT FROM, not =: the level-0 rows of a partition all have a NULL parent
+-- and are siblings of each other, which = would silently deny.
+CREATE OR REPLACE MACRO tree_sql_siblings(a, b) AS
+  b || '._root = ' || a || '._root AND ' || b || '._parent IS NOT DISTINCT FROM ' || a || '._parent AND ' || b || '._pre <> ' || a || '._pre';
+-- Sibling relations see element rows only (spec D-N18), so the target row carries '_element'
+-- unconditionally. On a tree with no ELEMENT declared _element is true on every row, so the
+-- extra conjunct costs nothing and the text is still right.
+CREATE OR REPLACE MACRO tree_sql_after(a, b) AS
+  tree_sql_siblings(a, b) || ' AND ' || b || '._pre > ' || a || '._pre AND ' || b || '._element';
+CREATE OR REPLACE MACRO tree_sql_before(a, b) AS
+  tree_sql_siblings(a, b) || ' AND ' || b || '._pre < ' || a || '._pre AND ' || b || '._element';
+CREATE OR REPLACE MACRO tree_sql_next_sibling(a, b, p, elem) AS
+  CASE WHEN elem THEN tree_sql_after(a, b) || ' AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c')
+                        || ' AND __c._pre > ' || a || '._pre AND __c._pre < ' || b || '._pre AND __c._element)'
+       ELSE tree_sql_siblings(a, b) || ' AND ' || b || '._pre = ' || a || '._pre + ' || a || '._size + 1' END;
+CREATE OR REPLACE MACRO tree_sql_prev_sibling(a, b, p, elem) AS
+  CASE WHEN elem THEN tree_sql_before(a, b) || ' AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c')
+                        || ' AND __c._pre < ' || a || '._pre AND __c._pre > ' || b || '._pre AND __c._element)'
+       ELSE tree_sql_siblings(a, b) || ' AND ' || a || '._pre = ' || b || '._pre + ' || b || '._size + 1' END;
+-- Positional fragments constrain the row a alone: combine with tree_sql_children to anchor it.
+CREATE OR REPLACE MACRO tree_sql_first_child(a, p, elem) AS
+  CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre < ' || a || '._pre AND __c._element)'
+       ELSE a || '._pre = ' || a || '._parent + 1' END;
+CREATE OR REPLACE MACRO tree_sql_last_child(a, p, elem) AS
+  CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre AND __c._element)'
+       ELSE 'NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre)' END;
+-- The root test. Named tree_sql_is_root, not tree_sql_root as the M2 design table has it:
+-- sql/02_projection.sql already owns tree_sql_root(root_csv, qual) (the ROOT key expression),
+-- and CREATE OR REPLACE MACRO on a different arity drops the existing overload rather than
+-- adding to it, so the one-argument spelling would silently break every projection compile.
+CREATE OR REPLACE MACRO tree_sql_is_root(a) AS a || '._level = 0';
+
+-- Combinator between the previous step alias a and this step alias b. MN14 mutates
+-- tree_sql_subtree/tree_sql_children to drop the root equality.
+CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
   CASE op
-    WHEN 'desc'  THEN b || '._root = ' || a || '._root AND ' || b || '._pre BETWEEN ' || a || '._pre + 1 AND ' || a || '._pre + ' || a || '._size'
-    WHEN 'child' THEN b || '._root = ' || a || '._root AND ' || b || '._parent = ' || a || '._pre'
-    -- IS NOT DISTINCT FROM, not =: the level-0 rows of a partition all have a NULL parent
-    -- and are siblings of each other, which = would silently deny (as tree_next_sibling knows)
-    WHEN 'next'  THEN b || '._root = ' || a || '._root AND ' || b || '._parent IS NOT DISTINCT FROM ' || a || '._parent AND ' || b || '._pre = ' || a || '._pre + ' || a || '._size + 1'
-    WHEN 'after' THEN b || '._root = ' || a || '._root AND ' || b || '._parent IS NOT DISTINCT FROM ' || a || '._parent AND ' || b || '._pre > ' || a || '._pre'
+    WHEN 'desc'  THEN tree_sql_subtree(a, b)
+    WHEN 'child' THEN tree_sql_children(a, b)
+    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
+    WHEN 'after' THEN tree_sql_after(a, b)
     ELSE error('tree_match: unknown combinator ' || op) END;
 
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
@@ -34,7 +80,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias) AS
 CREATE OR REPLACE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS (
 WITH t AS (
   SELECT tr.profile, tr.has_semantic OR semantic IS NOT NULL AS has_semantic,
-         (SELECT list(name) FROM tree_catalog.pseudo_classes p WHERE p.database_name = current_database() AND p.schema_name = sch AND p.tree_name = nm) AS known_pseudos
+         (SELECT list(name) FROM tree_catalog.pseudo_classes p WHERE p.database_name = current_database() AND p.schema_name = sch AND p.tree_name = nm) AS known_pseudos,
+         -- whether any row can be a non-element: only then must the sibling fragments scan for
+         -- the nearest element neighbour instead of using the O(1) pre/size form
+         EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND s.slot = 'ELEMENT')
+           OR (semantic).element IS NOT NULL AS has_element
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
 chk AS (SELECT CASE
   WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found')
@@ -75,7 +125,7 @@ steps AS (
 chain AS (
   SELECT string_agg(
            CASE WHEN rn = 1 THEN (SELECT p FROM proj) || ' ' || alias
-                ELSE 'JOIN ' || (SELECT p FROM proj) || ' ' || alias || ' ON ' || tree_sql_comb(op, prev_alias, alias) || ' AND (' || pred || ')' END,
+                ELSE 'JOIN ' || (SELECT p FROM proj) || ' ' || alias || ' ON ' || tree_sql_comb(op, prev_alias, alias, (SELECT p FROM proj), (SELECT has_element FROM t)) || ' AND (' || pred || ')' END,
            ' ' ORDER BY node_id) AS from_sql,
          max(CASE WHEN rn = 1 THEN pred END) AS first_pred,
          max(CASE WHEN rn = n_steps THEN alias END) AS subject,

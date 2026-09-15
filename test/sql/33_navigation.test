@@ -1,0 +1,57 @@
+# name: test/sql/33_navigation.test
+# description: one fragment per relation; element rows govern sibling and positional relations
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# reverse axes agree with the forward ones
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_parent('main', 'app', '{''file_path'': app.py}', 18);
+----
+[16]
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_siblings('main', 'app', '{''file_path'': app.py}', 8);
+----
+[7, 9, 13, 14]
+
+query I
+SELECT _pre FROM tree_prev_sibling('main', 'app', '{''file_path'': app.py}', 30);
+----
+6
+
+query I
+SELECT _pre FROM tree_last_child('main', 'app', '{''file_path'': app.py}', 6);
+----
+14
+
+query I
+SELECT list(_pre ORDER BY _pre) FROM tree_ancestors('main', 'app', '{''file_path'': app.py}', 18);
+----
+[0, 6, 14, 15, 16]
+
+# element rows: the predicate admits named nodes and keyword tokens ('def', 'return'),
+# so only the punctuation tokens -- '(' ')' ':' '{' '}' '.' -- are invisible
+statement ok
+CALL tree_ddl_create('main', 'elem', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type', element := 'regexp_matches(type, ''^[a-z_]'')')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# node 9 is `parameters` = ( name ): its element children are just the identifier at 11,
+# so first and last child coincide
+query II
+SELECT (SELECT _pre FROM tree_first_child('main', 'elem', '{''file_path'': app.py}', 9)), (SELECT _pre FROM tree_last_child('main', 'elem', '{''file_path'': app.py}', 9));
+----
+11	11
+
+# without an element predicate the first child of node 9 is the '(' token
+query I
+SELECT _pre FROM tree_first_child('main', 'app', '{''file_path'': app.py}', 9);
+----
+10
+
+# next sibling skips the ':' token between the parameters list and the block under the element predicate
+query II
+SELECT (SELECT _pre FROM tree_next_sibling('main', 'elem', '{''file_path'': app.py}', 9)), (SELECT _pre FROM tree_next_sibling('main', 'app', '{''file_path'': app.py}', 9));
+----
+14	13

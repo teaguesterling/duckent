@@ -3,19 +3,23 @@
 -- compile to a comparison that never raises (they still combine into a predicate,
 -- just not a useful one), and the refusal branch in tree_compile_match is removed
 -- so the compiler never objects to using them on a sibling-free tree.
-CREATE OR REPLACE MACRO tree_sql_comb(op, a, b) AS
+CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
   CASE op
-    WHEN 'desc'  THEN b || '._root = ' || a || '._root AND ' || b || '._pre BETWEEN ' || a || '._pre + 1 AND ' || a || '._pre + ' || a || '._size'
-    WHEN 'child' THEN b || '._root = ' || a || '._root AND ' || b || '._parent = ' || a || '._pre'
+    WHEN 'desc'  THEN tree_sql_subtree(a, b)
+    WHEN 'child' THEN tree_sql_children(a, b)
     ELSE 'false' END;
 
 -- Copied from sql/07_match.sql with the
 --   WHEN kind = 'step' AND op IN ('next', 'after') AND (SELECT profile FROM t) = 'sibling_free' ...
--- refusal branch removed from the n CTE's CASE.
+-- refusal branch removed from the n CTE's CASE, and that CTE's comment trimmed to match.
 CREATE OR REPLACE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS (
 WITH t AS (
   SELECT tr.profile, tr.has_semantic OR semantic IS NOT NULL AS has_semantic,
-         (SELECT list(name) FROM tree_catalog.pseudo_classes p WHERE p.database_name = current_database() AND p.schema_name = sch AND p.tree_name = nm) AS known_pseudos
+         (SELECT list(name) FROM tree_catalog.pseudo_classes p WHERE p.database_name = current_database() AND p.schema_name = sch AND p.tree_name = nm) AS known_pseudos,
+         -- whether any row can be a non-element: only then must the sibling fragments scan for
+         -- the nearest element neighbour instead of using the O(1) pre/size form
+         EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND s.slot = 'ELEMENT')
+           OR (semantic).element IS NOT NULL AS has_element
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm),
 chk AS (SELECT CASE
   WHEN (SELECT count(*) FROM t) = 0 THEN error('tree_match: tree ' || sch || '.' || nm || ' not found')
@@ -54,7 +58,7 @@ steps AS (
 chain AS (
   SELECT string_agg(
            CASE WHEN rn = 1 THEN (SELECT p FROM proj) || ' ' || alias
-                ELSE 'JOIN ' || (SELECT p FROM proj) || ' ' || alias || ' ON ' || tree_sql_comb(op, prev_alias, alias) || ' AND (' || pred || ')' END,
+                ELSE 'JOIN ' || (SELECT p FROM proj) || ' ' || alias || ' ON ' || tree_sql_comb(op, prev_alias, alias, (SELECT p FROM proj), (SELECT has_element FROM t)) || ' AND (' || pred || ')' END,
            ' ' ORDER BY node_id) AS from_sql,
          max(CASE WHEN rn = 1 THEN pred END) AS first_pred,
          max(CASE WHEN rn = n_steps THEN alias END) AS subject,
