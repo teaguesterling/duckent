@@ -235,6 +235,27 @@ SELECT count(*) FROM tree_match('main', 'kid', tree_steps([{id: 'greet(name).upp
 ----
 1
 
+# the converse: an S-less parent stays S-less through LIKE. Every tree stores an S/ATTR slot
+# ('' for a closed abstract, '*' for an open concrete one), so the merged shape of any LIKE
+# child has a non-NULL semantic.attr -- counting ATTR as an S declaration would make every
+# child S-ful and silently open the S-clause back door tree_match is supposed to refuse.
+statement ok
+CALL tree_ddl_create('main', 'sless', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), abstract := true));
+
+statement ok
+CALL tree_ddl_create('main', 'kid2', tree_spec(tree_shape(), "like" := 'sless', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'sless'),
+       (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'kid2');
+----
+false	false
+
+statement error
+SELECT count(*) FROM tree_match('main', 'kid2', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
 # parent basis, sibling-free profile recorded
 statement ok
 CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));

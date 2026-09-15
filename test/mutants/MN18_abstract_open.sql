@@ -35,12 +35,15 @@ derived AS (
     -- A LIKE child has an S group when it declares one or when its parent has one, whatever
     -- slot the parent filled: reading the parent's TYPE alone made an ID-only parent invisible.
     -- Every S slot counts: ELEMENT, ATTR MAP and PSEUDO are S declarations as much as TYPE is.
-    -- The first term (this create declared some S group at all) already covers them, so the
-    -- per-slot terms are deliberately redundant: they state the rule against the merged shape,
-    -- so a slot added later cannot be silently missed here.
+    -- ATTR is the one exception and must not appear below: every tree stores an S/ATTR slot
+    -- ('' closed, '*' open), so tree_shape_from_catalog gives every LIKE child a non-NULL
+    -- semantic.attr, and counting it would make every child S-ful -- opening the S-clause back
+    -- door tree_match refuses on an S-less tree. The per-slot terms are otherwise redundant
+    -- (a locally declared group is caught by the first term, an inherited one by the last), and
+    -- are spelled out so that a slot added later is not silently missed here.
     (spec).shape.semantic IS NOT NULL
       OR (shape).semantic.type IS NOT NULL OR (shape).semantic.id IS NOT NULL OR (shape).semantic.classes IS NOT NULL
-      OR (shape).semantic.attr IS NOT NULL OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
+      OR (shape).semantic.attr_map IS NOT NULL OR (shape).semantic.element IS NOT NULL
       OR len(COALESCE((shape).semantic.pseudo, [])) > 0
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
@@ -90,13 +93,7 @@ built AS (
      || tree_sql_lit(storage) || ', ' || tree_sql_lit(order_source) || ', ' || has_semantic || ', NULL)' AS s_trees,
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
-   CASE WHEN len(COALESCE((shape).semantic.pseudo, [])) = 0 THEN NULL ELSE
-   -- kind and origin record how the (already expanded) body was bound: macro when a macro name
-   -- was named, prefix when the entry came from a prefix binding rather than this declaration.
-   'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform((shape).semantic.pseudo, lambda x:
-       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', '
-       || CASE WHEN (x).macro IS NULL THEN '''expression''' ELSE '''macro''' END || ', ' || tree_sql_lit((x).body) || ', '
-       || CASE WHEN (x).prefix IS NULL THEN '''local''' ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END AS s_pseudo,
+   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo) AS s_pseudo,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
