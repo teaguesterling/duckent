@@ -1,0 +1,117 @@
+# name: test/sql/34_groups.test
+# description: HAS/NOT groups in the IR, constructor and printer
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{type: 'string'}]}]), recursive := true));
+----
+0	NULL	selector	NULL
+1	0	step	NULL
+2	1	type	fn
+3	1	not	NULL
+4	3	step	desc
+5	4	type	string
+
+# the first inner step hangs off the group node (not off the outer step) and its op is never
+# NULL: with no combinator given it is desc, so the compiler always reads a combinator there
+query III
+WITH ir AS (SELECT unnest(tree_steps([{type: 'fn', "not": [{type: 'string'}]}]), recursive := true))
+SELECT g.node_id, s.parent_id, s.op FROM ir s, ir g WHERE g.kind IN ('has', 'not') AND s.kind = 'step' AND s.parent_id = g.node_id;
+----
+3	3	desc
+
+# a combinator on the first inner step is kept, it is only the default that is desc
+query III
+WITH ir AS (SELECT unnest(tree_steps([{type: 'fn', has: [{comb: 'child', type: 'block'}]}]), recursive := true))
+SELECT g.kind, s.parent_id, s.op FROM ir s, ir g WHERE g.kind IN ('has', 'not') AND s.kind = 'step' AND s.parent_id = g.node_id;
+----
+has	3	child
+
+query I
+SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{pseudo: 'docblock'}]}]));
+----
+(CLASS 'fn', NOT ( DESCENDANT (PSEUDO 'docblock') ))
+
+# three literal levels: step -> group -> step -> group -> step. The printer's newlines are
+# folded to " | " the way 30_selector.test folds them, so each step stays one record line.
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{comb: 'child', type: 'block', has: [{type: 'string'}]}]}, {comb: 'child', type: 'identifier'}])), chr(10), ' | ');
+----
+(TYPE 'fn', HAS ( CHILD (TYPE 'block', HAS ( DESCENDANT (TYPE 'string') )) )) | CHILD (TYPE 'identifier')
+
+# a group's inner chain is joined by single spaces, not by the newline the outer chain uses
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}, {comb: 'child', type: 'string'}]}]));
+----
+(TYPE 'fn', HAS ( DESCENDANT (TYPE 'block') CHILD (TYPE 'string') ))
+
+# a group renders after the step's own clauses, and a second group after the first
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}], "not": [{comb: 'child', type: 'string'}]}]));
+----
+(TYPE 'fn', HAS ( DESCENDANT (TYPE 'block') ), NOT ( CHILD (TYPE 'string') ))
+
+# a group spliced onto a built selector
+query I
+SELECT tree_selector_to_treeql(tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'not', tree_steps([{type: 'string'}])));
+----
+(TYPE 'fn', NOT ( DESCENDANT (TYPE 'string') )) AS f
+
+# the splice renumbers the inner rows after the outer chain and re-parents the inner chain's
+# top-level steps onto the group node
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'block'}, {comb: 'child', type: 'string'}])), recursive := true));
+----
+0	NULL	selector	NULL
+1	0	step	f
+2	1	type	fn
+3	1	has	NULL
+4	3	step	desc
+5	4	type	block
+6	3	step	child
+7	6	type	string
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', "as": 'b'}]}]);
+----
+no row to bind
+
+# ... at any depth
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', "not": [{type: 'x', "as": 'b'}]}]}]);
+----
+no row to bind
+
+# the unknown-field guard reaches inside groups too: the cast to the fixed step shape drops
+# an unknown field at every level, not just the outer one
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', typo: 'y'}]}]);
+----
+unknown step field typo
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{"not": [{type: 'x', typo: 'y'}]}]}]);
+----
+unknown step field typo
+
+# an inner step of nothing but an unknown field shares no member with the fixed step shape, so
+# DuckDB refuses the cast itself before the guard's CASE runs -- it still refuses, just in its
+# own words, so this only pins that it is not silently accepted
+statement error
+SELECT tree_steps([{type: 'fn', has: [{typo: 'y'}]}]);
+----
+
+# an ATTR clause inside a group is parsed by the same regex, and refuses the same way
+statement error
+SELECT tree_steps([{type: 'fn', has: [{attr: 'start_line IN (1,2)'}]}]);
+----
+cannot parse ATTR clause
+
+query III
+SELECT value, op, arg FROM (SELECT unnest(tree_steps([{type: 'fn', has: [{attr: 'start_line > 100'}]}]), recursive := true)) WHERE kind = 'attr';
+----
+start_line	>	100
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'g', 'not', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: no step aliased g

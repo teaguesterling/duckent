@@ -13,6 +13,20 @@ CREATE TYPE TREE_SPEC AS STRUCT(shape TREE_SHAPE, abstract BOOLEAN, "like" VARCH
 CREATE TYPE TREE_SELECTOR AS STRUCT(
   node_id INTEGER, parent_id INTEGER, kind VARCHAR, value VARCHAR, op VARCHAR, arg VARCHAR, alias VARCHAR)[];
 
+-- The fixed step shapes tree_steps casts its argument to, so that a field a step omits reads as
+-- NULL. A step's has/not holds a nested step list, so there is one shape per literal nesting
+-- level: an L0 step has no groups, an L1 step's groups hold L0 steps, an L2 step's groups hold
+-- L1 steps. tree_steps takes L2, which is the three-literal-level ceiling
+-- (step -> group -> step -> group -> step).
+CREATE TYPE TREE_STEP_L0 AS STRUCT(
+  comb VARCHAR, type VARCHAR, id VARCHAR, class VARCHAR, attr VARCHAR, pseudo VARCHAR, "where" VARCHAR, "as" VARCHAR);
+CREATE TYPE TREE_STEP_L1 AS STRUCT(
+  comb VARCHAR, type VARCHAR, id VARCHAR, class VARCHAR, attr VARCHAR, pseudo VARCHAR, "where" VARCHAR, "as" VARCHAR,
+  has TREE_STEP_L0[], "not" TREE_STEP_L0[]);
+CREATE TYPE TREE_STEP_L2 AS STRUCT(
+  comb VARCHAR, type VARCHAR, id VARCHAR, class VARCHAR, attr VARCHAR, pseudo VARCHAR, "where" VARCHAR, "as" VARCHAR,
+  has TREE_STEP_L1[], "not" TREE_STEP_L1[]);
+
 -- pseudo: a list of any of {name, body} | {name, macro, args} | {prefix, args}; pseudo_map: MAP of name -> macro
 -- with pseudo_args shared by every entry; the constructor flattens the map into the list.
 CREATE OR REPLACE MACRO tree_semantic(type := NULL, id := NULL, classes := NULL, attr := NULL, attr_map := NULL, element := NULL,
