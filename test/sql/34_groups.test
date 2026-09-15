@@ -11,6 +11,32 @@ SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_st
 4	3	step	desc
 5	4	type	string
 
+# Node ids are depth-first: a group node is followed by EVERY row of its inner chain, nested
+# groups included, before the step's next group or the chain's next step. Here step 1's group (3)
+# owns steps 4..8 -- including step 4's own nested group (6) -- and only then does step 'b' (9)
+# begin. A breadth-first numbering would put step 9's group before node 4's nested group, and the
+# css lowering and the runner's recursive-descent parser both number depth-first, so the row lists
+# of the differentials would not line up. Ordered, not rowsorted: the order IS the assertion.
+query IIII
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([
+  {type: 'a', has: [{type: 'x', has: [{type: 'y'}]}]},
+  {type: 'b', has: [{type: 'z'}]}]), recursive := true)) ORDER BY node_id;
+----
+0	NULL	selector	NULL
+1	0	step	NULL
+2	1	type	a
+3	1	has	NULL
+4	3	step	desc
+5	4	type	x
+6	4	has	NULL
+7	6	step	desc
+8	7	type	y
+9	0	step	desc
+10	9	type	b
+11	9	has	NULL
+12	11	step	desc
+13	12	type	z
+
 # the first inner step hangs off the group node (not off the outer step) and its op is never
 # NULL: with no combinator given it is desc, so the compiler always reads a combinator there
 query III
@@ -95,10 +121,34 @@ unknown step field typo
 
 # an inner step of nothing but an unknown field shares no member with the fixed step shape, so
 # DuckDB refuses the cast itself before the guard's CASE runs -- it still refuses, just in its
-# own words, so this only pins that it is not silently accepted
+# own words, which is what this pins
 statement error
 SELECT tree_steps([{type: 'fn', has: [{typo: 'y'}]}]);
 ----
+at least one matching member
+
+# the ceiling is 2 group levels, so a group on a step at the third level would make a fourth
+# level of steps. The cast has nowhere to put it, so it is refused rather than dropped.
+statement error
+SELECT tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c', has: [{type: 'd'}]}]}]}]);
+----
+groups nested deeper than 2 levels are not supported
+
+statement error
+SELECT tree_steps([{type: 'a', "not": [{type: 'b', "not": [{type: 'c', "not": [{type: 'd'}]}]}]}]);
+----
+groups nested deeper than 2 levels are not supported
+
+# a group with no steps tests nothing, and would leave a node the printer has no text for
+statement error
+SELECT tree_steps([{type: 'fn', has: []}]);
+----
+empty HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', "not": []}]);
+----
+empty HAS/NOT group
 
 # an ATTR clause inside a group is parsed by the same regex, and refuses the same way
 statement error
@@ -115,3 +165,74 @@ statement error
 SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'g', 'not', tree_steps([{type: 'string'}]));
 ----
 tree_steps_group: no step aliased g
+
+# a NULL alias matches no step either, and must refuse rather than return NULL
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), NULL, 'not', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: no step aliased NULL
+
+# only has and not are group kinds: anything else would build a node no consumer understands
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'maybe', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: kind must be has or not
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', NULL, tree_steps([{type: 'string'}]));
+----
+tree_steps_group: kind must be has or not
+
+# a capture inside the spliced selector has no row to bind, exactly as inside a written group
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'string', "as": 'g'}]));
+----
+capture inside HAS/NOT has no row to bind
+
+# an inner selector with no steps is the spliced form of an empty group
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([]));
+----
+tree_steps_group: inner selector has no steps
+
+# the splice adds a group level, so an inner selector may itself nest one level and no more
+query I
+SELECT tree_selector_to_treeql(tree_steps_group(tree_steps([{type: 'a', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'b', has: [{type: 'c'}]}])));
+----
+(TYPE 'a', HAS ( DESCENDANT (TYPE 'b', HAS ( DESCENDANT (TYPE 'c') )) )) AS f
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'a', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'b', has: [{type: 'c', has: [{type: 'd'}]}]}]));
+----
+tree_steps_group: groups nested deeper than 2 levels are not supported
+
+# The printer unrolls one pass per group level, so a selector nesting deeper than the ceiling --
+# which no constructor here will build, hence the literal IR -- must refuse rather than quietly
+# drop its innermost groups.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 5, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: groups nested deeper than 2 levels are not supported
+
+# a node kind the printer does not know would render as nothing, silently dropping a clause
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'bogus', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: unknown node kind bogus
+
+# exactly at the ceiling still prints
+query I
+SELECT tree_selector_group_depth(tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c'}]}]}]));
+----
+2
