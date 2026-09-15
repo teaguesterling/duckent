@@ -2,6 +2,59 @@
 
 What first contact showed. Newest first. Every oracle divergence gets an entry with adjudication before any test changes.
 
+## D-N17 list-space spike
+
+`test/spike_listspace.py` (2026-09-15, DuckDB 1.5.5, one machine, best of three runs after a
+warm-up). Two forms of the flagship pair `.fn:has(string)` and `.fn:not(:has(string))`: (a) what
+`tree_compile_match` emits today, `[NOT] EXISTS (SELECT 1 FROM P h1 WHERE <subtree> AND …)`,
+compiled through the real compiler on a tree declared exactly like the corpus trees and executed;
+(b) a hand-written list-space form — `list(_pre)` of each node's subtree materialized by a
+self-join and `GROUP BY`, tested with `list_has_any` against the root's list of `string` nodes.
+Inputs: `scripts.parquet` (14,265 rows, 15 roots) and ten copies of it with distinct roots
+(`file_path || '#' || i`; 142,650 rows, 150 roots). Both trees declare `SIZE`.
+
+| input | selector | EXISTS | list-space | ratio | same answer |
+|---|---|---|---|---|---|
+| scripts | `.fn:has(string)` | 0.004 s | 0.059 s | 0.08× | yes (38 rows) |
+| scripts | `.fn:not(:has(string))` | 0.004 s | 0.061 s | 0.07× | yes (1 row) |
+| scripts10 | `.fn:has(string)` | 0.010 s | 0.530 s | 0.02× | yes (380 rows) |
+| scripts10 | `.fn:not(:has(string))` | 0.008 s | 0.510 s | 0.02× | yes (10 rows) |
+
+Row counts and key hashes (`md5` over the sorted `file_path:node_id` list) are equal in every
+cell, so the two forms are the same query, not two different questions.
+
+**Decision: keep `EXISTS`. D-N17 is closed against list-space.** The rule set in advance was
+"adopt unless list-space wins by 3× on the larger input"; it loses by 50× to 60× there, and the
+gap *widens* with size (0.08× at 14k rows, 0.02× at 143k). The reason is structural, not a
+tuning detail: DuckDB turns `EXISTS` into a semi-join, which stops at the first match and
+materializes nothing, while the list-space form must build every node's subtree list first —
+a self-join whose output is the sum of all subtree sizes, which is O(n · depth) rows for a tree
+that `EXISTS` never has to visit. The list form pays for all subtrees to answer about a few.
+
+Two things the spike settled along the way, both worth carrying:
+
+- **The brief's sketch of the list-space form is cross-root-unsound.** Taking the string-node
+  list as `(SELECT list(_pre) FROM P WHERE _type = 'string')` is sitting_duck #130 in list form:
+  `_pre` is unique only within a root, so a global list answers `:has(string)` with a string in
+  another file. The measured form groups both lists by `_root`, because any honest list-space
+  implementation has to.
+- **Derived `_size` did not dominate these timings, and the reason matters for M3.** The
+  quadratic is *within a root*, and `scripts10` multiplies the number of roots, not their size,
+  so it never reaches the quadratic term:
+
+  | input | rows | rows/root | declared SIZE | derived `_size` | ratio |
+  |---|---|---|---|---|---|
+  | scripts | 14,265 | ~951 | 0.045 s | 0.167 s | 3.7× |
+  | scripts10 | 142,650 | ~951 | 0.306 s | 0.793 s | 2.6× |
+  | scripts_deep | 142,650 | ~9,510 | 0.280 s | 3.644 s | 13.0× |
+
+  `scripts_deep` is the same 142,650 rows under the original 15 roots (a cost probe, not a
+  well-formed forest — it is never created as a tree, only its projection text is timed). Ten
+  times the rows *per root* costs 4.6× the derived time while the declared time is flat. That
+  is the M3 case in one line: the O(n²) derivation is invisible on a forest of small files and
+  is the whole cost on one big one, which is exactly the shape a whole-repository parse has.
+  No timeout guard fired; nothing had to be skipped.
+
 ## M2 differential adjudications
 
 The corpus import (`test/import_astcss_eval.py`) runs all 108 accepted astcss-eval pairs against
