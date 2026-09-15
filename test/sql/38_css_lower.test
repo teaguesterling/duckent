@@ -1,0 +1,445 @@
+# name: test/sql/38_css_lower.test
+# description: tree_css_lower folds tree-sitter-css parse rows to the same IR the runner
+# parser (test/css_parser.py) builds -- the differential that binds the two front-ends
+#
+# Every `= [...]::TREE_SELECTOR` literal below was GENERATED from the runner parser, not
+# written by hand, with
+#
+#   python3 -c "import sys; sys.path.insert(0,'test'); import css_parser; \
+#               print(css_parser.to_sql(css_parser.parse('<css>')))"
+#
+# and pasted verbatim. So a mismatch is a real disagreement between the two parsers, never a
+# typo in an expectation. The TREEQL block after each one prints the same rows through
+# tree_selector_to_treeql, which is what gives a legible diff when they do disagree.
+
+require sitting_duck
+
+statement ok
+LOAD sitting_duck;
+
+# ---------------------------------------------------------------------------------------
+# Parity: the IR rows themselves -- same node ids, parents, kinds, values, ops, args, aliases
+# ---------------------------------------------------------------------------------------
+
+query I
+SELECT tree_parse_css('.fn') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn#greet') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'id', value: 'greet', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('function_definition > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn:not(:has(string))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn:not(.method)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'method', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn:has(> block)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('a > b c') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'b', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 0, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 6, parent_id: 5, kind: 'type', value: 'c', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn[name^="sh"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''sh%''', alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('"select" > "from"') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'select', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'from', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn@f > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 'f'}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('block > expression_statement:first-child') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'expression_statement', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 3, kind: 'pseudo', value: 'first-child', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_parse_css('.fn:not(.a:has(.b))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 8, parent_id: 7, kind: 'class', value: 'b', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+# ---------------------------------------------------------------------------------------
+# The same twelve printed as TREEQL: the legible half of the differential
+# ---------------------------------------------------------------------------------------
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn'));
+----
+(CLASS 'fn')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn#greet'));
+----
+(ID 'greet', CLASS 'fn')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('function_definition > block')), chr(10), ' | ');
+----
+(TYPE 'function_definition') | CHILD (TYPE 'block')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:not(:has(string))'));
+----
+(CLASS 'fn', NOT ( DESCENDANT (TYPE 'string') ))
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:not(.method)'));
+----
+(CLASS 'fn', NOT ( SELF (CLASS 'method') ))
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:has(> block)'));
+----
+(CLASS 'fn', HAS ( CHILD (TYPE 'block') ))
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a > b c')), chr(10), ' | ');
+----
+(TYPE 'a') | CHILD (TYPE 'b') | DESCENDANT (TYPE 'c')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn[name^="sh"]'));
+----
+(CLASS 'fn', ATTR name LIKE 'sh%')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('"select" > "from"')), chr(10), ' | ');
+----
+(TYPE 'select') | CHILD (TYPE 'from')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('.fn@f > block')), chr(10), ' | ');
+----
+(CLASS 'fn') AS f | CHILD (TYPE 'block')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('block > expression_statement:first-child')), chr(10), ' | ');
+----
+(TYPE 'block') | CHILD (TYPE 'expression_statement', PSEUDO 'first-child')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:not(.a:has(.b))'));
+----
+(CLASS 'fn', NOT ( SELF (CLASS 'a', HAS ( DESCENDANT (CLASS 'b') )) ))
+
+# ---------------------------------------------------------------------------------------
+# tree_css_lower takes the parse rows directly: tree_parse_css is only the sitting_duck call
+# in front of it, so the fold can be exercised on rows from anywhere
+# ---------------------------------------------------------------------------------------
+
+query I
+SELECT tree_selector_to_treeql(tree_css_lower(
+  (SELECT list({node_id: node_id, parent_id: parent_id, type: type, name: name} ORDER BY node_id)
+   FROM parse_ast_list_table('.fn:has(string)', 'css'))));
+----
+(CLASS 'fn', HAS ( DESCENDANT (TYPE 'string') ))
+
+# ---------------------------------------------------------------------------------------
+# Attribute rendering: the same SQL op/arg text the runner emits (test_css_parser.py's
+# test_attribute_values), read off the tree-sitter value node's type rather than a token kind
+# ---------------------------------------------------------------------------------------
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[name="main"]'));
+----
+(ATTR name = 'main')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[kind=block]'));
+----
+(ATTR kind = 'block')
+
+# unquoted: a number, so an ATTR MAP lookup is cast to its type before comparing
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[n=100]'));
+----
+(ATTR n = 100)
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[n="100"]'));
+----
+(ATTR n = '100')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[name$="sh"]'));
+----
+(ATTR name LIKE '%sh')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[name*="sh"]'));
+----
+(ATTR name LIKE '%sh%')
+
+# an embedded quote is doubled, exactly as the runner's sql_str does it
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[name="it''s"]'));
+----
+(ATTR name = 'it''s')
+
+# ---------------------------------------------------------------------------------------
+# Clause slot order and written order, the two rules that make the row lists line up
+# ---------------------------------------------------------------------------------------
+
+# slot order (type, id, class, attr, pseudo) whatever the writing order
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('#greet.fn'));
+----
+(ID 'greet', CLASS 'fn')
+
+# ... but two clauses of one kind, which no tree_steps literal can express, keep the order
+# they were written in
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.b.a'));
+----
+(CLASS 'b', CLASS 'a')
+
+# groups come after every clause of their compound, in written order
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('x:has(y).fn#i'));
+----
+(TYPE 'x', ID 'i', CLASS 'fn', HAS ( DESCENDANT (TYPE 'y') ))
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('"select"#main.fn[name^="sh"]:first-child@s'));
+----
+(TYPE 'select', ID 'main', CLASS 'fn', ATTR name LIKE 'sh%', PSEUDO 'first-child') AS s
+
+# an argument-less unknown pseudo is not a parse error: the match compiler counts it
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('.fn:nope'));
+----
+(CLASS 'fn', PSEUDO 'nope')
+
+# the remaining combinators
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a + b ~ c')), chr(10), ' | ');
+----
+(TYPE 'a') | SIBLING (TYPE 'b') | FOLLOWING (TYPE 'c')
+
+# a group written inside a :not() compound: two group levels, which is the ceiling
+query I
+SELECT tree_selector_to_treeql(tree_parse_css(':not(.fn:has(string))'));
+----
+(NOT ( SELF (CLASS 'fn', HAS ( DESCENDANT (TYPE 'string') )) ))
+
+# ---------------------------------------------------------------------------------------
+# Refusals: the same substrings the runner parser refuses with (test_css_parser.py's
+# TestRefusals), so a caller cannot tell the two front-ends apart by their complaints
+# ---------------------------------------------------------------------------------------
+
+statement error
+SELECT tree_parse_css('.fn[WHERE x > 2]');
+----
+css has no host escape: mint a PSEUDO, or MATCH USING TREEQL
+
+statement error
+SELECT tree_parse_css('[WHERE x = 2]');
+----
+css has no host escape: mint a PSEUDO, or MATCH USING TREEQL
+
+statement error
+SELECT tree_parse_css('.fn[WHERE="x"]');
+----
+css has no host escape: mint a PSEUDO, or MATCH USING TREEQL
+
+statement error
+SELECT tree_parse_css('.fn[name="main"');
+----
+unclosed
+
+statement error
+SELECT tree_parse_css('.fn:has(block');
+----
+unclosed
+
+statement error
+SELECT tree_parse_css('.fn >> .call');
+----
+unexpected
+
+statement error
+SELECT tree_parse_css('.fn#main extra junk!!');
+----
+unexpected
+
+statement error
+SELECT tree_parse_css('');
+----
+unexpected
+
+statement error
+SELECT tree_parse_css(':nth-child(2)');
+----
+:nth-child() is not supported in v0
+
+statement error
+SELECT tree_parse_css('x:lang(en)');
+----
+:lang() is not supported in v0
+
+statement error
+SELECT tree_parse_css('.fn:not(a > b)');
+----
+:not() takes a compound selector in v0
+
+statement error
+SELECT tree_parse_css('.fn:not(block string)');
+----
+:not() takes a compound selector in v0
+
+statement error
+SELECT tree_parse_css('.fn:not(> block)');
+----
+:not() takes a compound selector in v0
+
+statement error
+SELECT tree_parse_css('.fn@a@b');
+----
+unexpected second capture
+
+statement error
+SELECT tree_parse_css('.fn:has(block@b)');
+----
+capture inside
+
+# a selector list is not v0 grammar
+statement error
+SELECT tree_parse_css('a, b');
+----
+unexpected
+
+# an attribute with no operator, and one with an operator v0 has no lowering for
+statement error
+SELECT tree_parse_css('[name]');
+----
+expected one of = ^= $= *=
+
+statement error
+SELECT tree_parse_css('[name~="x"]');
+----
+expected one of = ^= $= *=
+
+# quotes let a keyword be a type; they do not let anything else be one
+statement error
+SELECT tree_parse_css('"a b"');
+----
+expected a type name in quotes
+
+# a dangling combinator leaves nothing for the next compound
+statement error
+SELECT tree_parse_css('a >');
+----
+unexpected
+
+# ---------------------------------------------------------------------------------------
+# The one construct tree-sitter-css cannot be held to parity on: it has no `@`, so
+# tree_parse_css rewrites `@name` to a marker pseudo-class before parsing. A selector that
+# already spells that marker would be indistinguishable from a capture, so it is refused
+# rather than silently read as one.
+# ---------------------------------------------------------------------------------------
+
+statement error
+SELECT tree_parse_css('.fn:__cap_f');
+----
+:__cap_ is reserved
+
+# The rewrite is quote-aware: an `@` inside an attribute value is a character in the value, not
+# a capture, so only the segments OUTSIDE a string are rewritten -- in either quote
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('[name="@a@b"]@f'));
+----
+(ATTR name = '@a@b') AS f
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a[name="@d"] > b@z')), chr(10), ' | ');
+----
+(TYPE 'a', ATTR name = '@d') | CHILD (TYPE 'b') AS z
+
+query I
+SELECT tree_css_capture_markers('[name=''@d'']@f');
+----
+[name='@d']:__cap_f
+
+# ---------------------------------------------------------------------------------------
+# Where parity is NOT possible, pinned so that closing either gap shows up here as a change.
+# A 3026-selector differential against the runner parser (test/css_parser.py) found exactly
+# two families where the two front-ends disagree, both of them this one refusing what the
+# runner accepts -- and NO input the two accept and lower to different rows.
+#
+# 1. A compound beginning with a quoted type or a pseudo-class, after a whitespace (descendant)
+#    combinator. A bare space is the one combinator with no token of its own, so tree-sitter-css
+#    has nothing telling it the selector continues and reads the rest as css property syntax.
+#    Every explicit combinator is fine, and so is every other compound after a space.
+# ---------------------------------------------------------------------------------------
+
+statement error
+SELECT tree_parse_css('a :has(x)');
+----
+css:
+
+statement error
+SELECT tree_parse_css('a "select"');
+----
+css:
+
+statement error
+SELECT tree_parse_css('a :first-child');
+----
+css:
+
+# the same selectors with the combinator written out, which is the way to say this in v0
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a > :has(x)')), chr(10), ' | ');
+----
+(TYPE 'a') | CHILD (HAS ( DESCENDANT (TYPE 'x') ))
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a > "select"')), chr(10), ' | ');
+----
+(TYPE 'a') | CHILD (TYPE 'select')
+
+# ... and every other compound after a whitespace combinator does parse
+query I
+SELECT replace(tree_selector_to_treeql(tree_parse_css('a .c #i [n=1]')), chr(10), ' | ');
+----
+(TYPE 'a') | DESCENDANT (CLASS 'c') | DESCENDANT (ID 'i') | DESCENDANT (ATTR n = 1)
+
+# 2. Groups nested deeper than tree_group_depth_limit(). The runner builds the rows and leaves
+#    the refusal to the printer and the compiler; here the path carries one field pair per level,
+#    so a level past the limit would collide with the one below rather than overflow visibly.
+statement error
+SELECT tree_parse_css('a:has(b:has(c:has(d)))');
+----
+groups nested deeper than 2 levels are not supported
+
+# ---------------------------------------------------------------------------------------
+# tree_css_lower is a fold over rows, so it refuses a row list that is not a css parse
+# ---------------------------------------------------------------------------------------
+
+statement error
+SELECT tree_css_lower([{node_id: 0, parent_id: NULL, type: 'stylesheet', name: ''}, {node_id: 1, parent_id: 0, type: 'ERROR', name: 'x'}, {node_id: 2, parent_id: 1, type: 'keyframe_block', name: 'x'}]);
+----
+unexpected
