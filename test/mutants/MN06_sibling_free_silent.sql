@@ -7,6 +7,7 @@ CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
   CASE op
     WHEN 'desc'  THEN tree_sql_subtree(a, b)
     WHEN 'child' THEN tree_sql_children(a, b)
+    WHEN 'self'  THEN tree_sql_self(a, b)
     ELSE 'false' END;
 
 -- Copied from sql/07_match.sql with the

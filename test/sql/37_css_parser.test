@@ -90,15 +90,26 @@ SELECT replace((tree_explain('main', 'app', '"select" > "from"', language := 'cs
 # the parser builds the IR tree_steps builds for the equivalent selector literal, so the two
 # print as the same TREEQL -- combinators, group nesting and the group chain's leading
 # combinator included. This is the contract the corpus differential rests on.
+# `:not(:has(R))` is NOT ( SELF ( HAS ( R ) ) ), which canonicalizes to R anchored on the
+# subject: one group level, and the spec's flagship form.
 query I
 SELECT (tree_explain('main', 'app', '.fn:not(:has(string))', language := 'css')).treeql
-     = tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{has: [{type: 'string'}]}]}]));
+     = tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{type: 'string'}]}]));
 ----
 true
 
 query I
 SELECT (tree_explain('main', 'app', 'a > b c', language := 'css')).treeql
      = tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'child', type: 'b'}, {comb: 'desc', type: 'c'}]));
+----
+true
+
+# a compound's clauses are emitted in tree_steps' slot order (type, id, class, attr, pseudo),
+# not in written order, so a compound written either way numbers its rows the way the
+# constructor does and the two front-ends' row lists line up
+query I
+SELECT (tree_explain('main', 'app', '.fn#greet', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{class: 'fn', id: 'greet'}]));
 ----
 true
 
@@ -150,6 +161,83 @@ statement error
 SELECT (tree_explain('main', 'app', '.fn[WHERE 1]', language := 'css')).sql;
 ----
 css has no host escape
+
+statement error
+FROM tree_match('main', 'app', '.fn@a@b', language := 'css');
+----
+unexpected second capture
+
+statement error
+FROM tree_match('main', 'app', '.fn[name="sh]', language := 'css');
+----
+unclosed
+
+# v0 has no argument-taking pseudo-class other than :has and :not. An argument-less unknown
+# pseudo stays a clause (the match compiler counts it); an argument-taking one refuses, rather
+# than silently dropping the argument that carries its whole meaning
+statement error
+FROM tree_match('main', 'app', 'block > :nth-child(2)', language := 'css');
+----
+:nth-child() is not supported in v0
+
+# `:not()` negates the SUBJECT row, which is what the `self` relation is for: the group's inner
+# chain starts AT the step's own row instead of below it. app.parquet cannot tell the two apart
+# (its strings sit under a return or a call), so this fixture puts a `string` DIRECTLY under the
+# subject -- the case a descendant-anchored NOT gets wrong.
+statement ok
+CREATE TABLE direct AS FROM (VALUES
+  ('direct', 0, 0, 'fn', 'direct'), ('direct', 1, 1, 'string', ''),
+  ('clean', 0, 0, 'fn', 'clean'), ('clean', 1, 1, 'identifier', ''))
+  t(file, node_id, depth, type, name);
+
+statement ok
+CALL tree_ddl_create('main', 'd', tree_spec(
+  tree_shape(root := 'file', "order" := 'node_id', level := 'depth',
+             semantic := tree_semantic(type := 'type', id := 'name',
+                                       classes := 'CASE WHEN name = ''direct'' THEN [''m''] ELSE [] END')),
+  source := 'direct'));
+
+# anchored on a descendant, `direct` would be wrongly INCLUDED: that form looks for a descendant
+# which itself has a string below it, and this string's parent is the fn row itself
+query I
+FROM tree_match('main', 'd', 'fn:not(:has(string))', language := 'css') SELECT name;
+----
+clean
+
+# the general rule is self-negation: neither fn row IS a string, so both survive
+query I rowsort
+FROM tree_match('main', 'd', 'fn:not(string)', language := 'css') SELECT name;
+----
+clean
+direct
+
+# ... and a class or an id in :not() is tested on the subject row, not on its descendants
+query I
+FROM tree_match('main', 'd', 'fn:not(.m)', language := 'css') SELECT name;
+----
+clean
+
+query I
+FROM tree_match('main', 'd', 'fn:not(#direct)', language := 'css') SELECT name;
+----
+clean
+
+query I
+SELECT replace((tree_explain('main', 'app', '.fn:not(.method)', language := 'css')).treeql, chr(10), ' | ');
+----
+(CLASS 'fn', NOT ( SELF (CLASS 'method') ))
+
+# v0's :not() takes a compound; a chain inside it would need a relation to anchor on, and
+# guessing one is how the descendant anchoring got in
+statement error
+FROM tree_match('main', 'app', '.fn:not(block string)', language := 'css');
+----
+:not() takes a compound selector in v0
+
+statement error
+FROM tree_match('main', 'app', '.fn:not(> block)', language := 'css');
+----
+:not() takes a compound selector in v0
 
 # treeql text is refused until M-LANG; with no language the runner reads
 # tree_catalog.settings, which still says treeql

@@ -65,19 +65,22 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     SELECT i0, 0 AS a0, 0 AS i1, 0 AS a1, 0 AS i2, 0 AS a2, 0 AS depth,
            {i0: 0, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS ppath,
            CASE WHEN i0 = 1 THEN NULL ELSE COALESCE((s).comb, 'desc') END AS op,
+           -- the combinator as WRITTEN, which the SELF guard below reads: the first step of a
+           -- chain drops it for NULL, so the computed op cannot tell a written SELF from none
+           (s).comb AS comb, i0 AS chain_i,
            (s).type AS type, (s).id AS id, (s).class AS class, (s).attr AS attr,
            (s).pseudo AS pseudo, (s)."where" AS "where", (s)."as" AS "as"
     FROM lvl0
     UNION ALL
     SELECT i0, 6 + g1, i1, 0, 0, 0, 1,
            {i0: i0, a0: 6 + g1, i1: 0, a1: 0, i2: 0, a2: 0},
-           COALESCE((s).comb, 'desc'),
+           COALESCE((s).comb, 'desc'), (s).comb, i1,
            (s).type, (s).id, (s).class, (s).attr, (s).pseudo, (s)."where", (s)."as"
     FROM lvl1
     UNION ALL
     SELECT i0, 6 + g1, i1, 6 + g2, i2, 0, 2,
            {i0: i0, a0: 6 + g1, i1: i1, a1: 6 + g2, i2: 0, a2: 0},
-           COALESCE((s).comb, 'desc'),
+           COALESCE((s).comb, 'desc'), (s).comb, i2,
            (s).type, (s).id, (s).class, (s).attr, (s).pseudo, (s)."where", (s)."as"
     FROM lvl2),
   -- one row per clause, from that one relation, so the extraction is written once and not once per
@@ -132,6 +135,13 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
   bad_attr AS (
     SELECT min(a.attr) AS a FROM allsteps a WHERE a.attr IS NOT NULL
       AND NOT regexp_matches(a.attr, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|<>|<=|>=|<|>|LIKE|ILIKE|NOT LIKE)\s*(.+?)\s*$')),
+  -- SELF says the step IS the row the group hangs off, which only means anything for the first
+  -- step of a group's chain. A later step relates to the step before it, and the first step of
+  -- the OUTER chain has nothing to relate to at all -- there its comb is dropped for NULL, so
+  -- without this guard a written SELF would vanish instead of refusing.
+  bad_self AS (
+    SELECT count(*) AS n FROM allsteps a
+    WHERE a.comb = 'self' AND NOT (a.depth > 0 AND a.chain_i = 1)),
   nodes AS (
     -- the root: a ppath no row carries, so the parent join leaves its parent_id NULL
     SELECT {i0: 0, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS path,
@@ -160,6 +170,8 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     -- a step inside HAS/NOT is a test, not a row of the result, so there is nothing to name
     WHEN (SELECT a FROM bad_capture) IS NOT NULL THEN error('tree_steps: capture inside HAS/NOT has no row to bind')
     WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN error('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
+    WHEN (SELECT n FROM bad_self) > 0
+      THEN error('tree_steps: SELF is only legal as the first step of a HAS/NOT group')
     -- s<N> is what the match compiler names step N when the user names nothing; a user
     -- alias of that shape would collide with another step's generated alias
     WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN error('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
@@ -178,8 +190,17 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
   i AS (SELECT unnest("inner"::TREE_SELECTOR) AS r),
   target AS (SELECT min((r).node_id) AS node_id FROM s WHERE (r).kind = 'step' AND (r).alias = step_alias),
   base AS (SELECT max((r).node_id) + 1 AS g FROM s),
-  -- one pass over the inner selector's steps: how many there are, and whether any is captured
-  inner_steps AS (SELECT count(*) AS n, min((r).alias) AS cap FROM i WHERE (r).kind = 'step'),
+  -- one pass over the inner selector's steps: how many there are, whether any is captured, and
+  -- whether a SELF sits anywhere but first in the chain being re-parented. The inner selector's
+  -- own top-level steps become the group's inner chain, so SELF is legal on the first of them
+  -- and nowhere else -- the same rule tree_steps applies, read here on the chain after the
+  -- splice rather than before it. tree_steps refuses to BUILD such an inner selector (there the
+  -- SELF is on a top-level step), so only hand-built IR reaches this.
+  inner_steps AS (
+    SELECT count(*) AS n, min((r).alias) AS cap,
+           count(*) FILTER (WHERE (r).op = 'self' AND (r).parent_id = 0
+                              AND (r).node_id <> (SELECT min((r).node_id) FROM i WHERE (r).kind = 'step' AND (r).parent_id = 0)) AS bad_self
+    FROM i WHERE (r).kind = 'step'),
   spliced AS (
     SELECT ((SELECT list(r ORDER BY (r).node_id) FROM s)
       || [{node_id: (SELECT g FROM base), parent_id: (SELECT node_id FROM target), kind: kind,
@@ -200,6 +221,8 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
     -- the same reason tree_steps refuses a capture written inside a group
     WHEN (SELECT cap FROM inner_steps) IS NOT NULL
       THEN error('tree_steps_group: capture inside HAS/NOT has no row to bind')
+    WHEN (SELECT bad_self FROM inner_steps) > 0
+      THEN error('tree_steps_group: SELF is only legal as the first step of a HAS/NOT group')
     -- the splice adds a group level below the target step, so an inner selector that already nests
     -- groups can push the result past what the printer and the compiler unroll. Measuring the
     -- spliced result rather than the parts counts the target step's own depth for free.
@@ -208,7 +231,8 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
     ELSE (SELECT v FROM spliced) END);
 
 CREATE OR REPLACE MACRO tree_treeql_comb(op) AS
-  CASE op WHEN 'desc' THEN 'DESCENDANT' WHEN 'child' THEN 'CHILD' WHEN 'next' THEN 'SIBLING' WHEN 'after' THEN 'FOLLOWING' ELSE NULL END;
+  CASE op WHEN 'desc' THEN 'DESCENDANT' WHEN 'child' THEN 'CHILD' WHEN 'next' THEN 'SIBLING' WHEN 'after' THEN 'FOLLOWING'
+          WHEN 'self' THEN 'SELF' ELSE NULL END;
 
 CREATE OR REPLACE MACRO tree_treeql_clause(kind, value, op, arg) AS
   CASE kind WHEN 'type' THEN 'TYPE ' || tree_sql_lit(value)

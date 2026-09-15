@@ -17,6 +17,12 @@ CREATE OR REPLACE MACRO tree_sql_parent(a, b) AS
   b || '._root = ' || a || '._root AND ' || b || '._pre = ' || a || '._parent';
 -- Ancestors are the subtree relation read backwards: b contains a. No recursion (I1).
 CREATE OR REPLACE MACRO tree_sql_ancestors(a, b) AS tree_sql_subtree(b, a);
+-- b IS a. The relation css `:not(C)` needs: `:not` negates the SUBJECT row, so its group's
+-- inner chain has to start at the step's own row rather than below it. Written as an equality
+-- on the key rather than as an alias reuse, because a group compiles to an EXISTS over its own
+-- copy of the projection -- the inner chain is a separate scan whatever it relates to.
+CREATE OR REPLACE MACRO tree_sql_self(a, b) AS
+  b || '._root = ' || a || '._root AND ' || b || '._pre = ' || a || '._pre';
 -- IS NOT DISTINCT FROM, not =: the level-0 rows of a partition all have a NULL parent
 -- and are siblings of each other, which = would silently deny.
 CREATE OR REPLACE MACRO tree_sql_siblings(a, b) AS
@@ -51,10 +57,13 @@ CREATE OR REPLACE MACRO tree_sql_is_root(a) AS a || '._level = 0';
 
 -- Combinator between the previous step alias a and this step alias b. MN14 mutates
 -- tree_sql_subtree/tree_sql_children to drop the root equality.
+-- 'self' only ever arrives here as a group's first inner step, which sql/06_selector.sql
+-- enforces when the IR is built; nothing else in the compiler treats it specially.
 CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
   CASE op
     WHEN 'desc'  THEN tree_sql_subtree(a, b)
     WHEN 'child' THEN tree_sql_children(a, b)
+    WHEN 'self'  THEN tree_sql_self(a, b)
     WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
     WHEN 'after' THEN tree_sql_after(a, b)
     ELSE error('tree_match: unknown combinator ' || op) END;

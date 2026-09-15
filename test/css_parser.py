@@ -16,29 +16,36 @@ Grammar (v0, and no more than v0 -- no `,` selector lists, no `*`, no `:nth-chil
     attribute := '[' ident op value ']'
     op        := '=' | '^=' | '$=' | '*='              -> '=' | LIKE 'v%' | LIKE '%v' | LIKE '%v%'
     value     := '"' text '"' | "'" text "'" | ident | number
-    pseudo    := ':' ident | ':has(' [combinator] complex ')' | ':not(' complex ')'
-                 | ':' ident '(' arg ')'               (the argument is kept for M-LANG)
+    pseudo    := ':' ident | ':has(' [combinator] complex ')' | ':not(' compound ')'
 
-`:has` and `:not` become `has`/`not` group nodes whose inner chain hangs beneath them. A group's
-first inner step always carries a combinator ('desc' unless the relative selector opens with one),
-which is the invariant the match compiler's chain rule reads. The IR has no self-relation, so a
-group's chain always relates to the step it hangs off by a combinator: `:has(x)` is the descendant
-test css already means, but `:not(x)` becomes "no DESCENDANT matches x" rather than css's "this row
-does not match x". tree_css_lower has to make the same choice, or the two front-ends disagree.
-A capture inside a group is refused
-for the reason tree_steps refuses one: a step inside HAS/NOT is a test, not a row of the result.
+An argument-less pseudo-class is kept whatever its name: deciding it is unknown is the match
+compiler's job, and it counts one. Any OTHER pseudo-class written with an argument -- `:nth-child(2)`
+and friends -- refuses, because dropping the argument would silently change what the selector asks.
 
-Numbering note (deliberate, and the one place this parser's row ORDER differs from tree_steps'):
-the rows come out in the order they are WRITTEN, because that is the order a recursive-descent
-parser meets them, while tree_steps numbers a step's parts by fixed slot -- type, id, class, attr,
-pseudo, where, then its groups. So `.fn#greet` numbers class before id where tree_steps numbers id
-before class, and a group is emitted where it is written, so the clauses of `.fn:has(x).other`
-that follow it are numbered after that group's whole inner chain. Everything else is identical:
-the same rows, the same kinds, the same parent links, the same dense depth-first numbering down
-the tree. Ordering inside one step is therefore the one thing a differential against tree_steps
-cannot assume: it compares match results, and printed TREEQL for compounds whose parts happen to
-be written in slot order. Against tree_css_lower (which meets a compound's parts in the same
-written order) the row lists compare directly.
+`:has` and `:not` become `has`/`not` group nodes whose inner chain hangs beneath them, and that
+chain is anchored on the step the group hangs off by the op of its first inner step:
+
+  - `:has(R)`  -> HAS, inner chain R, first op = R's leading combinator or 'desc'. This is the
+                 descendant test css already means.
+  - `:not(C)`  -> NOT, ONE inner step with op 'self' carrying C's clauses and groups. css `:not`
+                 negates the SUBJECT row, so the chain has to start at the row itself; `self` is
+                 the relation sql/07_match.sql adds for exactly this, legal only here.
+  - `:not(:has(R))`, and nothing else in the compound, collapses to NOT ( R ), because "no
+                 descendant matches R" is precisely "not a row that has a descendant matching R".
+                 That keeps the spec's flagship at one group level and makes the rows identical to
+                 tree_steps([{..., "not": [R]}]).
+  - `:not(<chain with combinators>)` refuses: there is nothing for the chain to anchor on, and
+                 guessing an anchor is how `:not` came to mean a descendant test in the first place.
+
+A capture inside a group is refused for the reason tree_steps refuses one: a step inside HAS/NOT
+is a test, not a row of the result.
+
+Row order: the rows are the rows tree_steps builds for the equivalent literal, numbered the same
+way -- a compound's clauses are emitted in tree_steps' slot order (type, id, class, attr, pseudo;
+`where` has no css spelling) and its groups after all of them, in written order, whatever order
+they were written in. The parser therefore reads a compound in two passes: it collects the parts,
+then emits them. The one thing no tree_steps literal can express is two clauses of the same kind
+(`.a.b`, a second attribute); those keep the order they were written in.
 
 Every failure is a CssError whose message starts with 'css: '.
 
@@ -65,13 +72,17 @@ _SCAN = re.compile(r"""(?P<ws>\s+)
                      | (?P<ident>""" + IDENT + r""")
                      | (?P<num>-?\d+(?:\.\d+)?)
                      | (?P<str>"[^"]*"|'[^']*')
+                     | (?P<openstr>["'].*)
                      | (?P<junk>.)""", re.X | re.S)
 COMBINATOR = {">": "child", "+": "next", "~": "after"}
+# the order tree_steps numbers a step's clauses in, which is the order they are emitted in
+CLAUSE_SLOT = {"type": 1, "id": 2, "class": 3, "attr": 4, "pseudo": 5}
 
 
 def tokenize(text):
-    """Split the selector text into (kind, text, position) tokens. An unterminated quote is left
-    as junk tokens, which the caller reports as unexpected input rather than as a silent value."""
+    """Split the selector text into (kind, text, position) tokens. A quote with no partner takes
+    the rest of the text as one `openstr` token, so it is reported as an unclosed quote rather
+    than silently becoming a bare value and some punctuation."""
     return [Token(m.lastgroup, m.group(0), m.start()) for m in _SCAN.finditer(text)]
 
 
@@ -120,7 +131,21 @@ class Parser:
 
     def unexpected(self):
         t = self.peek()
+        if t is not None and t.kind == "openstr":
+            self.error("unclosed quote at " + repr(t.text))
         self.error("unexpected " + (repr(t.text) if t is not None else "end of selector"))
+
+    def skip_balanced(self, name):
+        """Step over a parenthesized argument without parsing it, leaving the position it starts
+        at. A compound emits its clauses before its groups, so a group is parsed on a second pass
+        over the same tokens, once every clause of its compound has been placed."""
+        depth = 0
+        while self.peek() is not None:
+            if self.at("("): depth += 1
+            elif self.at(")"): depth -= 1
+            self.take()
+            if depth == 0: return
+        self.error("unclosed :" + name + "(")
 
     def node(self, parent_id, kind, value=None, op=None, arg=None, alias=None):
         row = {"node_id": len(self.rows), "parent_id": parent_id, "kind": kind,
@@ -171,39 +196,106 @@ class Parser:
 
     def compound(self, step, in_group):
         """One compound: an optional type, then any number of simple selectors and groups, then
-        an optional capture. An empty compound is a hole in the chain, so it is refused."""
+        an optional capture. An empty compound is a hole in the chain, so it is refused.
+
+        Two passes over the same tokens: the first collects the compound's clauses and the token
+        position of each group, the second emits the clauses in slot order and then parses the
+        groups. That is what makes the rows tree_steps' rows rather than the order they happen to
+        be written in."""
         sid = step["node_id"]
-        seen = False
+        clauses, groups, seen = [], [], False
         t = self.peek("ident") or self.peek("str")
         if t is not None:
             if t.kind == "str" and not re.fullmatch(IDENT, t.text[1:-1]):
                 self.error("expected a type name in quotes, got " + repr(t.text))
             self.take()
-            self.node(sid, "type", value=t.text[1:-1] if t.kind == "str" else t.text)
+            clauses.append(("type", t.text[1:-1] if t.kind == "str" else t.text, None, None))
             seen = True
         while True:
             if self.at("."):
                 self.take()
-                self.node(sid, "class", value=self.ident("class name"))
+                clauses.append(("class", self.ident("class name"), None, None))
             elif self.at("#"):
                 self.take()
-                self.node(sid, "id", value=self.ident("id"))
+                clauses.append(("id", self.ident("id"), None, None))
             elif self.at("["):
-                self.attribute(sid)
+                clauses.append(self.attribute())
             elif self.at(":"):
-                self.pseudo(sid, in_group)
+                self.take()
+                name = self.ident("pseudo-class name")
+                if name in ("has", "not"):
+                    if not self.at("("):
+                        self.error("expected ( after :" + name)
+                    groups.append((name, self.i))
+                    self.skip_balanced(name)
+                elif self.at("("):
+                    self.error(":" + name + "() is not supported in v0")
+                else:
+                    clauses.append(("pseudo", name, None, None))
             elif self.at("@"):
                 self.take()
                 if in_group:
                     self.error("capture inside :has/:not has no row to bind")
+                if step["alias"] is not None:
+                    self.error("unexpected second capture")
                 step["alias"] = self.ident("capture name")
             else:
                 break
             seen = True
         if not seen:
             self.unexpected()
+        end = self.i
+        for kind, value, op, arg in sorted(clauses, key=lambda c: CLAUSE_SLOT[c[0]]):
+            self.node(sid, kind, value=value, op=op, arg=arg)
+        for name, pos in groups:
+            self.i = pos
+            self.group(sid, name)
+        self.i = end
 
-    def attribute(self, sid):
+    def group(self, sid, name):
+        """`:has(R)` or `:not(C)`, parsed from the '(' the first pass stepped over. The two
+        differ in what the group's chain is anchored on, which is the whole point of `self`."""
+        self.take()
+        self.skip_ws()
+        if name == "has":
+            g = self.node(sid, "has")
+            self.complex(g["node_id"], first_op="desc", in_group=True)
+            self.skip_ws()
+            if not self.at(")"):
+                self.unexpected()
+            self.take()
+            return
+        if self.at(*COMBINATOR):
+            self.error(":not() takes a compound selector in v0")
+        g = self.node(sid, "not")
+        step = self.node(g["node_id"], "step", op="self")
+        self.compound(step, in_group=True)
+        self.skip_ws()
+        if not self.at(")"):
+            self.error(":not() takes a compound selector in v0")
+        self.take()
+        # the collapse: NOT ( SELF ( HAS ( R ) ) ) and NOT ( R ) accept the same rows
+        kids = [r for r in self.rows if r["parent_id"] == step["node_id"]]
+        if len(kids) == 1 and kids[0]["kind"] == "has":
+            self.collapse_not_has(g, step, kids[0])
+
+    def collapse_not_has(self, g, step, has):
+        """Drop the `self` step and the HAS node, hanging the HAS group's chain on the NOT node.
+        Every row of the compound the group belongs to is already placed and every ancestor row
+        is numbered below the two that go, so only rows after them renumber -- which is why the
+        ids the caller is still holding stay valid."""
+        gid, drop = g["node_id"], {step["node_id"], has["node_id"]}
+        kept = [r for r in self.rows if r["node_id"] not in drop]
+        remap = {r["node_id"]: i for i, r in enumerate(kept)}
+        for i, r in enumerate(kept):
+            if r["parent_id"] in drop:
+                r["parent_id"] = gid
+            if r["parent_id"] is not None:
+                r["parent_id"] = remap[r["parent_id"]]
+            r["node_id"] = i
+        self.rows = kept
+
+    def attribute(self):
         """`[name op value]`, lowered to the ATTR clause's (name, SQL operator, SQL literal)."""
         self.take()
         self.skip_ws()
@@ -219,6 +311,8 @@ class Parser:
         aop = self.take().text
         self.skip_ws()
         v = self.peek()
+        if v is not None and v.kind == "openstr":
+            self.error("unclosed quote in attribute value")
         if v is None or v.kind not in ("ident", "num", "str"):
             self.error("expected an attribute value")
         self.take()
@@ -236,40 +330,7 @@ class Parser:
         if not self.at("]"):
             self.error("unclosed [ in attribute selector")
         self.take()
-        self.node(sid, "attr", value=name, op=op, arg=arg)
-
-    def pseudo(self, sid, in_group):
-        """`:name`, `:has(...)`, `:not(...)`, or `:name(argument)`. An unknown pseudo-class is
-        kept as a clause: the match compiler is what decides it is unknown and counts it."""
-        self.take()
-        name = self.ident("pseudo-class name")
-        if name in ("has", "not"):
-            if not self.at("("):
-                self.error("expected ( after :" + name)
-            self.take()
-            self.skip_ws()
-            g = self.node(sid, name)
-            self.complex(g["node_id"], first_op="desc", in_group=True)
-            self.skip_ws()
-            if not self.at(")"):
-                self.error("unclosed :" + name + "(")
-            self.take()
-        elif self.at("("):
-            self.take()
-            depth, arg = 1, []
-            while depth and self.peek() is not None:
-                tok = self.take()
-                if tok.kind == "punct" and tok.text == "(":
-                    depth += 1
-                elif tok.kind == "punct" and tok.text == ")":
-                    depth -= 1
-                if depth:
-                    arg.append(" " if tok.kind == "ws" else tok.text)
-            if depth:
-                self.error("unclosed :" + name + "(")
-            self.node(sid, "pseudo", value=name, arg="".join(arg).strip())
-        else:
-            self.node(sid, "pseudo", value=name)
+        return ("attr", name, op, arg)
 
 
 def parse(text):

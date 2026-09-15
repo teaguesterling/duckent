@@ -22,19 +22,73 @@ def ops(rows):
 
 
 class TestRows(unittest.TestCase):
-    def test_nested_groups_are_the_exact_ir(self):
-        # the group node sits under its step, its inner chain under the group, and the inner
-        # chain's first step always carries a combinator -- 'desc' when none was written
+    def test_not_negates_the_subject_row(self):
+        # the general rule: one inner step, related to the subject by `self`, carrying the
+        # compound's clauses -- so this asks whether the row itself has class 'method'
+        self.assertEqual(css_parser.parse(".fn:not(.method)"), [
+            row(0, None, "selector"),
+            row(1, 0, "step"),
+            row(2, 1, "class", "fn"),
+            row(3, 1, "not"),
+            row(4, 3, "step", op="self"),
+            row(5, 4, "class", "method"),
+        ])
+
+    def test_not_has_collapses(self):
+        # NOT ( SELF ( HAS ( R ) ) ) is NOT ( R anchored on the subject ): the same rows
+        # tree_steps([{class: 'fn', "not": [{type: 'string'}]}]) builds, one group level
         self.assertEqual(css_parser.parse(".fn:not(:has(string))"), [
             row(0, None, "selector"),
             row(1, 0, "step"),
             row(2, 1, "class", "fn"),
             row(3, 1, "not"),
             row(4, 3, "step", op="desc"),
-            row(5, 4, "has"),
+            row(5, 4, "type", "string"),
+        ])
+
+    def test_not_has_collapse_keeps_the_relative_combinator(self):
+        self.assertEqual([r["op"] for r in css_parser.parse(".fn:not(:has(> block))") if r["kind"] == "step"],
+                         [None, "child"])
+
+    def test_has_is_still_a_descendant_test(self):
+        self.assertEqual(css_parser.parse(".fn:has(string)"), [
+            row(0, None, "selector"),
+            row(1, 0, "step"),
+            row(2, 1, "class", "fn"),
+            row(3, 1, "has"),
+            row(4, 3, "step", op="desc"),
+            row(5, 4, "type", "string"),
+        ])
+
+    def test_nested_groups_are_the_exact_ir(self):
+        # a group written inside a :not() compound: NOT ( SELF (CLASS 'fn', HAS ( ... )) ),
+        # two group levels, which is the ceiling
+        self.assertEqual(css_parser.parse(":not(.fn:has(string))"), [
+            row(0, None, "selector"),
+            row(1, 0, "step"),
+            row(2, 1, "not"),
+            row(3, 2, "step", op="self"),
+            row(4, 3, "class", "fn"),
+            row(5, 3, "has"),
             row(6, 5, "step", op="desc"),
             row(7, 6, "type", "string"),
         ])
+
+    def test_clauses_are_emitted_in_slot_order(self):
+        # tree_steps numbers a step's parts by slot (type, id, class, attr, pseudo), so the
+        # parser does too and the two front-ends' row lists line up whatever the writing order
+        self.assertEqual([(r["kind"], r["value"]) for r in css_parser.parse(".fn#greet")[2:]],
+                         [("id", "greet"), ("class", "fn")])
+        self.assertEqual([(r["kind"], r["value"]) for r in css_parser.parse("#greet.fn")[2:]],
+                         [("id", "greet"), ("class", "fn")])
+        # ... but two clauses of one kind, which no tree_steps literal can express, keep
+        # the order they were written in
+        self.assertEqual([r["value"] for r in css_parser.parse(".b.a") if r["kind"] == "class"],
+                         ["b", "a"])
+
+    def test_groups_come_after_every_clause_of_their_compound(self):
+        self.assertEqual([r["kind"] for r in css_parser.parse("x:has(y).fn#i")],
+                         ["selector", "step", "type", "id", "class", "has", "step", "type"])
 
     def test_chain_numbering_is_dense_and_in_document_order(self):
         self.assertEqual(css_parser.parse("a > b c"), [
@@ -97,6 +151,24 @@ class TestRefusals(unittest.TestCase):
 
     def test_capture_inside_a_group(self):
         self.assertIn("capture inside", self.refusal(".fn:has(block@b)"))
+
+    def test_second_capture(self):
+        self.assertIn("unexpected second capture", self.refusal(".fn@a@b"))
+
+    def test_unterminated_quoted_value(self):
+        self.assertIn("unclosed", self.refusal('.fn[name="sh]'))
+        self.assertIn("unclosed", self.refusal('"select'))
+
+    def test_not_takes_a_compound(self):
+        for text in (".fn:not(block string)", ".fn:not(> block)", ".fn:not(a > b)"):
+            self.assertIn(":not() takes a compound selector in v0", self.refusal(text))
+
+    def test_argument_taking_pseudos_other_than_has_and_not(self):
+        self.assertIn(":nth-child() is not supported in v0", self.refusal(":nth-child(2)"))
+        self.assertIn(":lang() is not supported in v0", self.refusal("x:lang(en)"))
+        # an argument-less unknown pseudo is not a parse error: the match compiler counts it
+        self.assertEqual([r["kind"] for r in css_parser.parse(".fn:nope")],
+                         ["selector", "step", "class", "pseudo"])
 
 
 class TestMutant(unittest.TestCase):

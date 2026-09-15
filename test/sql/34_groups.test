@@ -70,6 +70,61 @@ SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}, {
 ----
 (TYPE 'fn', HAS ( DESCENDANT (TYPE 'block') CHILD (TYPE 'string') ))
 
+# SELF is the relation css `:not(C)` needs: the group's inner chain starts AT the outer step's
+# own row instead of below it, so NOT ( SELF (...) ) negates the subject. It is the only
+# relation that is positional -- legal as a group's FIRST inner step and nowhere else.
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', "not": [{comb: 'self', class: 'm'}]}]));
+----
+(TYPE 'fn', NOT ( SELF (CLASS 'm') ))
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{comb: 'self', class: 'm'}]}]), recursive := true));
+----
+0	NULL	selector	NULL
+1	0	step	NULL
+2	1	type	fn
+3	1	not	NULL
+4	3	step	self
+5	4	class	m
+
+# a later step of a chain relates to the step before it, and SELF would mean it is that same
+# row -- a relation the chain rule has no use for and the printer would render as a filter
+statement error
+SELECT tree_steps([{type: 'a'}, {comb: 'self', type: 'b'}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+# including on the first top-level step, where comb is dropped for the NULL the first step
+# carries -- so without this guard the SELF would vanish silently rather than refuse
+statement error
+SELECT tree_steps([{comb: 'self', type: 'a'}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'a'}, {comb: 'self', type: 'b'}]}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'a', "not": [{type: 'b'}, {comb: 'self', type: 'c'}]}]}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+# the splice applies the same rule to the chain it re-parents. tree_steps refuses to BUILD an
+# inner selector whose first step is SELF (there it is a top-level step), so the only way to
+# reach this is hand-built IR -- which is exactly what the guard is for
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'not',
+  [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL},
+   {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+   {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL},
+   {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+   {node_id: 4, parent_id: 3, kind: 'type', value: 'b', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
 # a group renders after the step's own clauses, and a second group after the first
 query I
 SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}], "not": [{comb: 'child', type: 'string'}]}]));
