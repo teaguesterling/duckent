@@ -41,7 +41,12 @@
 --    whose value is a `call_expression`). The parse is not a selector at all, so there is nothing
 --    to lower. Writing the combinator explicitly -- `a > :has(x)` -- or giving the compound a type
 --    name parses fine; so does every other compound after a space (`a .c`, `a #i`, `a [n=1]`).
--- 2. HAS/NOT nested more than tree_group_depth_limit() deep. The runner builds those rows and
+-- 2. An argument-less `:where` or `:is`. The css grammar knows those two names ONLY as functional
+--    pseudo-classes, so written bare they do not form a pseudo_class_selector at all -- the `:`
+--    and the name land loose under the container and the selector stops there. The runner keeps
+--    any argument-less pseudo-class whatever its name (deciding it is unknown is the match
+--    compiler's job), so it accepts them; there is nothing here to accept.
+-- 3. HAS/NOT nested more than tree_group_depth_limit() deep. The runner builds those rows and
 --    leaves the refusal to the printer and the compiler; here the path has one field pair per
 --    level, so a level past the limit would collide with the level below it rather than overflow
 --    visibly. It is refused where it is detected.
@@ -120,20 +125,26 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   s AS (SELECT * FROM c WHERE cls IN ('comb', 'wrap', 'tag')
         UNION ALL SELECT * FROM c WHERE cls = 'str' AND id NOT IN (SELECT id FROM attr_val)),
 
-  -- stage 3: the compound. `wrapped` is a wrapper's operand (its first child, when that child is a
-  -- selector node); `opnd` are a combinator's operands in written order. `down` is the descent to
-  -- the compound a postfix part belongs to: a wrapper into its operand, a combinator into its
-  -- RIGHT operand. Following it to its end gives the compound's anchor.
+  -- stage 3: the compound. One edge set carries every structural link inside a chain: a wrapper to
+  -- its operand (its first child, when that child is a selector node), a combinator to each of its
+  -- operands in written order. Three descents are read off it:
+  --   * all of it        -- what belongs to the same chain (stage 5)
+  --   * `rightmost`      -- the descent to the compound a postfix part belongs to (fact b), whose
+  --                         end is the compound's ANCHOR
+  --   * `leftmost` and not `relative` -- the descent to where a RELATIVE selector's leading
+  --                         combinator would be (stage 4). It stops AT a relative combinator,
+  --                         which is why that one edge is flagged rather than dropped.
   first_child AS (SELECT pid AS p, min(id) AS f FROM c WHERE pid IS NOT NULL GROUP BY pid),
   wrapped AS (SELECT w.id AS w, f.f AS i FROM c w JOIN first_child f ON f.p = w.id JOIN s k ON k.id = f.f
               WHERE w.cls = 'wrap'),
   opnd AS (SELECT p.id AS p, k.id AS k, row_number() OVER (PARTITION BY p.id ORDER BY k.id) AS side,
                   count(*) OVER (PARTITION BY p.id) AS nop, p.ty AS pty
            FROM c p JOIN s k ON k.pid = p.id WHERE p.cls = 'comb'),
-  down AS (SELECT w AS node, i AS "to" FROM wrapped
-           UNION ALL SELECT p, k FROM opnd WHERE side = nop),
-  anch AS (SELECT k.id AS node, k.id AS anchor FROM s k WHERE k.id NOT IN (SELECT node FROM down)
-           UNION ALL SELECT d.node, a.anchor FROM anch a JOIN down d ON d."to" = a.node),
+  edge AS (SELECT w AS node, i AS "to", true AS leftmost, true AS rightmost, false AS relative FROM wrapped
+           UNION ALL SELECT p, k, side = 1, side = nop, nop = 1 FROM opnd),
+  anch AS (SELECT k.id AS node, k.id AS anchor FROM s k
+             WHERE k.id NOT IN (SELECT node FROM edge WHERE rightmost)
+           UNION ALL SELECT e.node, a.anchor FROM anch a JOIN edge e ON e."to" = a.node AND e.rightmost),
   -- the parts of a compound: its anchor and every postfix wrapper that re-associated onto it.
   -- Combinator nodes carry no clause, so they are not parts.
   part AS (SELECT a.anchor, k.id, k.ty, k.cls, k.nm FROM anch a JOIN c k ON k.id = a.node WHERE k.cls <> 'comb'),
@@ -158,14 +169,31 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   -- no operand of its own.
   collapse AS (SELECT g.g, h.argroot AS "to" FROM gnode g JOIN gnode h ON h.g = g.argroot
                WHERE g.gkind = 'not' AND h.gkind = 'has' AND h.g NOT IN (SELECT w FROM wrapped)),
+  -- A RELATIVE selector is a combinator written with only a right operand -- the `>` in
+  -- `:has(> block)`. It is NOT in general the argument's root node: every postfix part and every
+  -- later combinator wraps around it, so `:has(> x#i)` is id_selector(child_selector('> x')) and
+  -- `:has(> x y)` is descendant_selector(child_selector('> x'), y). It sits at the LEFT-SPINE
+  -- terminus of the argument's subtree, so that is where both the lead op and the legality check
+  -- read it -- together, because reading it in only one place would turn a refusal into a silent
+  -- DESCENDANT-for-CHILD row difference.
+  lspine AS (SELECT k.id AS node, k.id AS head FROM s k
+               WHERE k.id NOT IN (SELECT node FROM edge WHERE leftmost AND NOT relative)
+             UNION ALL SELECT e.node, l.head FROM lspine l
+               JOIN edge e ON e."to" = l.node AND e.leftmost AND NOT e.relative),
+  relcomb AS (SELECT o.p AS id, o.pty AS ty, min_by(t.ty, t.id) AS tok
+              FROM opnd o JOIN c t ON t.pid = o.p AND t.ty IN ('>', '+', '~')
+              WHERE o.nop = 1 GROUP BY o.p, o.pty),
   -- what a group's inner chain actually is, and what its first step is anchored by: `:has(R)`
-  -- anchors R on a descendant (or on R's own leading combinator, written relative); `:not(C)`
-  -- anchors C on the subject row itself, which is what `self` is for (task-7-self-ruling.md).
-  grp AS (SELECT g.g, g.gkind, g.step, COALESCE(co."to", g.argroot) AS root,
+  -- anchors R on a descendant, or on R's own leading combinator when R is written relative;
+  -- `:not(C)` anchors C on the subject row itself, which is what `self` is for
+  -- (task-7-self-ruling.md). `head` is carried out so the legality check can see which relative
+  -- combinators are the ones a `:has()` argument is entitled to.
+  grp AS (SELECT g.g, g.gkind, g.step, COALESCE(co."to", g.argroot) AS root, l.head,
                  CASE WHEN g.gkind = 'not' AND co."to" IS NULL THEN 'self'
-                      ELSE COALESCE((SELECT tree_css_comb(o.pty) FROM opnd o
-                                     WHERE o.p = COALESCE(co."to", g.argroot) AND o.nop = 1), 'desc') END AS lead
-          FROM gnode g LEFT JOIN collapse co ON co.g = g.g),
+                      ELSE COALESCE(tree_css_comb(r.ty), 'desc') END AS lead
+          FROM gnode g LEFT JOIN collapse co ON co.g = g.g
+               JOIN lspine l ON l.node = COALESCE(co."to", g.argroot)
+               LEFT JOIN relcomb r ON r.id = l.head),
 
   -- stage 5: the chains. A chain is one `complex` -- compounds joined by combinators. Its root is
   -- the selector's own top node or the single selector child of an `arguments`; membership
@@ -176,8 +204,7 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   root_of AS (SELECT min(k.id) AS r, count(*) AS n FROM s k WHERE k.pid = (SELECT id FROM container)),
   chainof AS (SELECT (SELECT r FROM root_of) AS root, (SELECT r FROM root_of) AS node
               UNION ALL SELECT r, r FROM (SELECT root AS r FROM grp)
-              UNION ALL SELECT ch.root, e."to" FROM chainof ch JOIN
-                (SELECT w AS node, i AS "to" FROM wrapped UNION ALL SELECT p, k FROM opnd) e ON e.node = ch.node),
+              UNION ALL SELECT ch.root, e."to" FROM chainof ch JOIN edge e ON e.node = ch.node),
   steps AS (SELECT root, anchor, row_number() OVER (PARTITION BY root ORDER BY anchor) AS pos
             FROM (SELECT DISTINCT ch.root, a.anchor FROM chainof ch JOIN anch a ON a.node = ch.node)),
   -- the combinator a step's compound hangs off. A relative combinator (`:has(> block)`) has one
@@ -282,31 +309,65 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
                   ON k.id = (SELECT min(x.id) FROM c x WHERE x.id > b.id
                                AND x.ty IN ('attribute_name', 'tag_name', 'identifier', 'plain_value', 'class_name', 'id_name'))
                 WHERE b.ty = '[' AND upper(k.nm) = 'WHERE'),
-  -- a css node type this fold has no reading for: a selector list (`a, b`), an at-rule, a
-  -- declaration. Checked before the loose-token and shape tests, because a parse that went
-  -- somewhere else entirely leaves BOTH -- and naming the construct the css grammar actually
-  -- built says more than calling its wreckage junk.
+  -- a `,` is a selector list, which v0 does not have. Named by its token so the refusal reads the
+  -- way the runner parser's does.
+  bad_list AS (SELECT count(*) AS n FROM c WHERE ty = ','),
+  -- tree-sitter-css read the text as css PROPERTY syntax (`a :has(x)` becomes a declaration whose
+  -- value is a call_expression) or as a comma-less selector list, rather than as a selector at
+  -- all. That is the lossy family in note 1 of the header, so the refusal says what to write.
+  -- The third shape is a pseudo-class that parsed COMPLETELY -- its parens are balanced -- but
+  -- was left lying beside the selector instead of attached to it (`#i :has(b)`). Balance is what
+  -- tells it from a truncated `.fn:has(block`, which leaves a `(` and no `)`.
+  bad_property AS (SELECT count(*) AS n FROM c
+                   WHERE ty IN ('declaration', 'property_name', 'call_expression', 'function_name')
+                      OR (ty = 'selectors' AND (SELECT count(*) FROM c t WHERE t.ty = ',') = 0)
+                      OR (ty = '(' AND pid = (SELECT id FROM container)
+                          AND (SELECT count(*) FROM c t WHERE t.ty = ')' AND t.pid = (SELECT id FROM container)) > 0)),
+  -- an argument-less `:where` / `:is`: the css grammar knows those two names ONLY as functional
+  -- pseudo-classes, so written bare they do not even form a pseudo_class_selector -- the `:` and
+  -- the name land loose under the container. Note 3 of the header.
+  -- ... which is a COMPLETE parse with a loose `:name` in it, not a truncated one, so it does not
+  -- fire for `.fn:has(block` -- there the same two nodes come loose because the `(` was left open
+  bad_bare_fn AS (SELECT min_by(k.nm, k.id) AS nm FROM c t JOIN c k ON k.pid = t.pid AND k.ty = 'class_name' AND k.id > t.id
+                  WHERE t.ty = ':' AND t.pid = (SELECT id FROM container)
+                    AND (SELECT count(*) FROM c x WHERE x.pid = (SELECT id FROM container)
+                           AND x.ty IN ('(', '[', '"', '''')) = 0),
+  -- a css node type this fold has no reading for: an at-rule, a block, a keyframe. Checked before
+  -- the loose-token and shape tests, because a parse that went somewhere else entirely leaves
+  -- BOTH -- and naming the construct the css grammar actually built says more than calling its
+  -- wreckage junk.
   bad_type AS (SELECT min(ty) AS t FROM c WHERE cls = 'other'),
   -- a bracket, paren or quote left open stops tree-sitter mid-selector and its token lands loose
-  -- under the ERROR node instead of inside a selector node
-  bad_open AS (SELECT min_by(k.ty, k.id) AS t FROM c k
-               WHERE k.pid = (SELECT id FROM container) AND k.ty IN ('(', '[', '"', '''')),
-  -- the whole selector must be ONE selector node under the container. Nothing (an empty text),
-  -- several (trailing junk), or a loose token (a dangling combinator) is not a v0 selector.
+  -- under the ERROR node instead of inside a selector node. For a `(` the pseudo-class it belongs
+  -- to is the class_name just before it, which is what makes this read `unclosed :has(`.
+  -- the LAST one, so `.fn[name="sh]` -- which leaves both a `[` and a `"` loose -- is reported as
+  -- the unclosed quote the runner parser reports, not as the bracket around it
+  bad_open AS (SELECT max_by(k.ty, k.id) AS t,
+                      (SELECT max_by(x.nm, x.id) FROM c x
+                       WHERE x.pid = (SELECT id FROM container) AND x.ty = 'class_name' AND x.id < max(k.id)) AS pseudo
+               FROM c k WHERE k.pid = (SELECT id FROM container) AND k.ty IN ('(', '[', '"', '''')),
+  -- the whole selector must be ONE selector node under the container. Nothing (an empty text), a
+  -- trailing combinator token (the selector stopped mid-chain), or several children (trailing
+  -- junk) is not a v0 selector.
   bad_shape AS (SELECT CASE WHEN (SELECT n FROM root_of) = 0 THEN 'end of selector'
+                            WHEN (SELECT count(*) FROM c WHERE pid = (SELECT id FROM container)
+                                    AND ty IN ('>', '+', '~')) > 0 THEN 'end of selector'
                             WHEN (SELECT count(*) FROM c WHERE pid = (SELECT id FROM container)) > 1
                               THEN 'text after the selector'
                             WHEN (SELECT count(*) FROM c WHERE cls = 'err') > 1 THEN 'text after the selector'
                             ELSE NULL END AS t),
-  -- a combinator with one operand is a RELATIVE selector, which only `:has()` gives an anchor to
-  bad_rel AS (SELECT count(*) AS n FROM opnd o JOIN c p ON p.id = o.p JOIN c g ON g.id = p.pid
-              WHERE o.nop = 1 AND g.ty <> 'arguments'),
   -- `:nth-child(2)` and friends: dropping the argument would silently change what is asked
   bad_pseudo AS (SELECT min(np.nm) AS nm FROM pname np JOIN pargs pa ON pa.id = np.id WHERE np.nm NOT IN ('has', 'not')),
   bad_arg AS (SELECT count(*) AS n FROM argroot WHERE n <> 1),
   -- `:not(<chain with combinators>)` has nothing for the chain to anchor on, and guessing an
-  -- anchor is how `:not` came to mean a descendant test in the first place
-  bad_not AS (SELECT count(*) AS n FROM gnode g JOIN c r ON r.id = g.argroot WHERE g.gkind = 'not' AND r.cls = 'comb'),
+  -- anchor is how `:not` came to mean a descendant test in the first place. Read over the whole
+  -- inner chain, not just its root: `:not(> x#i)` hides its combinator one level down.
+  bad_not AS (SELECT count(*) AS n FROM grp g JOIN chainof ch ON ch.root = g.root
+                JOIN c k ON k.id = ch.node WHERE g.lead = 'self' AND k.cls = 'comb'),
+  -- a relative combinator is legal exactly where a `:has()` argument opens with one; anywhere
+  -- else -- `.fn >> .call`, a leading `> a` -- there is nothing for it to relate to
+  bad_rel AS (SELECT min_by(r.tok, r.id) AS tok FROM relcomb r
+              WHERE r.id NOT IN (SELECT head FROM grp WHERE lead <> 'self')),
   bad_attr AS (SELECT min(an.nm) AS nm FROM attr_name an LEFT JOIN attr_op o ON o.sel = an.sel
                  LEFT JOIN attr_val av ON av.sel = an.sel
                WHERE o.sel IS NULL OR av.sel IS NULL OR o.op NOT IN ('=', '^=', '$=', '*=')),
@@ -321,20 +382,32 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   SELECT CASE
     WHEN (SELECT n FROM bad_where) > 0
       THEN error('css: css has no host escape: mint a PSEUDO, or MATCH USING TREEQL')
+    WHEN (SELECT n FROM bad_list) > 0 THEN error('css: unexpected '','': v0 has no selector lists')
+    WHEN (SELECT n FROM bad_property) > 0
+      THEN error('css: unexpected end of selector: tree-sitter-css read this as css property syntax, '
+                 || 'not a selector -- after a space, a compound opening with a quoted type or a '
+                 || 'pseudo-class needs its combinator written out (a > :has(x))')
+    WHEN (SELECT nm FROM bad_bare_fn) IS NOT NULL
+      THEN error('css: :' || (SELECT nm FROM bad_bare_fn) || ' is not supported in v0 by this front-end: '
+                 || 'the css grammar knows :' || (SELECT nm FROM bad_bare_fn)
+                 || ' only with an argument, so written bare it does not parse as a selector '
+                 || '(the runner parser accepts it as a plain PSEUDO clause)')
     WHEN (SELECT t FROM bad_type) IS NOT NULL
       THEN error('css: unexpected ' || (SELECT t FROM bad_type) || ': the css grammar did not read this as a v0 selector')
-    WHEN (SELECT t FROM bad_open) IS NOT NULL
-      THEN error('css: unclosed ' || (SELECT t FROM bad_open) || ' in selector')
+    WHEN (SELECT t FROM bad_open) = '(' THEN error('css: unclosed :' || (SELECT pseudo FROM bad_open) || '(')
+    WHEN (SELECT t FROM bad_open) = '[' THEN error('css: unclosed [ in attribute selector')
+    WHEN (SELECT t FROM bad_open) IS NOT NULL THEN error('css: unclosed quote in selector')
     WHEN (SELECT t FROM bad_shape) IS NOT NULL THEN error('css: unexpected ' || (SELECT t FROM bad_shape))
-    WHEN (SELECT n FROM bad_rel) > 0 THEN error('css: unexpected combinator with nothing on its left')
     WHEN (SELECT nm FROM bad_pseudo) IS NOT NULL
       THEN error('css: :' || (SELECT nm FROM bad_pseudo) || '() is not supported in v0')
     WHEN (SELECT n FROM bad_arg) > 0 THEN error('css: unexpected empty :has()/:not() argument')
     WHEN (SELECT n FROM bad_not) > 0 THEN error('css: :not() takes a compound selector in v0')
+    WHEN (SELECT tok FROM bad_rel) IS NOT NULL
+      THEN error('css: unexpected ''' || (SELECT tok FROM bad_rel) || ''': a combinator with nothing on its left')
     WHEN (SELECT nm FROM bad_attr) IS NOT NULL
       THEN error('css: expected one of = ^= $= *= after attribute ' || (SELECT nm FROM bad_attr))
     WHEN (SELECT t FROM bad_qtype) IS NOT NULL
-      THEN error('css: expected a type name in quotes, got ' || (SELECT t FROM bad_qtype))
+      THEN error('css: expected a type name in quotes, got ' || tree_sql_lit((SELECT t FROM bad_qtype)))
     WHEN (SELECT n FROM bad_cap_second) > 0 THEN error('css: unexpected second capture')
     WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN error('css: capture inside :has/:not has no row to bind')
     WHEN (SELECT d FROM bad_depth) > tree_group_depth_limit()
