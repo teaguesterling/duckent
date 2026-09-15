@@ -415,7 +415,7 @@ true
 query I
 SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'elem' AND artifact = 'attribute_columns';
 ----
-["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek"]
+["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek","css_classes","is_element","params"]
 
 # a prefix-bound PSEUDO binds every catalog macro carrying that prefix, is stored expanded
 # with origin = prefix, and is selectable like any other pseudo-class
@@ -444,4 +444,4 @@ query II
 SELECT (SELECT sql_text FROM tree_catalog.compiled WHERE schema_name = 'a_b' AND tree_name = 'c' AND artifact = 'attribute_columns'),
        (SELECT count(*) FROM tree_catalog.compiled WHERE tree_name = 'ast_shape');
 ----
-["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek"]	0
+["node_id","type","semantic_type","flags","name","qualified_name","signature_type","parameters","modifiers","annotations","file_path","language","start_line","end_line","parent_id","depth","sibling_index","children_count","descendant_count","scope","peek","css_classes","is_element","params"]	0
