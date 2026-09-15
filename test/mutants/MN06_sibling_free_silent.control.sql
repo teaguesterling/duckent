@@ -103,6 +103,12 @@ bad_dup AS (SELECT count(*) <> count(DISTINCT node_id) AS bad FROM ir),
 -- convergence point, so IR that reached the compiler by any other road is refused here too.
 bad_alias AS (
   SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND regexp_matches(alias, '^s[0-9]+$')),
+-- An alias also becomes a SQL relation alias and an output column name, so it has to be an
+-- identifier at all. `my-cap` passed every producer and died in DuckDB's binder on `... AS
+-- my-cap`, an error naming nothing the user wrote; all three front-ends refuse it now, and this
+-- is where IR that reached the compiler by any other road is refused (R13).
+bad_alias_ident AS (
+  SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND NOT tree_sql_is_ident(alias)),
 -- Every kind the fold knows, and NULL named rather than skipped: `kind NOT IN (...)` is NULL for
 -- a NULL kind, and a NULL kind also slips through the clause CTE's own NOT IN filter, so without
 -- this a NULL-kind node is silently dropped wherever it sits. A node under a STEP is in clause
@@ -155,6 +161,8 @@ chk AS (SELECT CASE
   WHEN (SELECT bad FROM bad_dup) THEN tree_err('tree_match: selector node ids are not unique')
   WHEN (SELECT a FROM bad_alias) IS NOT NULL
     THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+  WHEN (SELECT a FROM bad_alias_ident) IS NOT NULL
+    THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias_ident) || ' is not an identifier')
   WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
     THEN tree_err('tree_match: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
   WHEN (SELECT n FROM bad_empty) > 0 THEN tree_err('tree_match: empty group')

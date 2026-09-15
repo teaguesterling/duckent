@@ -169,13 +169,13 @@ true
 
 # c11  .fn[name^="generate_"]  [scripts]  portable sitting_duck_supported attr
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', tree_steps([{class: 'fn', attr: 'name LIKE ''generate_%'''}])))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', tree_steps([{class: 'fn', attr: 'name LIKE ''generate\_%'' ESCAPE ''\'''}])))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.fn[name^="generate_"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', attr: 'name LIKE ''generate_%'''}]))
+SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', attr: 'name LIKE ''generate\_%'' ESCAPE ''\'''}]))
      = (tree_explain('main', 'scripts', '.fn[name^="generate_"]', language := 'css')).treeql;
 ----
 true
@@ -485,13 +485,13 @@ true
 
 # t2-p09  .class[name*="Data"]  [py_variety]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'py_variety', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'py_variety', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'py_variety', '.class[name*="Data"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'py_variety', '.class[name*="Data"]', language := 'css')).treeql;
 ----
 true
@@ -524,13 +524,13 @@ true
 
 # t2-p12  .call[name^="add"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.call[name^="add"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'scripts', '.call[name^="add"]', language := 'css')).treeql;
 ----
 true
@@ -1122,52 +1122,52 @@ true
 
 # t2-p23  .fn[name^="get_"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get_%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.fn[name^="get_"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get_%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'scripts', '.fn[name^="get_"]', language := 'css')).treeql;
 ----
 true
 
 # t2-p24  .fn[name^="update_"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update_%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.fn[name^="update_"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update_%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'scripts', '.fn[name^="update_"]', language := 'css')).treeql;
 ----
 true
 
 # t2-p25  .call[name^="fetch"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.call[name^="fetch"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'scripts', '.call[name^="fetch"]', language := 'css')).treeql;
 ----
 true
 
 # t2-p26  .fn[name*="placeholder"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
-SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%''', alias: NULL}]::TREE_SELECTOR))
+SELECT (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR))
      = (SELECT list(file_path || ':' || node_id ORDER BY file_path, node_id) FROM tree_match('main', 'scripts', '.fn[name*="placeholder"]', language := 'css'));
 ----
 true
 
 query I
-SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%''', alias: NULL}]::TREE_SELECTOR)
+SELECT tree_selector_to_treeql([{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR)
      = (tree_explain('main', 'scripts', '.fn[name*="placeholder"]', language := 'css')).treeql;
 ----
 true

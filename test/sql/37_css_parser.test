@@ -189,6 +189,52 @@ FROM tree_match('main', 'app', 'function_definition@src > block', language := 'c
 greet
 shout
 
+# An alias becomes a SQL relation alias and an output column name, so it has to be an
+# identifier. css capture names took the css IDENT shape, which allows `-`, so `@my-cap` passed
+# this parser, passed the lowering, printed as `AS my-cap` -- and died in DuckDB's binder,
+# naming nothing the user wrote.
+statement error
+FROM tree_match('main', 'app', '.fn@my-cap', language := 'css');
+----
+css: alias my-cap is not an identifier
+
+# ---------------------------------------------------------------------------------------
+# LIKE affix patterns escape the value, so a `%` or `_` in it is a character and not a
+# wildcard
+# ---------------------------------------------------------------------------------------
+
+# `$=` means "ends with the two characters _ and t". Unescaped, the `_` was LIKE's
+# any-single-character wildcard, so `[name$="_t"]` matched `greet` -- a selector that says one
+# thing and asks another. app.parquet has no name ending in a literal `_t`.
+query I
+SELECT count(*) FROM tree_match('main', 'app', '[name$="_t"]', language := 'css');
+----
+0
+
+# the affix forms still mean what they say for a value with nothing special in it
+query I rowsort
+FROM tree_match('main', 'app', '.fn[name^="gre"]', language := 'css') SELECT name;
+----
+greet
+
+# and a `%` in the value is a per cent sign, not "anything"
+query I
+SELECT count(*) FROM tree_match('main', 'app', '[name*="%"]', language := 'css');
+----
+0
+
+# ---------------------------------------------------------------------------------------
+# v0 numbers are `-?\d+(\.\d+)?` and no more
+# ---------------------------------------------------------------------------------------
+
+# an exponent is refused rather than read as some other number: the two front-ends tokenize
+# `1e3` differently (this one as `1` followed by the name `e3`, the css grammar as one
+# float_value), so accepting it would mean accepting two different selectors under one text
+statement error
+FROM tree_match('main', 'app', 'a[n=1e3]', language := 'css');
+----
+css: exponent numbers are not supported in v0
+
 statement error
 FROM tree_match('main', 'app', '.fn[name="sh]', language := 'css');
 ----

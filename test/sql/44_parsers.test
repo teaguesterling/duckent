@@ -185,7 +185,7 @@ true
 # c11  .fn[name^="generate_"]  [scripts]  portable sitting_duck_supported attr
 query I
 SELECT tree_parse_css('.fn[name^="generate_"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''generate_%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''generate\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -501,7 +501,7 @@ true
 # t2-p09  .class[name*="Data"]  [py_variety]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.class[name*="Data"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'class', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%Data%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -540,7 +540,7 @@ true
 # t2-p12  .call[name^="add"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.call[name^="add"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''add%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -1138,7 +1138,7 @@ true
 # t2-p23  .fn[name^="get_"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.fn[name^="get_"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get_%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''get\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -1151,7 +1151,7 @@ true
 # t2-p24  .fn[name^="update_"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.fn[name^="update_"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update_%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''update\_%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -1164,7 +1164,7 @@ true
 # t2-p25  .call[name^="fetch"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.call[name^="fetch"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''fetch%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -1177,7 +1177,7 @@ true
 # t2-p26  .fn[name*="placeholder"]  [scripts]  sitting_duck_supported v0 astcss_eval
 query I
 SELECT tree_parse_css('.fn[name*="placeholder"]')
-     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%''', alias: NULL}]::TREE_SELECTOR;
+     = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%placeholder%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 

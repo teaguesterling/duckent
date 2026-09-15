@@ -243,13 +243,17 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
     -- the attribute operators v0 gives a meaning: `=` compares, the three affix forms become LIKE
     -- with the wildcard built in. A bare number under `=` is left unquoted so an ATTR MAP lookup
     -- is cast to its type before comparing; everything else is a quoted text literal.
+    -- The affix forms ESCAPE the value (tree_sql_like_escape) and carry `ESCAPE '\'` in the arg,
+    -- because `^=`/`$=`/`*=` say "these characters" and only the `%` added here is a wildcard:
+    -- unescaped, `[name$="_t"]` asked for any character followed by `t`. The arg is one fragment
+    -- (`'<pattern>' ESCAPE '\'`) because a clause is spliced as `<op> <arg>`.
     UNION ALL SELECT p.anchor, p.id, 4, 'attr', an.nm,
         CASE WHEN o.op = '=' THEN '=' ELSE 'LIKE' END,
         CASE WHEN o.op = '=' AND v.ty IN ('integer_value', 'float_value') THEN raw.t
              WHEN o.op = '=' THEN tree_sql_lit(raw.t)
-             WHEN o.op = '^=' THEN tree_sql_lit(raw.t || '%')
-             WHEN o.op = '$=' THEN tree_sql_lit('%' || raw.t)
-             ELSE tree_sql_lit('%' || raw.t || '%') END
+             WHEN o.op = '^=' THEN tree_sql_like_arg(tree_sql_like_escape(raw.t) || '%')
+             WHEN o.op = '$=' THEN tree_sql_like_arg('%' || tree_sql_like_escape(raw.t))
+             ELSE tree_sql_like_arg('%' || tree_sql_like_escape(raw.t) || '%') END
       FROM part p JOIN attr_op o ON o.sel = p.id JOIN attr_name an ON an.sel = p.id
            JOIN attr_val av ON av.sel = p.id JOIN c v ON v.id = av.id
            JOIN (SELECT v2.id, CASE WHEN v2.ty = 'string_value' THEN substr(v2.nm, 2, length(v2.nm) - 2) ELSE v2.nm END AS t
@@ -415,6 +419,17 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   -- raised a bare Binder Error. tree_steps has refused the shape since M1 1/2; both css
   -- front-ends refuse it here, and the compiler refuses it behind them (C1).
   bad_cap_reserved AS (SELECT min(a) AS a FROM alias WHERE regexp_matches(a, '^s[0-9]+$')),
+  -- An alias becomes a SQL relation alias and an output column name, so it has to be an
+  -- identifier. css capture names took the css IDENT shape, which allows `-`, so `@my-cap`
+  -- passed every producer -- this fold, the runner parser, the printer -- and then died in
+  -- DuckDB's binder on `... AS my-cap`, an error naming nothing the user wrote. tree_steps and
+  -- tree_compile_match apply the same rule (R13).
+  bad_cap_ident AS (SELECT min(a) AS a FROM alias WHERE NOT tree_sql_is_ident(a)),
+  -- v0's number is `-?\d+(\.\d+)?` and no more. The css grammar reads `1e3` as ONE float_value
+  -- while the runner parser reads it as the number 1 followed by the name e3, so accepting it
+  -- would mean the two front-ends accepting different selectors under one text. Both refuse.
+  bad_exp AS (SELECT min(nm) AS t FROM c WHERE ty IN ('integer_value', 'float_value')
+                AND regexp_matches(COALESCE(nm, ''), '[eE]')),
   -- a step inside HAS/NOT is a test, not a row of the result, so there is nothing to name
   bad_cap_in_group AS (SELECT count(*) AS n FROM alias a JOIN placed p ON p.anchor = a.anchor WHERE p.lvl > 0),
   bad_depth AS (SELECT max(lvl) AS d FROM chains)
@@ -468,6 +483,10 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
     WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN tree_css_err('css: capture inside :has/:not has no row to bind')
     WHEN (SELECT a FROM bad_cap_reserved) IS NOT NULL
       THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_reserved) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_cap_ident) IS NOT NULL
+      THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_ident) || ' is not an identifier')
+    WHEN (SELECT t FROM bad_exp) IS NOT NULL
+      THEN tree_css_err('css: exponent numbers are not supported in v0')
     WHEN (SELECT d FROM bad_depth) > tree_group_depth_limit()
       THEN tree_css_err('css: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value,

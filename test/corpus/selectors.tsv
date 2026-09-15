@@ -9,7 +9,7 @@ c07	tree_steps([{class: 'fn', has: [{type: 'string'}]}])	.fn:has(string)	app	por
 c08	tree_steps([{type: 'function_definition'}, {comb: 'next', type: 'function_definition'}])	function_definition + function_definition	app	portable sitting_duck_supported sibling
 c09	tree_steps([{type: 'module'}, {comb: 'child', type: 'function_definition'}])	module > function_definition	scripts	portable sitting_duck_supported
 c10	tree_steps([{type: 'class_definition'}, {comb: 'child', type: 'block'}, {comb: 'child', type: 'function_definition'}])	class_definition > block > function_definition	scripts	portable sitting_duck_supported chain3
-c11	tree_steps([{class: 'fn', attr: 'name LIKE ''generate_%'''}])	.fn[name^="generate_"]	scripts	portable sitting_duck_supported attr
+c11	tree_steps([{class: 'fn', attr: 'name LIKE ''generate\_%'' ESCAPE ''\'''}])	.fn[name^="generate_"]	scripts	portable sitting_duck_supported attr
 c12	tree_steps([{type: 'identifier'}, {comb: 'next', type: 'identifier'}])	identifier + identifier	py_variety	portable sibling element
 c13	tree_steps([{class: 'fn', "not": [{type: 'block', has: [{type: 'string'}]}]}])	.fn:not(:has(block:has(string)))	app	portable nested
 c14	tree_steps([{type: 'block'}, {comb: 'child', type: 'expression_statement', pseudo: 'first-child'}])	block > expression_statement:first-child	app	portable sitting_duck_supported

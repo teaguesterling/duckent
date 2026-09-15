@@ -16,7 +16,12 @@ Grammar (v0, and no more than v0 -- no `,` selector lists, no `*`, no `:nth-chil
     attribute := '[' ident op value ']'
     op        := '=' | '^=' | '$=' | '*='              -> '=' | LIKE 'v%' | LIKE '%v' | LIKE '%v%'
     value     := '"' text '"' | "'" text "'" | ident | number
+    number    := -?\d+(\.\d+)?                         (no exponent: v0 refuses `1e3`)
     pseudo    := ':' ident | ':has(' [combinator] complex ')' | ':not(' compound ')'
+
+The three affix operators escape LIKE's metacharacters in the value and emit `ESCAPE '\'`, so
+`[name$="_t"]` asks for a literal underscore. A capture name must be a SQL identifier
+(`[A-Za-z_][A-Za-z0-9_]*`), which is narrower than the css IDENT the rest of the grammar uses.
 
 An argument-less pseudo-class is kept whatever its name: deciding it is unknown is the match
 compiler's job, and it counts one. Any OTHER pseudo-class written with an argument -- `:nth-child(2)`
@@ -68,9 +73,17 @@ class CssError(Exception):
 Token = collections.namedtuple("Token", "kind text pos")
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_-]*"
+# An alias becomes a SQL relation alias and an output column name, so it must be an identifier --
+# which the css IDENT shape above is not, because it allows `-`. See `compound`.
+ALIAS = r"[A-Za-z_][A-Za-z0-9_]*"
+# v0's number is `-?\d+(\.\d+)?` and no more. `expnum` is matched BEFORE `num` so that `1e3` is one
+# token that can be refused, rather than the number 1 followed by the name e3 -- which is exactly
+# how tree-sitter-css and this parser would otherwise disagree about the same text (it reads `1e3`
+# as one float_value). Both front-ends refuse it in the same words.
 _SCAN = re.compile(r"""(?P<ws>\s+)
                      | (?P<punct>\^=|\$=|\*=|[>+~.\#\[\]():@=])
                      | (?P<ident>""" + IDENT + r""")
+                     | (?P<expnum>-?\d+(?:\.\d+)?[eE][-+]?\d+)
                      | (?P<num>-?\d+(?:\.\d+)?)
                      | (?P<str>"[^"]*"|'[^']*')
                      | (?P<openstr>["'].*)
@@ -249,6 +262,13 @@ class Parser:
                 if re.fullmatch(r"s[0-9]+", name):
                     self.i = at
                     self.error("alias %s is reserved for generated step aliases" % name)
+                # An alias becomes a SQL relation alias and an output column name. A css capture
+                # name takes the css IDENT shape, which allows `-`, so `@my-cap` passed every
+                # producer -- this parser, the lowering, the printer -- and died in DuckDB's
+                # binder on `... AS my-cap`, naming nothing the user wrote.
+                if not re.fullmatch(ALIAS, name):
+                    self.i = at
+                    self.error("alias %s is not an identifier" % name)
                 step["alias"] = name
             else:
                 break
@@ -324,6 +344,8 @@ class Parser:
         v = self.peek()
         if v is not None and v.kind == "openstr":
             self.error("unclosed quote in attribute value")
+        if v is not None and v.kind == "expnum":
+            self.error("exponent numbers are not supported in v0")
         if v is None or v.kind not in ("ident", "num", "str"):
             self.error("expected an attribute value")
         self.take()
@@ -335,8 +357,14 @@ class Parser:
         elif aop == "=":
             op, arg = "=", sql_str(raw)
         else:
+            # The affix operators say "starts with / ends with / contains THESE CHARACTERS", so
+            # only the `%` added here is a wildcard: LIKE's own metacharacters in the value are
+            # escaped and the pattern carries its ESCAPE clause. Unescaped, `[name$="_t"]` asked
+            # for any character followed by `t`, and `[attr^="50%"]` meant rather more than it
+            # said. Must stay identical to tree_sql_like_escape / tree_sql_like_arg (sql/00_types.sql).
             op = "LIKE"
-            arg = sql_str({"^=": raw + "%", "$=": "%" + raw, "*=": "%" + raw + "%"}[aop])
+            esc = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            arg = sql_str({"^=": esc + "%", "$=": "%" + esc, "*=": "%" + esc + "%"}[aop]) + " ESCAPE '\\'"
         self.skip_ws()
         if not self.at("]"):
             self.error("unclosed [ in attribute selector")

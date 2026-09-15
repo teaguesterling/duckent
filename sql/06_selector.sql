@@ -142,6 +142,12 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     SELECT min(a."as") AS a FROM allsteps a WHERE a.depth > 0 AND a."as" IS NOT NULL),
   bad_alias AS (
     SELECT min(a."as") AS a FROM allsteps a WHERE a."as" IS NOT NULL AND regexp_matches(a."as", '^s[0-9]+$')),
+  -- An alias becomes a SQL relation alias and an output column name, so it has to be an
+  -- identifier. `my-cap` passed every producer -- this constructor, the printer, both css
+  -- front-ends -- and then died in DuckDB's binder on `... AS my-cap`, an error naming nothing
+  -- the user wrote. All three front-ends and the match compiler refuse it now (R13).
+  bad_alias_ident AS (
+    SELECT min(a."as") AS a FROM allsteps a WHERE a."as" IS NOT NULL AND NOT tree_sql_is_ident(a."as")),
   bad_attr AS (
     SELECT min(a.attr) AS a FROM allsteps a WHERE a.attr IS NOT NULL
       AND NOT regexp_matches(a.attr, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|<>|<=|>=|<|>|LIKE|ILIKE|NOT LIKE)\s*(.+?)\s*$')),
@@ -195,6 +201,7 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     -- s<N> is what the match compiler names step N when the user names nothing; a user
     -- alias of that shape would collide with another step's generated alias
     WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_alias_ident) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias_ident) || ' is not an identifier')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
   FROM parented);
 
@@ -209,6 +216,10 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
   WITH s AS (SELECT unnest(sel::TREE_SELECTOR) AS r),
   i AS (SELECT unnest("inner"::TREE_SELECTOR) AS r),
   target AS (SELECT min((r).node_id) AS node_id FROM s WHERE (r).kind = 'step' AND (r).alias = step_alias),
+  -- the same identifier rule tree_steps applies, read on the rows being spliced: `sel` may be
+  -- hand-built IR, and an alias that is not an identifier dies in the binder rather than here
+  bad_alias AS (
+    SELECT min((r).alias) AS a FROM s WHERE (r).kind = 'step' AND (r).alias IS NOT NULL AND NOT tree_sql_is_ident((r).alias)),
   base AS (SELECT max((r).node_id) + 1 AS g FROM s),
   -- one pass over the inner selector's steps: how many there are, whether any is captured, and
   -- whether a SELF sits anywhere but first in the chain being re-parented. The inner selector's
@@ -237,6 +248,8 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
     -- refusal NULL, so the message names it explicitly
     WHEN (SELECT node_id FROM target) IS NULL
       THEN tree_err('tree_steps_group: no step aliased ' || COALESCE(step_alias, 'NULL'))
+    WHEN (SELECT a FROM bad_alias) IS NOT NULL
+      THEN tree_err('tree_steps_group: alias ' || (SELECT a FROM bad_alias) || ' is not an identifier')
     WHEN (SELECT n FROM inner_steps) = 0 THEN tree_err('tree_steps_group: inner selector has no steps')
     -- the same reason tree_steps refuses a capture written inside a group
     WHEN (SELECT cap FROM inner_steps) IS NOT NULL

@@ -107,7 +107,7 @@ class TestRows(unittest.TestCase):
             ("type", "select", None, None),
             ("id", "main", None, None),
             ("class", "fn", None, None),
-            ("attr", "name", "LIKE", "'sh%'"),
+            ("attr", "name", "LIKE", "'sh%' ESCAPE '\\'"),
             ("pseudo", "first-child", None, None)])
         self.assertEqual(rows[1]["alias"], "s")
 
@@ -118,9 +118,13 @@ class TestRows(unittest.TestCase):
         self.assertEqual(attr('[name="main"]'), ("name", "=", "'main'"))
         self.assertEqual(attr("[kind=block]"), ("kind", "=", "'block'"))
         self.assertEqual(attr("[n=100]"), ("n", "=", "100"))          # unquoted: a number
-        self.assertEqual(attr('[name^="sh"]'), ("name", "LIKE", "'sh%'"))
-        self.assertEqual(attr('[name$="sh"]'), ("name", "LIKE", "'%sh'"))
-        self.assertEqual(attr('[name*="sh"]'), ("name", "LIKE", "'%sh%'"))
+        # the affix forms escape LIKE metacharacters in the value and carry the ESCAPE clause,
+        # so `$="_t"` asks for a literal underscore rather than "any character then t"
+        self.assertEqual(attr('[name^="sh"]'), ("name", "LIKE", "'sh%' ESCAPE '\\'"))
+        self.assertEqual(attr('[name$="sh"]'), ("name", "LIKE", "'%sh' ESCAPE '\\'"))
+        self.assertEqual(attr('[name*="sh"]'), ("name", "LIKE", "'%sh%' ESCAPE '\\'"))
+        self.assertEqual(attr('[name$="_t"]'), ("name", "LIKE", "'%\\_t' ESCAPE '\\'"))
+        self.assertEqual(attr('[name*="50%"]'), ("name", "LIKE", "'%50\\%%' ESCAPE '\\'"))
         self.assertEqual(attr("""[name="it's"]"""), ("name", "=", "'it''s'"))  # doubled
 
     def test_to_sql_is_a_selector_literal(self):
@@ -154,6 +158,20 @@ class TestRefusals(unittest.TestCase):
 
     def test_second_capture(self):
         self.assertIn("unexpected second capture", self.refusal(".fn@a@b"))
+
+    def test_capture_must_be_an_identifier(self):
+        # a capture becomes a SQL relation alias and an output column name; the css IDENT shape
+        # allows `-`, which passed every producer and died in DuckDB's binder
+        self.assertIn("alias my-cap is not an identifier", self.refusal(".fn@my-cap"))
+        self.assertEqual([r for r in css_parser.parse(".fn@my_cap") if r["kind"] == "step"][0]["alias"],
+                         "my_cap")
+
+    def test_exponent_numbers_are_not_v0(self):
+        # v0's number is -?\d+(\.\d+)? -- and `1e3` is where the two front-ends would otherwise
+        # read the same text as two different selectors
+        self.assertIn("exponent numbers are not supported in v0", self.refusal("a[n=1e3]"))
+        self.assertIn("exponent numbers are not supported in v0", self.refusal("a[n=-1.5E-2]"))
+        self.assertEqual([r for r in css_parser.parse("a[n=1.5]") if r["kind"] == "attr"][0]["arg"], "1.5")
 
     def test_unterminated_quoted_value(self):
         self.assertIn("unclosed", self.refusal('.fn[name="sh]'))

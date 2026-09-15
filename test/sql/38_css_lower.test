@@ -57,7 +57,7 @@ SELECT tree_parse_css('a > b c') = [{node_id: 0, parent_id: NULL, kind: 'selecto
 true
 
 query I
-SELECT tree_parse_css('.fn[name^="sh"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''sh%''', alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn[name^="sh"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''sh%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -203,7 +203,7 @@ SELECT replace(tree_selector_to_treeql(tree_parse_css('a > b c')), chr(10), ' | 
 query I
 SELECT tree_selector_to_treeql(tree_parse_css('.fn[name^="sh"]'));
 ----
-(CLASS 'fn', ATTR name LIKE 'sh%')
+(CLASS 'fn', ATTR name LIKE 'sh%' ESCAPE '\')
 
 query I
 SELECT replace(tree_selector_to_treeql(tree_parse_css('"select" > "from"')), chr(10), ' | ');
@@ -266,12 +266,12 @@ SELECT tree_selector_to_treeql(tree_parse_css('[n="100"]'));
 query I
 SELECT tree_selector_to_treeql(tree_parse_css('[name$="sh"]'));
 ----
-(ATTR name LIKE '%sh')
+(ATTR name LIKE '%sh' ESCAPE '\')
 
 query I
 SELECT tree_selector_to_treeql(tree_parse_css('[name*="sh"]'));
 ----
-(ATTR name LIKE '%sh%')
+(ATTR name LIKE '%sh%' ESCAPE '\')
 
 # an embedded quote is doubled, exactly as the runner's sql_str does it
 query I
@@ -305,7 +305,7 @@ SELECT tree_selector_to_treeql(tree_parse_css('x:has(y).fn#i'));
 query I
 SELECT tree_selector_to_treeql(tree_parse_css('"select"#main.fn[name^="sh"]:first-child@s'));
 ----
-(TYPE 'select', ID 'main', CLASS 'fn', ATTR name LIKE 'sh%', PSEUDO 'first-child') AS s
+(TYPE 'select', ID 'main', CLASS 'fn', ATTR name LIKE 'sh%' ESCAPE '\', PSEUDO 'first-child') AS s
 
 # an argument-less unknown pseudo is not a parse error: the match compiler counts it
 query I
@@ -414,6 +414,51 @@ statement error
 SELECT tree_parse_css('function_definition@s3 block');
 ----
 alias s3 is reserved for generated step aliases
+
+# an alias becomes a SQL relation alias and an output column name, so it has to be an
+# identifier -- css capture names took the css IDENT shape, which allows `-`, so `@my-cap`
+# passed both front-ends and died in the binder
+statement error
+SELECT tree_parse_css('.fn@my-cap');
+----
+css: alias my-cap is not an identifier
+
+# LIKE affix patterns escape the value: a `%` or `_` in it is a character, not a wildcard.
+# Both front-ends escape `\`, `%` and `_` and emit the ESCAPE clause, so the arg is one SQL
+# fragment and the two still lower identically.
+query I
+SELECT tree_parse_css('a[name$="_t"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%\_t'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('a[name*="50%"]'));
+----
+(TYPE 'a', ATTR name LIKE '%50\%%' ESCAPE '\')
+
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('a[name^="gre"]'));
+----
+(TYPE 'a', ATTR name LIKE 'gre%' ESCAPE '\')
+
+# (a backslash INSIDE a quoted value has no record here: tree-sitter-css reads it as an
+# `escape_sequence` node, which this fold has no reading for and refuses -- so the two
+# front-ends never lower one. The escaping still doubles a backslash, because the pattern it
+# builds carries an ESCAPE clause and an unescaped one there would eat the next character.)
+
+# v0 numbers are `-?\d+(\.\d+)?` and no more. The two front-ends tokenize `1e3` differently
+# (the runner as `1` followed by the name `e3`, the css grammar as one float_value), so
+# accepting it would mean accepting two different selectors under one text.
+statement error
+SELECT tree_parse_css('a[n=1e3]');
+----
+css: exponent numbers are not supported in v0
+
+# a plain decimal is still a number
+query I
+SELECT tree_selector_to_treeql(tree_parse_css('a[n=1.5]'));
+----
+(TYPE 'a', ATTR n = 1.5)
 
 # a capture that merely starts with s is untouched
 query I

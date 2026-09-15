@@ -157,6 +157,19 @@ CREATE OR REPLACE MACRO tree_sql_ident(s) AS '"' || replace(s, '"', '""') || '"'
 CREATE OR REPLACE MACRO tree_sql_list(csv) AS list_transform(string_split(csv, ','), lambda x: trim(x));
 CREATE OR REPLACE MACRO tree_sql_is_ident(s) AS regexp_matches(s, '^[A-Za-z_][A-Za-z0-9_]*$');
 
+-- A value going into a LIKE PATTERN, with LIKE's own metacharacters made literal. css's affix
+-- operators (`^=`, `$=`, `*=`) say "starts with / ends with / contains THESE CHARACTERS", so the
+-- value is text and only the `%` the lowering adds is a wildcard: unescaped, `[name$="_t"]`
+-- asked for any character followed by `t` and `[attr^="50%"]` meant rather more than it said.
+-- The backslash is doubled first, so it cannot eat the escape the other two get; the pattern this
+-- builds must be emitted with `ESCAPE '\'`, which is what makes the backslash the escape at all
+-- (there is no default escape character in SQL's LIKE).
+CREATE OR REPLACE MACRO tree_sql_like_escape(s) AS
+  replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_');
+-- The pattern, quoted, with its ESCAPE clause: one SQL fragment, because an ATTR clause's `arg`
+-- is spliced whole after the operator.
+CREATE OR REPLACE MACRO tree_sql_like_arg(pattern) AS tree_sql_lit(pattern) || ' ESCAPE ''\''';
+
 -- The one spelling of a generated object's name: kind ('proj' or 't'), schema, tree.
 -- Length-prefix the schema, because no escaping of the separator alone is injective here:
 -- doubling underscores still maps ('a_','c') and ('a','_c') to the same a__c. With the
