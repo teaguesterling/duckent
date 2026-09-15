@@ -9,7 +9,7 @@ SELECT len(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'blo
 query IIII rowsort
 SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]), recursive := true));
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	NULL
 2	1	type	function_definition
 3	0	step	child

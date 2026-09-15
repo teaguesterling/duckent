@@ -17,67 +17,120 @@ require sitting_duck
 statement ok
 LOAD sitting_duck;
 
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name',
+                                       classes := 'CASE WHEN (flags & 6) = 6 AND type = ''function_definition'' THEN [''fn''] ELSE [] END')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# ---------------------------------------------------------------------------------------
+# Provenance: the front-end stamps the language on the selector's root row
+# ---------------------------------------------------------------------------------------
+#
+# A selector reaches the compiler as ROWS, and rows cannot say what text -- if any -- produced
+# them, so `_match_language` was `COALESCE(language, 'treeql')`: the caller's argument, or a
+# guess. The guess was wrong for every selector these front-ends produce. The front-end is the
+# only thing that knows, so it records it, on the one row that belongs to no step: the
+# `selector` root's `value`. The compiler and tree_explain read it back; an explicit
+# `language :=` still wins, and hand-built IR that stamps nothing still reads treeql, because
+# it was never parsed at all (31_match).
+query I
+SELECT (SELECT value FROM (SELECT unnest(tree_parse_css('.fn'), recursive := true)) WHERE kind = 'selector');
+----
+css
+
+query I
+SELECT (tree_explain('main', 'app', tree_parse_css('.fn'))).language;
+----
+css
+
+query I
+SELECT (tree_explain('main', 'app', tree_parse_css('.fn'))).sql LIKE '%''css'' AS _match_language%';
+----
+true
+
+# the caller's argument still wins over the stamp
+query I
+SELECT (tree_explain('main', 'app', tree_parse_css('.fn'), language := 'treeql')).language;
+----
+treeql
+
+# the root row is the ONE row where the two front-ends differ on purpose: everything below it
+# still matches the constructor's rows exactly, which is what the parity records above assert
+query II
+SELECT (SELECT value FROM (SELECT unnest(tree_parse_css('.fn:has(> block)'), recursive := true)) WHERE kind = 'selector'),
+       (SELECT value FROM (SELECT unnest(tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block'}]}]), recursive := true)) WHERE kind = 'selector');
+----
+css	treeql
+
+query I
+SELECT list_filter(tree_parse_css('.fn:has(> block)')::STRUCT(node_id INTEGER, parent_id INTEGER, kind VARCHAR, value VARCHAR, op VARCHAR, arg VARCHAR, alias VARCHAR)[], lambda r: (r).kind <> 'selector')
+     = list_filter(tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block'}]}])::STRUCT(node_id INTEGER, parent_id INTEGER, kind VARCHAR, value VARCHAR, op VARCHAR, arg VARCHAR, alias VARCHAR)[], lambda r: (r).kind <> 'selector');
+----
+true
+
 # ---------------------------------------------------------------------------------------
 # Parity: the IR rows themselves -- same node ids, parents, kinds, values, ops, args, aliases
 # ---------------------------------------------------------------------------------------
 
 query I
-SELECT tree_parse_css('.fn') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn#greet') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'id', value: 'greet', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn#greet') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'id', value: 'greet', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('function_definition > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('function_definition > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:not(:has(string))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:not(:has(string))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:not(.method)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'method', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:not(.method)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'method', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:has(> block)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:has(> block)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('a > b c') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'b', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 0, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 6, parent_id: 5, kind: 'type', value: 'c', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a > b c') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'b', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 0, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 6, parent_id: 5, kind: 'type', value: 'c', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn[name^="sh"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''sh%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn[name^="sh"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''sh%'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('"select" > "from"') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'select', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'from', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('"select" > "from"') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'select', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'from', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn@f > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 'f'}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn@f > block') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 'f'}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('block > expression_statement:first-child') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'expression_statement', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 3, kind: 'pseudo', value: 'first-child', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('block > expression_statement:first-child') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'expression_statement', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 3, kind: 'pseudo', value: 'first-child', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:not(.a:has(.b))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 8, parent_id: 7, kind: 'class', value: 'b', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:not(.a:has(.b))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'class', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 8, parent_id: 7, kind: 'class', value: 'b', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -90,32 +143,32 @@ true
 # ---------------------------------------------------------------------------------------
 
 query I
-SELECT tree_parse_css('a:has(> x#i)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'id', value: 'i', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a:has(> x#i)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'id', value: 'i', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('a:has(> x y)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'y', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a:has(> x y)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'y', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('a:has(+ x > y)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'next', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'y', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a:has(+ x > y)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'next', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'y', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('a:has(~ .c#i)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'after', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'id', value: 'i', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'class', value: 'c', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a:has(~ .c#i)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'after', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'id', value: 'i', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'class', value: 'c', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:not(:has(> .call#print))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'id', value: 'print', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:not(:has(> .call#print))') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'id', value: 'print', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 4, kind: 'class', value: 'call', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
 query I
-SELECT tree_parse_css('.fn:has(> block > string)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('.fn:has(> block > string)') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'class', value: 'fn', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 7, parent_id: 6, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
 true
 
@@ -427,7 +480,7 @@ css: alias my-cap is not an identifier
 # Both front-ends escape `\`, `%` and `_` and emit the ESCAPE clause, so the arg is one SQL
 # fragment and the two still lower identically.
 query I
-SELECT tree_parse_css('a[name$="_t"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%\_t'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
+SELECT tree_parse_css('a[name$="_t"]') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'name', op: 'LIKE', arg: '''%\_t'' ESCAPE ''\''', alias: NULL}]::TREE_SELECTOR;
 ----
 true
 

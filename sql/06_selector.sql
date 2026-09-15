@@ -6,6 +6,23 @@
 -- refuses in terms of this number, so raising it means touching each of those in step.
 CREATE OR REPLACE MACRO tree_group_depth_limit() AS 2;
 
+-- The language a selector was WRITTEN in, read off the IR itself.
+--
+-- Provenance used to be `COALESCE(language, 'treeql')` in the compiler: the caller's argument, or
+-- a guess. The guess was wrong for every selector that reached the compiler as IR from the css
+-- front-ends, which is most of them -- a selector parsed as css and handed over as rows reported
+-- `treeql`, a language nothing had parsed. The front-end is the only thing that knows, so every
+-- front-end now STAMPS the `selector` root row's `value` with its own name (tree_steps 'treeql',
+-- test/css_parser.py and tree_css_lower 'css') and the compiler reads it. An explicit `language :=`
+-- still wins -- it is the caller saying what they wrote -- and hand-built IR that stamps nothing
+-- still reads as treeql, because it was never parsed at all.
+--
+-- The root row's value is otherwise unused: the printer renders steps and their clauses, and the
+-- compiler's fold starts at the steps whose parent is the root, so a root carrying a value changes
+-- no printed text and no compiled SQL.
+CREATE OR REPLACE MACRO tree_selector_language(sel) AS (
+  SELECT COALESCE(min((x).value), 'treeql') FROM (SELECT unnest(sel::TREE_SELECTOR) AS x) WHERE (x).kind = 'selector');
+
 -- How deep the HAS/NOT groups of a built selector actually nest: 0 for a selector with no groups,
 -- 1 for `HAS ( ... )`, 2 for `HAS ( ... HAS ( ... ) )`. Walks the parent links, so it reports a
 -- depth past tree_group_depth_limit() honestly rather than capping -- which is what lets the
@@ -166,10 +183,11 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
   bad_first_comb AS (
     SELECT min(a.comb) AS c FROM allsteps a WHERE a.depth = 0 AND a.chain_i = 1 AND a.comb IS NOT NULL),
   nodes AS (
-    -- the root: a ppath no row carries, so the parent join leaves its parent_id NULL
+    -- the root: a ppath no row carries, so the parent join leaves its parent_id NULL. Its value
+    -- is this front-end's name -- the provenance tree_selector_language reads back (R10)
     SELECT {i0: 0, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS path,
            {i0: -1, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS ppath,
-           'selector' AS kind, NULL::VARCHAR AS value, NULL::VARCHAR AS op, NULL::VARCHAR AS arg, NULL::VARCHAR AS alias
+           'selector' AS kind, 'treeql'::VARCHAR AS value, NULL::VARCHAR AS op, NULL::VARCHAR AS arg, NULL::VARCHAR AS alias
     UNION ALL SELECT g.path, g.ppath, g.gkind, NULL, NULL, NULL, NULL FROM allgrp g
     UNION ALL SELECT {i0: a.i0, a0: a.a0, i1: a.i1, a1: a.a1, i2: a.i2, a2: a.a2}, a.ppath,
                      'step', NULL, a.op, NULL, a."as" FROM allsteps a

@@ -26,7 +26,7 @@ class TestRows(unittest.TestCase):
         # the general rule: one inner step, related to the subject by `self`, carrying the
         # compound's clauses -- so this asks whether the row itself has class 'method'
         self.assertEqual(css_parser.parse(".fn:not(.method)"), [
-            row(0, None, "selector"),
+            row(0, None, "selector", "css"),
             row(1, 0, "step"),
             row(2, 1, "class", "fn"),
             row(3, 1, "not"),
@@ -38,7 +38,7 @@ class TestRows(unittest.TestCase):
         # NOT ( SELF ( HAS ( R ) ) ) is NOT ( R anchored on the subject ): the same rows
         # tree_steps([{class: 'fn', "not": [{type: 'string'}]}]) builds, one group level
         self.assertEqual(css_parser.parse(".fn:not(:has(string))"), [
-            row(0, None, "selector"),
+            row(0, None, "selector", "css"),
             row(1, 0, "step"),
             row(2, 1, "class", "fn"),
             row(3, 1, "not"),
@@ -52,7 +52,7 @@ class TestRows(unittest.TestCase):
 
     def test_has_is_still_a_descendant_test(self):
         self.assertEqual(css_parser.parse(".fn:has(string)"), [
-            row(0, None, "selector"),
+            row(0, None, "selector", "css"),
             row(1, 0, "step"),
             row(2, 1, "class", "fn"),
             row(3, 1, "has"),
@@ -64,7 +64,7 @@ class TestRows(unittest.TestCase):
         # a group written inside a :not() compound: NOT ( SELF (CLASS 'fn', HAS ( ... )) ),
         # two group levels, which is the ceiling
         self.assertEqual(css_parser.parse(":not(.fn:has(string))"), [
-            row(0, None, "selector"),
+            row(0, None, "selector", "css"),
             row(1, 0, "step"),
             row(2, 1, "not"),
             row(3, 2, "step", op="self"),
@@ -92,7 +92,7 @@ class TestRows(unittest.TestCase):
 
     def test_chain_numbering_is_dense_and_in_document_order(self):
         self.assertEqual(css_parser.parse("a > b c"), [
-            row(0, None, "selector"),
+            row(0, None, "selector", "css"),
             row(1, 0, "step"),
             row(2, 1, "type", "a"),
             row(3, 0, "step", op="child"),
@@ -130,7 +130,7 @@ class TestRows(unittest.TestCase):
     def test_to_sql_is_a_selector_literal(self):
         sql = css_parser.to_sql(css_parser.parse(".fn"))
         self.assertTrue(sql.endswith("]::TREE_SELECTOR"))
-        self.assertIn("{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL", sql)
+        self.assertIn("{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css'", sql)
 
 
 class TestRefusals(unittest.TestCase):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A recursive-descent parser for duckent's v0 css selector grammar, producing TREE_SELECTOR rows.
+r"""A recursive-descent parser for duckent's v0 css selector grammar, producing TREE_SELECTOR rows.
 
 Stands in for the parser the C++ extension will own; it must agree with tree_css_lower
 (sql/09_css.sql) on every corpus row, so the IR it builds is exactly the IR tree_steps builds
@@ -175,7 +175,9 @@ class Parser:
         return self.take().text
 
     def parse(self):
-        root = self.node(None, "selector")
+        # the root row's value is this front-end's name: the provenance the compiler reads back
+        # (tree_selector_language), so a selector handed over as IR still says what parsed it
+        root = self.node(None, "selector", value="css")
         self.skip_ws()
         self.complex(root["node_id"], first_op=None, in_group=False)
         self.skip_ws()

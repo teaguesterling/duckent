@@ -203,7 +203,10 @@ proj AS (
 -- all, which is what gates the clause compiler below.
 cfg AS (SELECT (SELECT p FROM proj) AS p, (SELECT has_element FROM t) AS elem,
                (SELECT has_map FROM t) AS has_map, (SELECT attr_cols FROM t) AS attr_cols,
-               (SELECT count(*) FROM t) > 0 AS known),
+               (SELECT count(*) FROM t) > 0 AS known,
+               -- the language the front-end stamped on the selector's root row, computed here
+               -- (where no lambda is in scope) so the output SELECT reads a plain column
+               tree_selector_language(sel) AS lang),
 -- IR rows, every level of them: S clauses refused on S-less trees, unknown pseudo-classes marked,
 -- sibling combinators refused under sibling_free. unnest(recursive := true) flattens the whole
 -- selector, so a clause or a combinator inside a group is checked exactly like a top-level one.
@@ -288,15 +291,19 @@ out AS (
   -- words: chk and this CTE are not ordered against each other, so tree_sql_chain's empty-group
   -- refusal must not get there first. Aggregating without GROUP BY keeps the one row either way.
   SELECT CASE WHEN g.steps IS NULL THEN NULL ELSE tree_sql_chain(cfg.p, g.steps, NULL, cfg.elem) END AS from_sql,
-         g.subject, g.captures
+         g.subject, g.captures, cfg.lang
   FROM top0 g CROSS JOIN cfg)
 SELECT CASE WHEN NOT (SELECT ok FROM chk) OR NOT (SELECT bool_and(ok) FROM n) THEN NULL ELSE
   'SELECT ' || subject || '.* EXCLUDE (' || list_aggregate(tree_canonical_columns(), 'string_agg', ', ') || ')'
   || COALESCE(', ' || list_aggregate(list_transform(list_filter(captures, lambda a: a <> subject), lambda a: a || ' AS ' || a), 'string_agg', ', '), '')
-  -- the language the selector was WRITTEN in, which only the caller knows. Not read from
-  -- tree_catalog.settings: that row says how the runner parses selector text, and a selector
-  -- handed over as IR was never parsed at all.
-  || ', ' || tree_sql_lit(sch || '.' || nm) || ' AS _match_tree, ' || tree_sql_lit(COALESCE(language, 'treeql')) || ' AS _match_language, '
+  -- The language the selector was WRITTEN in: the caller's `language :=` if they named one, else
+  -- the name the FRONT-END stamped on the IR's root row (tree_selector_language). Not read from
+  -- tree_catalog.settings -- that row says how selector TEXT is parsed, and a selector arrives
+  -- here as rows. It used to fall back to a bare 'treeql', which was a guess, and wrong for every
+  -- selector the css front-ends produced: a selector parsed as css reported treeql, provenance
+  -- naming a language nothing had parsed. IR that stamps nothing still reads treeql -- it was
+  -- never parsed at all, which is exactly what that answer means.
+  || ', ' || tree_sql_lit(sch || '.' || nm) || ' AS _match_tree, ' || tree_sql_lit(COALESCE(language, lang)) || ' AS _match_language, '
   || (SELECT count(*) FROM n WHERE kind = 'pseudo_unknown') || ' AS _match_unknown_pseudos'
   || ' FROM ' || from_sql END
 FROM out);

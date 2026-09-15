@@ -542,6 +542,27 @@ SELECT (tree_explain('main', 'app', tree_steps([{type: 'block'}]))).language,
 ----
 treeql	css
 
+# ... and when the caller names none, it is the FRONT-END that answers, because the front-end is
+# the only thing that knows: each stamps its own name on the `selector` root row's value, and the
+# compiler reads that instead of guessing 'treeql'. tree_steps stamps treeql, so the record above
+# reads as it always did; the css front-ends stamp css (38). IR built by hand stamps nothing and
+# still reads treeql -- it was never parsed at all, which is what that answer means.
+query III
+SELECT (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: 'css', op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR)).language,
+       (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR)).language,
+       (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: 'css', op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR, language := 'treeql')).language;
+----
+css	treeql	treeql
+
 query I
 FROM tree_match('main', 'app', tree_steps([{type: 'module'}]), language := 'css') SELECT _match_language;
 ----

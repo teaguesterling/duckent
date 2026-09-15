@@ -4,7 +4,7 @@
 query IIII rowsort
 SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{type: 'string'}]}]), recursive := true));
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	NULL
 2	1	type	fn
 3	1	not	NULL
@@ -22,7 +22,7 @@ SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_st
   {type: 'a', has: [{type: 'x', has: [{type: 'y'}]}]},
   {type: 'b', has: [{type: 'z'}]}]), recursive := true)) ORDER BY node_id;
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	NULL
 2	1	type	a
 3	1	has	NULL
@@ -81,7 +81,7 @@ SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', "not": [{comb: 'self', c
 query IIII rowsort
 SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{comb: 'self', class: 'm'}]}]), recursive := true));
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	NULL
 2	1	type	fn
 3	1	not	NULL
@@ -142,7 +142,7 @@ SELECT tree_selector_to_treeql(tree_steps_group(tree_steps([{type: 'fn', "as": '
 query IIII rowsort
 SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'block'}, {comb: 'child', type: 'string'}])), recursive := true));
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	f
 2	1	type	fn
 3	1	has	NULL

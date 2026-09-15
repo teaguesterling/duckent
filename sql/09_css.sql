@@ -303,9 +303,11 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
 
   -- stage 9: the IR rows, as paths to be numbered
   nodes AS (
+    -- the root's value is this front-end's name: the provenance tree_selector_language reads
+    -- back, so a selector handed to the compiler as rows still says what parsed it (R10)
     SELECT {i0: 0, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS path,
            {i0: -1, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS ppath,
-           'selector' AS kind, NULL::VARCHAR AS value, NULL::VARCHAR AS op, NULL::VARCHAR AS arg, NULL::VARCHAR AS alias
+           'selector' AS kind, 'css'::VARCHAR AS value, NULL::VARCHAR AS op, NULL::VARCHAR AS arg, NULL::VARCHAR AS alias
     UNION ALL
     SELECT tree_css_path(p.lvl, p.i0, p.a0, p.i1, p.a1, p.pos, 0), tree_css_ppath(p.lvl, p.i0, p.a0, p.i1, p.a1),
            'step', NULL, p.op, NULL, p.alias FROM placed p
