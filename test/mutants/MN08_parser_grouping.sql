@@ -1,0 +1,17 @@
+-- test/mutants/MN08_parser_grouping.sql
+-- The runner's css parser groups a chain differently from the lowering: a child combinator is
+-- recorded as a descendant, so `a > b c` is grouped the way `a b c` is. Two front-ends for one
+-- language have to build the SAME IR for the same text; a parser that quietly widens CHILD to
+-- DESCENDANT matches a superset and prints as a different selector than the one written.
+--
+-- THIS FILE IS DELIBERATELY EMPTY OF SQL. The mutation is Python-side -- it lives in
+-- test/css_parser.py, guarded by `DUCKENT_MUTANT == "MN08"` -- because the runner parser is
+-- Python, not a macro, so there is no CREATE OR REPLACE MACRO that could express it. The
+-- manifest row therefore carries
+--     env: {DUCKENT_MUTANT: MN08}
+-- which test/run_mutants.py adds to the environment of every `python3 test/run.py ... --mutant`
+-- subprocess it starts for this mutant. The file still exists and is still passed as --mutant so
+-- that every mutant is one row and one file, and so that this comment has somewhere to live.
+--
+-- Killed by 44_parsers (the two front-ends disagree on every selector with a `>`) and by
+-- 37_css_parser (which pins `a > b c` against its tree_steps spelling).

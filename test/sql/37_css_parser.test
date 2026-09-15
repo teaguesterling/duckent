@@ -1,0 +1,350 @@
+# name: test/sql/37_css_parser.test
+# description: the runner's css parser lowers v0 css text to the selector IR, and
+# language := 'css' both selects the parser and is carried into the provenance columns
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name', classes := 'CASE WHEN (flags & 6) = 6 AND type = ''function_definition'' THEN [''fn''] ELSE [] END',
+                                       pseudo := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# an IR selector is not text, so the runner leaves it alone whatever the default language is
+query I
+FROM tree_match('main', 'app', tree_steps([{class: 'fn', id: 'greet'}])) SELECT name;
+----
+greet
+
+# app.parquet: node 6 is function_definition greet, node 30 is shout; greet's subtree carries
+# `string` rows (16, 22), shout's carries none -- so only shout has no string beneath it
+query I
+FROM tree_match('main', 'app', '.fn:not(:has(string))', language := 'css') SELECT name;
+----
+shout
+
+# both function_definitions have flags & 6 = 6 (:def) and a block child holding a
+# return_statement: greet's is node 20, shout's node 39
+query I rowsort
+FROM tree_match('main', 'app', 'function_definition:def > block > return_statement', language := 'css') SELECT node_id;
+----
+20
+39
+
+# a relative selector inside :has may open with a combinator: both fn rows have a block child
+query I rowsort
+FROM tree_match('main', 'app', '.fn:has(> block)', language := 'css') SELECT name;
+----
+greet
+shout
+
+query I
+FROM tree_match('main', 'app', '.fn#greet', language := 'css') SELECT name;
+----
+greet
+
+# ^= lowers to LIKE 'sh%'; name is a projected attribute column, so no ATTR MAP is needed
+query I
+FROM tree_match('main', 'app', '.fn[name^="sh"]', language := 'css') SELECT name;
+----
+shout
+
+# a bare identifier value is quoted as text, a bare number is left unquoted
+query I
+FROM tree_match('main', 'app', '.fn[name=greet]', language := 'css') SELECT name;
+----
+greet
+
+# greet spans lines 4-6 in the fixture, shout 9-10
+query I
+FROM tree_match('main', 'app', '.fn[start_line=4]', language := 'css') SELECT name;
+----
+greet
+
+# node 14 (greet's block) has children 15 (expression_statement) and 20; node 38 (shout's block)
+# has only 39 -- so exactly one block has an expression_statement as its first child
+query I
+FROM tree_match('main', 'app', 'block > expression_statement:first-child', language := 'css') SELECT count(*);
+----
+1
+
+# captures
+query I
+FROM tree_match('main', 'app', '.fn@f > block', language := 'css') SELECT f.name ORDER BY 1 LIMIT 1;
+----
+greet
+
+# the language the selector was written in reaches the provenance column
+query I
+SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn', language := 'css');
+----
+css
+
+# quoted keyword types: the quotes are stripped and the name becomes a TYPE clause. The printer
+# emits one line per step; the newlines are folded to " | " as in 30_selector.test
+query II
+SELECT replace((tree_explain('main', 'app', '"select" > "from"', language := 'css')).treeql, chr(10), ' | '),
+       (tree_explain('main', 'app', '"select" > "from"', language := 'css')).language;
+----
+(TYPE 'select') | CHILD (TYPE 'from')	css
+
+# the parser builds the IR tree_steps builds for the equivalent selector literal, so the two
+# print as the same TREEQL -- combinators, group nesting and the group chain's leading
+# combinator included. This is the contract the corpus differential rests on.
+# `:not(:has(R))` is NOT ( SELF ( HAS ( R ) ) ), which canonicalizes to R anchored on the
+# subject: one group level, and the spec's flagship form.
+query I
+SELECT (tree_explain('main', 'app', '.fn:not(:has(string))', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{type: 'string'}]}]));
+----
+true
+
+query I
+SELECT (tree_explain('main', 'app', 'a > b c', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'child', type: 'b'}, {comb: 'desc', type: 'c'}]));
+----
+true
+
+# a compound's clauses are emitted in tree_steps' slot order (type, id, class, attr, pseudo),
+# not in written order, so a compound written either way numbers its rows the way the
+# constructor does and the two front-ends' row lists line up
+query I
+SELECT (tree_explain('main', 'app', '.fn#greet', language := 'css')).treeql
+     = tree_selector_to_treeql(tree_steps([{class: 'fn', id: 'greet'}]));
+----
+true
+
+# an unknown pseudo-class is preserved as a clause, compiles to false, and is counted
+query I
+SELECT count(*) FROM tree_match('main', 'app', '.fn:nope', language := 'css');
+----
+0
+
+query I
+SELECT (tree_explain('main', 'app', '.fn:nope', language := 'css')).sql LIKE '%1 AS _match_unknown_pseudos%';
+----
+true
+
+# refusals: host escape, unclosed bracket, doubled combinator, junk
+statement error
+FROM tree_match('main', 'app', '.fn[WHERE x > 2]', language := 'css');
+----
+css has no host escape
+
+statement error
+FROM tree_match('main', 'app', '.fn[name="main"', language := 'css');
+----
+unclosed
+
+statement error
+FROM tree_match('main', 'app', '.fn:has(block', language := 'css');
+----
+unclosed
+
+statement error
+FROM tree_match('main', 'app', '.fn >> .call', language := 'css');
+----
+unexpected
+
+statement error
+FROM tree_match('main', 'app', '.fn#main extra junk!!', language := 'css');
+----
+unexpected
+
+# a capture inside a group has no row to bind, exactly as tree_steps refuses one
+statement error
+FROM tree_match('main', 'app', '.fn:has(block@b)', language := 'css');
+----
+capture inside
+
+# tree_explain refuses the same text the same way
+statement error
+SELECT (tree_explain('main', 'app', '.fn[WHERE 1]', language := 'css')).sql;
+----
+css has no host escape
+
+statement error
+FROM tree_match('main', 'app', '.fn@a@b', language := 'css');
+----
+unexpected second capture
+
+# s<N> is the alias the match compiler generates for step N. tree_steps has refused a capture of
+# that shape since M1 1/2, but neither css front-end did: `@s1` on the first step silently lost
+# its output column (the compiler drops any alias equal to 's' || node_id) while tree_explain
+# still printed `AS s1`, and `@s3` named a second relation s3 and died in the binder. Both
+# front-ends refuse it now, positioned, and so does the compiler behind them (C1).
+statement error
+FROM tree_match('main', 'app', '.fn@s1', language := 'css');
+----
+alias s1 is reserved for generated step aliases
+
+statement error
+FROM tree_match('main', 'app', 'function_definition@s3 block', language := 'css');
+----
+alias s3 is reserved for generated step aliases
+
+# a capture that merely starts with s is still a capture
+query I rowsort
+FROM tree_match('main', 'app', 'function_definition@src > block', language := 'css') SELECT src.name;
+----
+greet
+shout
+
+# An alias becomes a SQL relation alias and an output column name, so it has to be an
+# identifier. css capture names took the css IDENT shape, which allows `-`, so `@my-cap` passed
+# this parser, passed the lowering, printed as `AS my-cap` -- and died in DuckDB's binder,
+# naming nothing the user wrote.
+statement error
+FROM tree_match('main', 'app', '.fn@my-cap', language := 'css');
+----
+css: alias my-cap is not an identifier
+
+# ---------------------------------------------------------------------------------------
+# LIKE affix patterns escape the value, so a `%` or `_` in it is a character and not a
+# wildcard
+# ---------------------------------------------------------------------------------------
+
+# `$=` means "ends with the two characters _ and t". Unescaped, the `_` was LIKE's
+# any-single-character wildcard, so `[name$="_t"]` matched `greet` -- a selector that says one
+# thing and asks another. app.parquet has no name ending in a literal `_t`.
+query I
+SELECT count(*) FROM tree_match('main', 'app', '[name$="_t"]', language := 'css');
+----
+0
+
+# the affix forms still mean what they say for a value with nothing special in it
+query I rowsort
+FROM tree_match('main', 'app', '.fn[name^="gre"]', language := 'css') SELECT name;
+----
+greet
+
+# and a `%` in the value is a per cent sign, not "anything"
+query I
+SELECT count(*) FROM tree_match('main', 'app', '[name*="%"]', language := 'css');
+----
+0
+
+# ---------------------------------------------------------------------------------------
+# v0 numbers are `-?\d+(\.\d+)?` and no more
+# ---------------------------------------------------------------------------------------
+
+# an exponent is refused rather than read as some other number: the two front-ends tokenize
+# `1e3` differently (this one as `1` followed by the name `e3`, the css grammar as one
+# float_value), so accepting it would mean accepting two different selectors under one text
+statement error
+FROM tree_match('main', 'app', 'a[n=1e3]', language := 'css');
+----
+css: exponent numbers are not supported in v0
+
+statement error
+FROM tree_match('main', 'app', '.fn[name="sh]', language := 'css');
+----
+unclosed
+
+# v0 has no argument-taking pseudo-class other than :has and :not. An argument-less unknown
+# pseudo stays a clause (the match compiler counts it); an argument-taking one refuses, rather
+# than silently dropping the argument that carries its whole meaning
+statement error
+FROM tree_match('main', 'app', 'block > :nth-child(2)', language := 'css');
+----
+:nth-child() is not supported in v0
+
+# `:not()` negates the SUBJECT row, which is what the `self` relation is for: the group's inner
+# chain starts AT the step's own row instead of below it. app.parquet cannot tell the two apart
+# (its strings sit under a return or a call), so this fixture puts a `string` DIRECTLY under the
+# subject -- the case a descendant-anchored NOT gets wrong.
+statement ok
+CREATE TABLE direct AS FROM (VALUES
+  ('direct', 0, 0, 'fn', 'direct'), ('direct', 1, 1, 'string', ''),
+  ('clean', 0, 0, 'fn', 'clean'), ('clean', 1, 1, 'identifier', ''))
+  t(file, node_id, depth, type, name);
+
+statement ok
+CALL tree_ddl_create('main', 'd', tree_spec(
+  tree_shape(root := 'file', "order" := 'node_id', level := 'depth',
+             semantic := tree_semantic(type := 'type', id := 'name',
+                                       classes := 'CASE WHEN name = ''direct'' THEN [''m''] ELSE [] END')),
+  source := 'direct'));
+
+# anchored on a descendant, `direct` would be wrongly INCLUDED: that form looks for a descendant
+# which itself has a string below it, and this string's parent is the fn row itself
+query I
+FROM tree_match('main', 'd', 'fn:not(:has(string))', language := 'css') SELECT name;
+----
+clean
+
+# the general rule is self-negation: neither fn row IS a string, so both survive
+query I rowsort
+FROM tree_match('main', 'd', 'fn:not(string)', language := 'css') SELECT name;
+----
+clean
+direct
+
+# ... and a class or an id in :not() is tested on the subject row, not on its descendants
+query I
+FROM tree_match('main', 'd', 'fn:not(.m)', language := 'css') SELECT name;
+----
+clean
+
+query I
+FROM tree_match('main', 'd', 'fn:not(#direct)', language := 'css') SELECT name;
+----
+clean
+
+query I
+SELECT replace((tree_explain('main', 'app', '.fn:not(.method)', language := 'css')).treeql, chr(10), ' | ');
+----
+(CLASS 'fn', NOT ( SELF (CLASS 'method') ))
+
+# v0's :not() takes a compound; a chain inside it would need a relation to anchor on, and
+# guessing one is how the descendant anchoring got in
+statement error
+FROM tree_match('main', 'app', '.fn:not(block string)', language := 'css');
+----
+:not() takes a compound selector in v0
+
+statement error
+FROM tree_match('main', 'app', '.fn:not(> block)', language := 'css');
+----
+:not() takes a compound selector in v0
+
+# TREEQL text is refused until M-LANG. It has to be ASKED for now: the last M2 task flipped
+# tree_catalog.settings.tree_default_selector_language to css, so the runner no longer reaches
+# the TREEQL branch on its own.
+statement error
+FROM tree_match('main', 'app', '(TYPE ''fn'')', language := 'treeql');
+----
+M-LANG
+
+# The flip itself, from the other side: a bare text selector -- no language := -- is parsed by
+# the css front-end and matches exactly what the explicit spelling matches. This record is the
+# reason the one above needs its argument.
+query I
+SELECT (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', '.fn:not(:has(string))'))
+     = (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', '.fn:not(:has(string))', language := 'css'));
+----
+true
+
+# ...and a bare selector that css cannot parse refuses as css, which is what "the default is
+# css" means: the settings row picks the PARSER.
+statement error
+FROM tree_match('main', 'app', '(TYPE ''fn'')');
+----
+unexpected
+
+# Provenance follows the parse. _match_language is still COALESCE(language, 'treeql') in the
+# compiler and still never reads the catalog -- a selector reaches the compiler as IR, and IR
+# cannot say what text, if any, produced it. What changed is who answers: the front-end that
+# applies the default now WRITES IT BACK as `language := 'css'` when it rewrites the call, so the
+# language a match reports is the language its text was actually parsed as. A call that names its
+# language keeps the one it named, and a selector handed over as IR still reports `treeql`
+# (31_match) -- it was never parsed.
+query II
+SELECT (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn')),
+       (SELECT DISTINCT _match_language FROM tree_match('main', 'app', '.fn', language := 'css'));
+----
+css	css
+
+query I
+SELECT (tree_explain('main', 'app', '.fn')).language;
+----
+css

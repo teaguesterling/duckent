@@ -1,0 +1,475 @@
+# name: test/sql/34_groups.test
+# description: HAS/NOT groups in the IR, constructor and printer
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{type: 'string'}]}]), recursive := true));
+----
+0	NULL	selector	treeql
+1	0	step	NULL
+2	1	type	fn
+3	1	not	NULL
+4	3	step	desc
+5	4	type	string
+
+# Node ids are depth-first: a group node is followed by EVERY row of its inner chain, nested
+# groups included, before the step's next group or the chain's next step. Here step 1's group (3)
+# owns steps 4..8 -- including step 4's own nested group (6) -- and only then does step 'b' (9)
+# begin. A breadth-first numbering would put step 9's group before node 4's nested group, and the
+# css lowering and the runner's recursive-descent parser both number depth-first, so the row lists
+# of the differentials would not line up. Ordered, not rowsorted: the order IS the assertion.
+query IIII
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([
+  {type: 'a', has: [{type: 'x', has: [{type: 'y'}]}]},
+  {type: 'b', has: [{type: 'z'}]}]), recursive := true)) ORDER BY node_id;
+----
+0	NULL	selector	treeql
+1	0	step	NULL
+2	1	type	a
+3	1	has	NULL
+4	3	step	desc
+5	4	type	x
+6	4	has	NULL
+7	6	step	desc
+8	7	type	y
+9	0	step	desc
+10	9	type	b
+11	9	has	NULL
+12	11	step	desc
+13	12	type	z
+
+# the first inner step hangs off the group node (not off the outer step) and its op is never
+# NULL: with no combinator given it is desc, so the compiler always reads a combinator there
+query III
+WITH ir AS (SELECT unnest(tree_steps([{type: 'fn', "not": [{type: 'string'}]}]), recursive := true))
+SELECT g.node_id, s.parent_id, s.op FROM ir s, ir g WHERE g.kind IN ('has', 'not') AND s.kind = 'step' AND s.parent_id = g.node_id;
+----
+3	3	desc
+
+# a combinator on the first inner step is kept, it is only the default that is desc
+query III
+WITH ir AS (SELECT unnest(tree_steps([{type: 'fn', has: [{comb: 'child', type: 'block'}]}]), recursive := true))
+SELECT g.kind, s.parent_id, s.op FROM ir s, ir g WHERE g.kind IN ('has', 'not') AND s.kind = 'step' AND s.parent_id = g.node_id;
+----
+has	3	child
+
+query I
+SELECT tree_selector_to_treeql(tree_steps([{class: 'fn', "not": [{pseudo: 'docblock'}]}]));
+----
+(CLASS 'fn', NOT ( DESCENDANT (PSEUDO 'docblock') ))
+
+# three literal levels: step -> group -> step -> group -> step. The printer's newlines are
+# folded to " | " the way 30_selector.test folds them, so each step stays one record line.
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{comb: 'child', type: 'block', has: [{type: 'string'}]}]}, {comb: 'child', type: 'identifier'}])), chr(10), ' | ');
+----
+(TYPE 'fn', HAS ( CHILD (TYPE 'block', HAS ( DESCENDANT (TYPE 'string') )) )) | CHILD (TYPE 'identifier')
+
+# a group's inner chain is joined by single spaces, not by the newline the outer chain uses
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}, {comb: 'child', type: 'string'}]}]));
+----
+(TYPE 'fn', HAS ( DESCENDANT (TYPE 'block') CHILD (TYPE 'string') ))
+
+# SELF is the relation css `:not(C)` needs: the group's inner chain starts AT the outer step's
+# own row instead of below it, so NOT ( SELF (...) ) negates the subject. It is the only
+# relation that is positional -- legal as a group's FIRST inner step and nowhere else.
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', "not": [{comb: 'self', class: 'm'}]}]));
+----
+(TYPE 'fn', NOT ( SELF (CLASS 'm') ))
+
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op) FROM (SELECT unnest(tree_steps([{type: 'fn', "not": [{comb: 'self', class: 'm'}]}]), recursive := true));
+----
+0	NULL	selector	treeql
+1	0	step	NULL
+2	1	type	fn
+3	1	not	NULL
+4	3	step	self
+5	4	class	m
+
+# a later step of a chain relates to the step before it, and SELF would mean it is that same
+# row -- a relation the chain rule has no use for and the printer would render as a filter
+statement error
+SELECT tree_steps([{type: 'a'}, {comb: 'self', type: 'b'}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+# including on the first top-level step, where comb is dropped for the NULL the first step
+# carries -- so without this guard the SELF would vanish silently rather than refuse
+statement error
+SELECT tree_steps([{comb: 'self', type: 'a'}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'a'}, {comb: 'self', type: 'b'}]}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'a', "not": [{type: 'b'}, {comb: 'self', type: 'c'}]}]}]);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+# the splice applies the same rule to the chain it re-parents. tree_steps refuses to BUILD an
+# inner selector whose first step is SELF (there it is a top-level step), so the only way to
+# reach this is hand-built IR -- which is exactly what the guard is for
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'not',
+  [{node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL},
+   {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+   {node_id: 2, parent_id: 1, kind: 'type', value: 'a', op: NULL, arg: NULL, alias: NULL},
+   {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+   {node_id: 4, parent_id: 3, kind: 'type', value: 'b', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+SELF is only legal as the first step of a HAS/NOT group
+
+# a group renders after the step's own clauses, and a second group after the first
+query I
+SELECT tree_selector_to_treeql(tree_steps([{type: 'fn', has: [{type: 'block'}], "not": [{comb: 'child', type: 'string'}]}]));
+----
+(TYPE 'fn', HAS ( DESCENDANT (TYPE 'block') ), NOT ( CHILD (TYPE 'string') ))
+
+# a group spliced onto a built selector
+query I
+SELECT tree_selector_to_treeql(tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'not', tree_steps([{type: 'string'}])));
+----
+(TYPE 'fn', NOT ( DESCENDANT (TYPE 'string') )) AS f
+
+# the splice renumbers the inner rows after the outer chain and re-parents the inner chain's
+# top-level steps onto the group node
+query IIII rowsort
+SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'block'}, {comb: 'child', type: 'string'}])), recursive := true));
+----
+0	NULL	selector	treeql
+1	0	step	f
+2	1	type	fn
+3	1	has	NULL
+4	3	step	desc
+5	4	type	block
+6	3	step	child
+7	6	type	string
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', "as": 'b'}]}]);
+----
+no row to bind
+
+# ... at any depth
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', "not": [{type: 'x', "as": 'b'}]}]}]);
+----
+no row to bind
+
+# the unknown-field guard reaches inside groups too: the cast to the fixed step shape drops
+# an unknown field at every level, not just the outer one
+statement error
+SELECT tree_steps([{type: 'fn', has: [{type: 'block', typo: 'y'}]}]);
+----
+unknown step field typo
+
+statement error
+SELECT tree_steps([{type: 'fn', has: [{"not": [{type: 'x', typo: 'y'}]}]}]);
+----
+unknown step field typo
+
+# an inner step of nothing but an unknown field shares no member with the fixed step shape, so
+# DuckDB refuses the cast itself before the guard's CASE runs -- it still refuses, just in its
+# own words, which is what this pins
+statement error
+SELECT tree_steps([{type: 'fn', has: [{typo: 'y'}]}]);
+----
+at least one matching member
+
+# the ceiling is 2 group levels, so a group on a step at the third level would make a fourth
+# level of steps. The cast has nowhere to put it, so it is refused rather than dropped.
+statement error
+SELECT tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c', has: [{type: 'd'}]}]}]}]);
+----
+groups nested deeper than 2 levels are not supported
+
+statement error
+SELECT tree_steps([{type: 'a', "not": [{type: 'b', "not": [{type: 'c', "not": [{type: 'd'}]}]}]}]);
+----
+groups nested deeper than 2 levels are not supported
+
+# a group with no steps tests nothing, and would leave a node the printer has no text for
+statement error
+SELECT tree_steps([{type: 'fn', has: []}]);
+----
+empty HAS/NOT group
+
+statement error
+SELECT tree_steps([{type: 'fn', "not": []}]);
+----
+empty HAS/NOT group
+
+# an ATTR clause inside a group is parsed by the same regex, and refuses the same way
+statement error
+SELECT tree_steps([{type: 'fn', has: [{attr: 'start_line IN (1,2)'}]}]);
+----
+cannot parse ATTR clause
+
+query III
+SELECT value, op, arg FROM (SELECT unnest(tree_steps([{type: 'fn', has: [{attr: 'start_line > 100'}]}]), recursive := true)) WHERE kind = 'attr';
+----
+start_line	>	100
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'g', 'not', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: no step aliased g
+
+# a NULL alias matches no step either, and must refuse rather than return NULL
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), NULL, 'not', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: no step aliased NULL
+
+# only has and not are group kinds: anything else would build a node no consumer understands
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'maybe', tree_steps([{type: 'string'}]));
+----
+tree_steps_group: kind must be has or not
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', NULL, tree_steps([{type: 'string'}]));
+----
+tree_steps_group: kind must be has or not
+
+# a capture inside the spliced selector has no row to bind, exactly as inside a written group
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'string', "as": 'g'}]));
+----
+capture inside HAS/NOT has no row to bind
+
+# an inner selector with no steps is the spliced form of an empty group
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'fn', "as": 'f'}]), 'f', 'has', tree_steps([]));
+----
+tree_steps_group: inner selector has no steps
+
+# the splice adds a group level, so an inner selector may itself nest one level and no more
+query I
+SELECT tree_selector_to_treeql(tree_steps_group(tree_steps([{type: 'a', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'b', has: [{type: 'c'}]}])));
+----
+(TYPE 'a', HAS ( DESCENDANT (TYPE 'b', HAS ( DESCENDANT (TYPE 'c') )) )) AS f
+
+statement error
+SELECT tree_steps_group(tree_steps([{type: 'a', "as": 'f'}]), 'f', 'has', tree_steps([{type: 'b', has: [{type: 'c', has: [{type: 'd'}]}]}]));
+----
+tree_steps_group: groups nested deeper than 2 levels are not supported
+
+# The printer unrolls one pass per group level, so a selector nesting deeper than the ceiling --
+# which no constructor here will build, hence the literal IR -- must refuse rather than quietly
+# drop its innermost groups.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 5, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: groups nested deeper than 2 levels are not supported
+
+# a node kind the printer does not know would render as nothing, silently dropping a clause
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'bogus', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: unknown node kind bogus
+
+# a NULL kind is the same defect the error(NULL) audit found, in a guard rather than a message:
+# `min(kind)` over a NULL-kind node is NULL, and the arm tested that aggregate for IS NOT NULL,
+# so the node was dropped exactly as an unknown kind would have been -- the check that was
+# supposed to stop it. The COALESCE is inside the aggregate now and the node is named.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: NULL, value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: unknown node kind <NULL>
+
+# a repeated node id makes the parent links a cycle, and the printer's depth check walks them:
+# this literal HUNG the printer. Uniqueness is refused before the walk is asked for.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: selector node ids are not unique
+
+# the walk itself carries a level bound, so tree_selector_group_depth is safe on a cyclic literal
+# even when it is called directly, without a caller's uniqueness check in front of it
+query I
+SELECT tree_selector_group_depth([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR) > 0;
+----
+true
+
+# exactly at the ceiling still prints
+query I
+SELECT tree_selector_group_depth(tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c'}]}]}]));
+----
+2
+
+# ---------------------------------------------------------------------------
+# Matching. A HAS/NOT group is a predicate on the step it hangs off, compiled as an
+# (NOT) EXISTS over the group's own chain, the chain anchored on that step's alias.
+#
+# The CLASS expression is a CASE on the source columns rather than a call to
+# semantic_type_to_string: that function lives in sitting_duck, and the fixture carries the raw
+# numeric semantic_type (240 for a function_definition), so a stub mapping it would be pinning a
+# magic number rather than testing anything.
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', id := 'name',
+                                       classes := 'CASE WHEN type = ''function_definition'' AND (flags & 6) = 6 THEN [''fn''] ELSE [] END',
+                                       pseudo := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the flagship, and the thing a linear chain cannot say: functions with no string anywhere below.
+# greet's body holds the docstring (node 16) and the f-string (22); shout's body (39..53) holds
+# neither, so shout is the whole answer.
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'string'}]}])) SELECT name;
+----
+shout
+
+# the same selector with the CLASS spelling of "is a definition"
+query I
+FROM tree_match('main', 'app', tree_steps([{class: 'fn', "not": [{type: 'string'}]}])) SELECT name;
+----
+shout
+
+# HAS with a child-anchored inner chain: functions whose block directly contains a return.
+# greet's block is 14 (children 15, 20 -- 20 is the return_statement), shout's is 38 (child 39).
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', has: [{comb: 'child', type: 'block', has: [{comb: 'child', type: 'return_statement'}]}]}])) SELECT name;
+----
+greet
+shout
+
+# nesting two deep: NOT ( HAS ) reads as "has no block that has a string". greet's block 14 has
+# strings 16 and 22 below it; shout's block 38 has none.
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'block', has: [{type: 'string'}]}]}])) SELECT name;
+----
+shout
+
+# a group is a predicate on its step, not a step of its own: the chain still has two steps, so
+# the subject is the block (node 38) and the capture outside the group still binds
+query III
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f', "not": [{type: 'string'}]}, {comb: 'child', type: 'block'}])) SELECT f.name, type, node_id;
+----
+shout	block	38
+
+# unknown pseudo-classes are counted at every level, groups included. The inner :nope compiles to
+# false, so the NOT group holds for every function and both rows survive to report the count.
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "not": [{type: 'block', pseudo: 'nope'}]}])) SELECT name, _match_unknown_pseudos;
+----
+greet	1
+shout	1
+
+# The built-in positional pseudo-classes. They are structural, so they compile through the same
+# fragments the combinators and traversal use, and they are never reported as unknown.
+# Node 15 (expression_statement) is block 14's first child; block 38's only child is 39.
+query I
+SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'block'}, {comb: 'child', type: 'expression_statement', pseudo: 'first-child'}]));
+----
+1
+
+# last child of block 14 is the return_statement 20, of block 38 the return_statement 39
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'block'}, {comb: 'child', pseudo: 'last-child'}])) SELECT node_id;
+----
+20
+39
+
+# a built-in is never reported as unknown, whatever the tree's SEMANTIC group binds: the two
+# expression_statements (1 under the module, 15 under block 14) are both first children
+query II rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'expression_statement', pseudo: 'first-child'}])) SELECT node_id, _match_unknown_pseudos;
+----
+1	0
+15	0
+
+# ELEMENT through a per-query overlay: the overlay REPLACEs _element in the projection, so the
+# sibling and positional relations stop counting the punctuation tokens. SIBLING of each
+# `parameters` node (9, 33) then skips the ':' (13, 37) and lands on the block (14, 38).
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'next'}]),
+     semantic := tree_semantic(element := 'regexp_matches(type, ''^[a-z_]'')')) SELECT node_id;
+----
+14
+38
+
+# without the overlay every row is an element, so SIBLING is the O(1) _pre + _size + 1 form
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'next'}])) SELECT node_id;
+----
+13
+37
+
+# :first-child under the same overlay is the identifier (11, 35), not the '(' token (10, 34)
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'child', pseudo: 'first-child'}]),
+     semantic := tree_semantic(element := 'regexp_matches(type, ''^[a-z_]'')')) SELECT node_id;
+----
+11
+35
+
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'parameters'}, {comb: 'child', pseudo: 'first-child'}])) SELECT node_id;
+----
+10
+34
+
+# an overlay that sets only ELEMENT is not an empty overlay: ELEMENT is an S slot like the rest,
+# which is why the four records above compile at all
+statement error
+FROM tree_match('main', 'app', tree_steps([{type: 'block'}]), semantic := tree_semantic());
+----
+semantic overlay is empty
+
+# The refusals read every level of the IR, groups included: an S clause inside a group on a tree
+# with no SEMANTIC group is as unavailable as one at the top level.
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement error
+FROM tree_match('main', 'bare', tree_steps([{"where": 'depth = 0', has: [{type: 'function_definition'}]}]));
+----
+SEMANTIC
+
+# ... and so is a sibling combinator inside a group on a sibling-free tree
+statement ok
+CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
+
+statement error
+FROM tree_match('main', 'cats', tree_steps([{"where": 'true', has: [{comb: 'next'}]}]));
+----
+SIBLING_ORDER
+
+# tree_sql_chain is the only thing that turns a chain into FROM text. tree_steps refuses an empty
+# group before the compiler can see one, but the fragment refuses on its own account rather than
+# emitting a FROM with no relation in it.
+statement error
+SELECT tree_sql_chain('P', []::STRUCT(node_id INTEGER, alias VARCHAR, op VARCHAR, pred VARCHAR)[], 'a', false);
+----
+tree_match: empty group

@@ -11,9 +11,10 @@ SELECT count(*) FROM tree_catalog_slots();
 ----
 0
 
-query III
+query III rowsort
 SELECT language, printer, bare_safe FROM tree_catalog_languages();
 ----
+css	tree_selector_to_treeql	true
 treeql	tree_selector_to_treeql	true
 
 query I

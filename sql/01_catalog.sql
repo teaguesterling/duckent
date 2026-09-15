@@ -20,6 +20,16 @@ CREATE TABLE IF NOT EXISTS tree_catalog.pseudo_classes(
 CREATE TABLE IF NOT EXISTS tree_catalog.selector_languages(
   language VARCHAR PRIMARY KEY, parser VARCHAR, printer VARCHAR, bare_safe BOOLEAN);
 INSERT INTO tree_catalog.selector_languages VALUES ('treeql', NULL, 'tree_selector_to_treeql', true) ON CONFLICT DO NOTHING;
+INSERT INTO tree_catalog.selector_languages VALUES ('css', 'tree_css_lower', 'tree_selector_to_treeql', true) ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS tree_catalog.settings(name VARCHAR PRIMARY KEY, value VARCHAR);
+-- Flipped from 'treeql' to 'css' at the close of M2 (core design section 1: "treeql initially,
+-- flipped to css by setting once CSS lands"). This row governs ONE thing: how a front-end parses
+-- a selector handed over as TEXT -- today the runner's rewrite, later the binder. It is not read
+-- by the compiler: _match_language is COALESCE(language, 'treeql'), because a selector handed
+-- over as IR was never parsed and its provenance is TREEQL whatever the default says. TREEQL
+-- text has no parser until M-LANG, so a bare text selector is css or it is refused.
+INSERT INTO tree_catalog.settings VALUES ('tree_default_selector_language', 'css') ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS tree_catalog.attachments(child_tree VARCHAR, parent_tree VARCHAR, join_sql VARCHAR);
 

@@ -44,12 +44,15 @@ SELECT count(*), count(DISTINCT b._pre), count(*) > count(DISTINCT b._pre);
 ----
 4	2	true
 
-# an unknown attribute name refuses, naming it (the binder does; a compile-time refusal
-# against _attr_map is M2)
+# an unknown attribute name refuses, naming it. The refusal is the compiler's, not the binder's:
+# the attribute_columns artifact says what the projection carries, so a name that is neither
+# there nor servable by an ATTR MAP is refused before any SQL is built. On a tree that declares
+# ATTR MAP there is nothing to refuse -- the map's keys are data, so an absent one reads as no
+# match, which is what 35_attr_map.test covers.
 statement error
 FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', attr: 'nosuchcol = 1'}]));
 ----
-nosuchcol
+nosuchcol is neither a projected column nor served by ATTR MAP
 
 # a capture is not in the output unless selected
 query I
@@ -68,6 +71,217 @@ query I
 SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', attr: 'signature_type = ''x'''}]));
 ----
 0
+
+# an attribute the projection does not carry falls through to ATTR MAP, and the comparison
+# literal says how to read the map's text: '3' and '11' both sort above '10' as text, only the
+# module's 11 lines is above it as a number. 35_attr_map.test pins the resolution order itself.
+statement ok
+CREATE TABLE mapped AS SELECT node_id, depth, type, MAP {'lines': CAST(end_line - start_line + 1 AS VARCHAR)} AS extra FROM 'test/data/app.parquet';
+
+statement ok
+CALL tree_ddl_create('main', 'mapped', tree_spec(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', attr_map := 'extra')), source := 'mapped'));
+
+query I
+FROM tree_match('main', 'mapped', tree_steps([{attr: 'lines > 10'}])) SELECT type;
+----
+module
+
+# a node kind the clause compiler has no predicate for would compile to nothing, silently
+# widening the match, so it refuses. No constructor builds one, hence the literal IR.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'bogus', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: unknown clause kind bogus
+
+# The compiler's fold is unrolled to a fixed number of group levels, so IR that nests deeper does
+# not fail loudly -- the passes are inner joins and the innermost group is simply never rendered,
+# leaving a selector that matches MORE than it asked for. This IR is
+# `function_definition HAS (block HAS (return_statement HAS (NOSUCHTYPE)))`, whose honest answer
+# is no rows; with the innermost group dropped it returned greet and shout. tree_steps refuses to
+# build it, so the check has to be on the IR the compiler is handed, and it is worded as the
+# printer's: one ceiling, one sentence.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 4, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 7, parent_id: 6, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 8, parent_id: 7, kind: 'type', value: 'return_statement', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 9, parent_id: 7, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 10, parent_id: 9, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 11, parent_id: 10, kind: 'type', value: 'NOSUCHTYPE', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: groups nested deeper than 2 levels are not supported
+
+# a group with no inner steps contributes no row to the fold's group pass at all, so it would
+# vanish and the NOT would go untested -- tree_sql_chain's own empty-group refusal is never
+# reached, because nothing calls it for a group that produced no row
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: empty group
+
+# a clause is compiled from its step's alias, so one hung off anything but a step -- here the
+# selector root -- has no alias to compile against and would be dropped, widening the match
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 0, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: clause type is not attached to a step
+
+# ---------------------------------------------------------------------------------------
+# IR the compiler is handed rather than builds. Everything below is hand-written TREE_SELECTOR:
+# tree_steps and both css front-ends refuse all of it, so the compiler is the convergence point
+# and refuses it too. Each shape was silently DROPPED before -- dropped structure widens the
+# match set, which is the worst way for a matcher to fail.
+# ---------------------------------------------------------------------------------------
+
+# s<N> is the alias the compiler generates for step N, and the capture list drops any alias of
+# that shape -- so `@s1` on step 1 lost its output column while tree_explain still printed AS s1,
+# and `@s3` on a two-step selector named a second relation s3 and died in the binder. Refused
+# here, at the point every front-end's IR arrives (C1).
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 's1'},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: alias s1 is reserved for generated step aliases
+
+# node ids ARE the parent links, so a repeated one makes the parent relation a cycle
+# (0 -> 1, 1 -> 2, 2 -> 1) and the group-depth walk never terminates: this literal HUNG the
+# compiler rather than refusing it. Uniqueness is checked before any walk is asked for.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: selector node ids are not unique
+
+# an unknown kind UNDER THE ROOT reaches no compiler at all: the clause CTE only joins children
+# of a step, so this node was dropped. (Under a step the same kind refuses as `unknown clause
+# kind bogus`, which names the thing that could not be compiled -- the record above.)
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 0, kind: 'bogus', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: node 3 has an unknown kind bogus
+
+# the same under a GROUP node, where it is a step that is not a step
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 3, kind: 'bogus', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: node 6 has an unknown kind bogus
+
+# a NULL kind is the one that slipped through every filter: `kind NOT IN (...)` is NULL for it,
+# and so is the clause CTE's `kind NOT IN ('has','not','step')`, so the node vanished wherever
+# it sat -- here under a step, which is exactly where a clause would be. It is named, not skipped.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: NULL, value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: node 3 has an unknown kind <NULL>
+
+# an orphan step: its parent_id points at a CLAUSE, so it is in no chain -- neither the top-level
+# chain (whose steps hang off the selector root) nor a group's. It was compiled into nothing.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: node 3 has kind step which is not allowed under type
+
+# a group hung off the selector root instead of a step has no step to be a predicate on
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 0, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: node 3 has kind has which is not allowed under selector
+
+# SELF on a later top-level step: it compiled to `s2._pre = s1._pre`, quietly turning a two-step
+# chain into a filter on one row instead of relating two
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: SELF is only legal as the first step of a HAS/NOT group
+
+# SELF on the FIRST top-level step, where there is nothing to be the same row as: the chain's
+# first step carries no combinator at all, so the op was read by nothing
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: SELF is only legal as the first step of a HAS/NOT group
+
+# SELF on a later step INSIDE a group: legal only on the group's first inner step
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 6, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+  {node_id: 7, parent_id: 6, kind: 'type', value: 'string', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: SELF is only legal as the first step of a HAS/NOT group
+
+# ...and SELF on the group's FIRST inner step still compiles, which is what `:not(C)` lowers to
+query I rowsort
+FROM tree_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 3, parent_id: 1, kind: 'not', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 4, parent_id: 3, kind: 'step', value: NULL, op: 'self', arg: NULL, alias: NULL},
+  {node_id: 5, parent_id: 4, kind: 'id', value: 'greet', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR) SELECT name;
+----
+shout
 
 # step WHERE sees the projection row; SIBLING and FOLLOWING work on the full profile
 query I rowsort
@@ -123,9 +337,39 @@ FROM tree_match('main', 'bare', tree_steps([{pseudo: 'leaf'}]));
 ----
 SEMANTIC
 
+# ...but NOT the built-in positional pseudo-classes. They are structural -- they compile through
+# the navigation fragments, read no S slot and bind nothing from the SEMANTIC group -- so the
+# S-less refusal does not cover them: it used to, which left `:first-child` unavailable on an
+# R-only tree although nothing it needs was missing. app.py's module row is the first (and only)
+# row at level 0 of its partition, and each of its children at _parent + 1 is a first child too.
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'bare', tree_steps([{pseudo: 'first-child'}]));
+----
+true
+
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'bare', tree_steps([{pseudo: 'last-child'}]));
+----
+true
+
+# and an unknown pseudo on the same tree still refuses in the same words: `first-child` is
+# exempt because it is a built-in, not because pseudo clauses stopped being S clauses
+statement error
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'nope'}]));
+----
+has no SEMANTIC group
+
 # an unknown tree refuses and says so (T10)
 statement error
 FROM tree_match('main', 'nope', tree_steps([{type: 'function_definition'}]));
+----
+not found
+
+# ... and it is the tree that is named, not whatever its clauses would have failed on. An
+# unknown tree has no attribute_columns artifact either, so the attribute refusal would fire
+# on every name; this pins that the missing tree is reported first.
+statement error
+FROM tree_match('main', 'nope', tree_steps([{attr: 'nosuchcol = 1'}]));
 ----
 not found
 
@@ -150,6 +394,27 @@ statement error
 FROM tree_match('main', 'cats', tree_steps([{"where": 'name = ''tools'''}, {comb: 'next'}]));
 ----
 SIBLING_ORDER
+
+# ... and so do the built-in POSITIONAL pseudo-classes, which the refusal used to miss: it
+# tested the combinator alone, so `:first-child` on a tree with no order among its siblings
+# compiled to `_pre = _parent + 1` over a _pre nothing orders and answered with whatever rows
+# happened to land there. "First" means nothing without SIBLING_ORDER, so it refuses, in the
+# sentence that already names what is missing.
+statement error
+FROM tree_match('main', 'cats', tree_steps([{pseudo: 'first-child'}]));
+----
+tree main.cats is sibling-free (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+
+statement error
+FROM tree_match('main', 'cats', tree_steps([{pseudo: 'last-child'}]));
+----
+SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+
+# and inside a group, where every other refusal is read too
+statement error
+FROM tree_match('main', 'cats', tree_steps([{"where": 'true', has: [{pseudo: 'first-child'}]}]));
+----
+:first-child and :last-child are unavailable
 
 # structural matching on a parent-basis tree
 statement ok
@@ -258,3 +523,105 @@ statement error
 FROM tree_match('main', 'marks', tree_steps([{id: 's1'}]), semantic := tree_semantic(id := 'tag', attr := 'tag'));
 ----
 cannot add attribute columns
+
+# The compiled text for a group-free selector, byte for byte. Task 5 rewrote the compiler as a
+# bottom-up fold over the IR; this record is the pin that says the rewrite changed how the chain
+# is built and not what it builds. Captured from the pre-fold compiler at c7ec9d6, so a diff here
+# is a change in the output contract, not a formatting detail.
+query I
+SELECT (tree_explain('main', 'app', tree_steps([{type: 'function_definition', "as": 'f'}, {comb: 'child', type: 'block'}]))).sql;
+----
+SELECT s3.* EXCLUDE (_root, _pre, _level, _parent, _size, _children, _next, _type, _id, _classes, _attr_map, _element, _pseudo), f AS f, 'main.app' AS _match_tree, 'treeql' AS _match_language, 0 AS _match_unknown_pseudos FROM tree_catalog."proj_4_main_app"() f JOIN tree_catalog."proj_4_main_app"() s3 ON s3._root = f._root AND s3._parent = f._pre AND (s3._type = 'block') WHERE f._type = 'function_definition'
+
+# Provenance: _match_language records the language the selector was WRITTEN in, which only the
+# caller knows. It is not read from tree_catalog.settings -- that row governs how the runner
+# parses selector *text*, and a selector handed over as IR was never parsed at all.
+query II
+SELECT (tree_explain('main', 'app', tree_steps([{type: 'block'}]))).language,
+       (tree_explain('main', 'app', tree_steps([{type: 'block'}]), language := 'css')).language;
+----
+treeql	css
+
+# ... and when the caller names none, it is the FRONT-END that answers, because the front-end is
+# the only thing that knows: each stamps its own name on the `selector` root row's value, and the
+# compiler reads that instead of guessing 'treeql'. tree_steps stamps treeql, so the record above
+# reads as it always did; the css front-ends stamp css (38). IR built by hand stamps nothing and
+# still reads treeql -- it was never parsed at all, which is what that answer means.
+query III
+SELECT (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: 'css', op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR)).language,
+       (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR)).language,
+       (tree_explain('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: 'css', op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR, language := 'treeql')).language;
+----
+css	treeql	treeql
+
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'module'}]), language := 'css') SELECT _match_language;
+----
+css
+
+# --------------------------------------------------------------------------------------
+# error(NULL) audit (Task 13)
+# --------------------------------------------------------------------------------------
+# 1.5.5 evaluates error(NULL) to NULL instead of raising, so a refusal whose message
+# concatenates a value that turns out to be NULL hands the caller a NULL fragment instead of
+# an error -- and a NULL fragment propagates silently through the whole compiled text. That is
+# the worst way for a matcher to fail: no answer where a refusal was owed. sql/09_css.sql met
+# this first (tree_css_err); these are the sites the Task 13 audit found outside it. Each is
+# reachable either with a NULL identity or with an IR node built by hand rather than by
+# tree_steps -- which the compiler already says it does not trust (see chk in 07_match.sql).
+# Every refusal in the macro files now goes through tree_err(), which raises whatever the
+# message turned out to be; the operands below are COALESCEd as well, so the message still
+# names what was wrong instead of falling back to the internal one.
+
+statement error
+SELECT tree_sql_comb(NULL, 'a', 'b', 'P', false);
+----
+unknown combinator <NULL>
+
+statement error
+SELECT tree_sql_clause(NULL, 'v', NULL, NULL, 's1', [], false, 'P', false);
+----
+unknown clause kind <NULL>
+
+statement error
+SELECT tree_sql_clause('attr', NULL, '=', '1', 's1', [], false, 'P', false);
+----
+attribute <NULL> is neither a projected column nor served by ATTR MAP
+
+statement error
+FROM tree_match(NULL, 'app', tree_steps([{type: 'module'}]));
+----
+tree <NULL>.app not found
+
+statement error
+FROM tree_match('main', NULL, tree_steps([{type: 'module'}]));
+----
+tree main.<NULL> not found
+
+# tree_err's own backstop: a refusal whose message is NULL for a reason the audit did not
+# anticipate still raises, with the internal message, rather than evaluating to NULL.
+statement error
+SELECT tree_err(NULL);
+----
+internal: refusal with a NULL message
+
+# An alias becomes a SQL relation alias and an output column name, so it has to be an
+# identifier. All three front-ends refuse one that is not; this is the convergence point, so
+# IR that reached the compiler by any other road is refused here too -- the same place, and for
+# the same reason, as the reserved s<N> shape one arm above it.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 'my-cap'},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: alias my-cap is not an identifier

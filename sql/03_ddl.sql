@@ -18,7 +18,21 @@ CREATE OR REPLACE MACRO tree_shape_from_catalog(db, sch, nm) AS (
       classes: max(expression) FILTER (WHERE slot = 'CLASSES'),
       attr: max(expression) FILTER (WHERE slot = 'ATTR'),
       attr_map: max(expression) FILTER (WHERE slot = 'ATTR_MAP'),
-      pseudo: (SELECT list({name: name, body: body, prefix: NULL::VARCHAR} ORDER BY name)
+      element: max(expression) FILTER (WHERE slot = 'ELEMENT'),
+      pseudo_args: max(expression) FILTER (WHERE slot = 'PSEUDO_ARGS'),
+      -- kind = 'macro' rows store body as 'macro_name(args)' (tree_sql_pseudo_insert), so both
+      -- are recoverable by parsing instead of dropped: without macro, a LIKE child's shared-tier
+      -- scan cannot recognize that an inherited entry already claims a catalog macro (the
+      -- identity exclusion in tree_expand_pseudo needs (x).macro), and re-binds it a second time
+      -- under a different derived name. origin is carried back as a provenance-only prefix
+      -- marker, so a LIKE child re-inserting this entry (tree_sql_pseudo_insert) records the
+      -- right origin instead of flattening every inherited row to 'local'. tree_shared_pseudo_prefix()
+      -- specifically reuses tree_expand_pseudo's own shared-tier marker; any other non-NULL value
+      -- just needs to be distinct from it so the origin CASE falls through to 'prefix'.
+      pseudo: (SELECT list({name: name, body: body,
+                            macro: CASE WHEN kind = 'macro' THEN split_part(body, '(', 1) END,
+                            args: CASE WHEN kind = 'macro' THEN NULLIF(regexp_extract(body, '^[^(]*\((.*)\)$', 1), '') END,
+                            prefix: CASE origin WHEN 'shared' THEN tree_shared_pseudo_prefix() WHEN 'prefix' THEN 'prefix' ELSE NULL END} ORDER BY name)
                FROM tree_catalog.pseudo_classes p WHERE p.database_name = db AND p.schema_name = sch AND p.tree_name = nm)
     }::TREE_SEMANTIC }::TREE_SHAPE END
   FROM tree_catalog.slots WHERE database_name = db AND schema_name = sch AND tree_name = nm);
@@ -33,18 +47,85 @@ CREATE OR REPLACE MACRO tree_shape_merge(p, c) AS
       type: COALESCE((c).semantic.type, (p).semantic.type), id: COALESCE((c).semantic.id, (p).semantic.id),
       classes: COALESCE((c).semantic.classes, (p).semantic.classes), attr: COALESCE((c).semantic.attr, (p).semantic.attr),
       attr_map: COALESCE((c).semantic.attr_map, (p).semantic.attr_map),
+      element: COALESCE((c).semantic.element, (p).semantic.element),
+      pseudo_args: COALESCE((c).semantic.pseudo_args, (p).semantic.pseudo_args),
       pseudo: list_concat(
         list_filter(COALESCE((p).semantic.pseudo, []), lambda x: NOT list_contains(list_transform(COALESCE((c).semantic.pseudo, []), lambda y: (y).name), (x).name)),
         COALESCE((c).semantic.pseudo, []))
     }::TREE_SEMANTIC }::TREE_SHAPE END;
 
+-- The pseudo_classes rows for an already expanded pseudo list, shared by create and alter so the
+-- two cannot record a binding differently. NULL when there is nothing to insert (the caller's
+-- statement list drops NULLs). kind and origin record how the body was bound: macro when a macro
+-- name was named, prefix when the entry came from a prefix binding, shared when it came from the
+-- sel_* shared tier. tree_expand_pseudo marks every prefix-derived entry's `prefix` field with
+-- the literal prefix that produced it (or, for the shared tier specifically, with 'sel_' -- its
+-- own marker); a NULL prefix means the entry was bound locally (or, for a LIKE-inherited
+-- expression/macro row, was already local at the parent). A prefix of exactly 'sel_' is
+-- ambiguous on its own: it also marks the case where the tree itself declared an explicit
+-- {prefix: 'sel_'} binding (a legitimate, if unusual, prefix form). `explicit_sel_prefix` --
+-- computed by the caller from the tree's own unexpanded PSEUDO declaration, never from a
+-- merged/inherited one -- breaks the tie: shared only when the tree did not itself ask for that
+-- literal prefix. purity is not computed yet.
+CREATE OR REPLACE MACRO tree_sql_pseudo_insert(db, sch, nm, pseudo, explicit_sel_prefix) AS
+  CASE WHEN len(COALESCE(pseudo, [])) = 0 THEN NULL ELSE
+  'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform(pseudo, lambda x:
+      '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', '
+      || CASE WHEN (x).macro IS NULL THEN '''expression''' ELSE '''macro''' END || ', ' || tree_sql_lit((x).body) || ', '
+      || CASE WHEN (x).prefix IS NULL THEN '''local'''
+              WHEN (x).prefix = tree_shared_pseudo_prefix() AND NOT explicit_sel_prefix THEN '''shared'''
+              ELSE '''prefix''' END || ', ''unknown'')'), 'string_agg', ', ') END;
+
+-- The attribute_columns artifact: the projection's non-canonical columns -- name AND declared
+-- type -- in projection order, as a JSON list of `{"name": ..., "type": ...}` objects. Recorded
+-- rather than recomputed because the front-ends (and the CSS lowering M2 adds) need to know which
+-- bare names are attributes without describing the relation on every query. The projection macro
+-- is described, not the source, so it is right for both storage modes -- a materialized tree's
+-- macro selects from its table.
+--
+-- The TYPE was added by the PR #2 fix wave (R7). Without it the clause compiler could only splice
+-- the literal as written, so an unquoted css number against a text column (`[name=5]`) compiled to
+-- `name = 5`, which DuckDB binds by casting the COLUMN -- and the first row whose text is not a
+-- number aborted the whole query. tree_sql_attr_col_cmp (sql/07_match.sql) reads the type and
+-- picks the comparison; an artifact written before this change is a bare list of names and reads
+-- back with a NULL type, which that macro also handles.
+--
+-- 1.5.5 notes: DESCRIBE takes a statement, not a table-function call ("DESCRIBE proj()" is a
+-- parser error, "DESCRIBE SELECT * FROM proj()" is not), and its output has no column_index,
+-- so projection order is recovered with row_number() OVER () over the describe rows.
+CREATE OR REPLACE MACRO tree_sql_attr_cols_insert(db, sch, nm, proj_name) AS
+  'INSERT INTO tree_catalog.compiled SELECT ' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm)
+  || ', ''attribute_columns'', '''', to_json(COALESCE(list({''name'': column_name, ''type'': column_type} ORDER BY i), []))'
+  || ' FROM (SELECT column_name, column_type, row_number() OVER () AS i FROM (DESCRIBE SELECT * FROM ' || proj_name || '()))'
+  || ' WHERE column_name NOT LIKE ''\_%'' ESCAPE ''\''';
+
 CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS (
 WITH base AS (
   SELECT current_database() AS db,
-         tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS shape,
+         tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS merged,
          (spec)."like" IS NOT NULL AND tree_shape_from_catalog(current_database(), sch, (spec)."like") IS NULL AS like_missing,
          EXISTS (SELECT 1 FROM tree_catalog.trees t WHERE t.database_name = current_database() AND t.schema_name = sch AND t.tree_name = nm) AS exists_already,
          (spec).abstract AS abstract, (spec).source AS source, (spec).storage AS storage
+),
+-- Macro-, map- and prefix-bound pseudo-classes become expression bodies here, before validation
+-- and before anything is stored: tree_sql_pseudo_map reads (p).body only, so an unexpanded
+-- binding would compile the pseudo map -- and with it the projection -- to NULL. The catalog
+-- then holds the expanded body, so nothing downstream has to re-expand (and a prefix binding
+-- is resolved once, against the macros that existed at create time).
+expanded AS (
+  SELECT * EXCLUDE (merged),
+    -- the group as WRITTEN, kept alongside the expanded one for tree_sql_check_prefixes: a prefix
+    -- that bound no macro leaves no trace in the expansion (sql/00_types.sql)
+    (merged).semantic AS raw_semantic,
+    {root: (merged).root, "order": (merged)."order", key: (merged).key, level: (merged).level, parent: (merged).parent,
+     sibling_order: (merged).sibling_order, size: (merged).size, children: (merged).children, next: (merged).next,
+     semantic: tree_expand_pseudo((merged).semantic)}::TREE_SHAPE AS shape,
+    -- Tested against this create's own declared PSEUDO, never the LIKE-merged one: a parent's
+    -- already-resolved shared/prefix rows round-trip with a provenance marker of their own
+    -- (tree_shape_from_catalog), and that marker must never be mistaken for a fresh explicit
+    -- declaration by this tree.
+    len(list_filter(COALESCE((spec).shape.semantic.pseudo, []), lambda p: (p).prefix = tree_shared_pseudo_prefix())) > 0 AS explicit_sel_prefix
+  FROM base
 ),
 derived AS (
   SELECT *,
@@ -53,33 +134,43 @@ derived AS (
     CASE WHEN (shape).level IS NULL AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
     CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
-    -- A LIKE child has an S group when it declares one or when its parent has one, whatever
-    -- slot the parent filled: reading the parent's TYPE alone made an ID-only parent invisible.
-    (spec).shape.semantic IS NOT NULL
+    -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
+    -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. The question -- does this
+    -- SEMANTIC declare an S slot? -- is tree_semantic_declares (sql/00_types.sql), the one
+    -- predicate create, alter and the match compiler's overlay check all read, so the three
+    -- cannot drift apart (they had: see that macro's comment).
+    --
+    -- The slots are read off the LIKE-MERGED shape, so an inherited slot counts as a declared
+    -- one; the last term carries a parent whose own S group this shape cannot see, because
+    -- reading the parent's TYPE alone made an ID-only parent invisible.
+    tree_semantic_declares((shape).semantic)
       OR COALESCE((SELECT tr.has_semantic FROM tree_catalog.trees tr
                    WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = (spec)."like"), false) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
     'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
-  FROM base
+  FROM expanded
 ),
 checked AS (
   SELECT *,
     CASE
       -- NULL in any value interpolated into a generated statement would compile that whole
       -- statement to NULL and drop it from the list, so identity and storage are checked first.
-      WHEN sch IS NULL OR nm IS NULL THEN error('tree_ddl_create: schema and name are required')
-      WHEN abstract IS NULL THEN error('tree_ddl_create: abstract must be true or false')
-      WHEN exists_already THEN error('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
-      WHEN like_missing THEN error('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
-      WHEN abstract AND source IS NOT NULL THEN error('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
-      WHEN NOT abstract AND source IS NULL THEN error('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
-      WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN error('tree_ddl_create: storage must be materialized or projection')
-      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN error('tree_ddl_create: declare LEVEL or PARENT (R2)')
-      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN error('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
-      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN error('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
-      WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN error('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
-      WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN error('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
-      ELSE tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
+      WHEN sch IS NULL OR nm IS NULL THEN tree_err('tree_ddl_create: schema and name are required')
+      WHEN abstract IS NULL THEN tree_err('tree_ddl_create: abstract must be true or false')
+      WHEN exists_already THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
+      WHEN like_missing THEN tree_err('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
+      WHEN abstract AND source IS NOT NULL THEN tree_err('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
+      WHEN NOT abstract AND source IS NULL THEN tree_err('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
+      WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN tree_err('tree_ddl_create: storage must be materialized or projection')
+      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN tree_err('tree_ddl_create: declare LEVEL or PARENT (R2)')
+      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
+      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
+      WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN tree_err('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
+      WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN tree_err('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
+      -- both halves of the S ladder: the prefix check reads the group as written (a prefix that
+      -- bound nothing is gone from the expansion), the rest reads the expanded one
+      ELSE tree_sql_check_prefixes(raw_semantic, 'tree_ddl_create')
+           AND tree_sql_check_semantic((shape).semantic, attr_text, 'tree_ddl_create') END AS ok,
     CASE WHEN abstract THEN NULL ELSE tree_compile_projection(shape, source, attr_text) END AS proj_sql
   FROM derived
 ),
@@ -90,6 +181,7 @@ slot_rows AS (
     {b: 'R', s: 'SIBLING_ORDER', e: (shape).sibling_order},
     {b: 'S', s: 'TYPE', e: (shape).semantic.type}, {b: 'S', s: 'ID', e: (shape).semantic.id}, {b: 'S', s: 'CLASSES', e: (shape).semantic.classes},
     {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (shape).semantic.attr_map},
+    {b: 'S', s: 'ELEMENT', e: (shape).semantic.element}, {b: 'S', s: 'PSEUDO_ARGS', e: (shape).semantic.pseudo_args},
     {b: 'O', s: 'SIZE', e: (shape).size}, {b: 'O', s: 'CHILDREN', e: (shape).children}, {b: 'O', s: 'NEXT', e: (shape).next}
   ], lambda x: (x).e IS NOT NULL) AS rows, * FROM checked
 ),
@@ -103,9 +195,7 @@ built AS (
      || tree_sql_lit(storage) || ', ' || tree_sql_lit(order_source) || ', ' || has_semantic || ', NULL)' AS s_trees,
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
-   CASE WHEN len(COALESCE((shape).semantic.pseudo, [])) = 0 THEN NULL ELSE
-   'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform((shape).semantic.pseudo, lambda x:
-       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', ''expression'', ' || tree_sql_lit((x).body) || ', ''local'', ''unknown'')'), 'string_agg', ', ') END AS s_pseudo,
+   tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo, explicit_sel_prefix) AS s_pseudo,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
@@ -114,14 +204,15 @@ built AS (
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE
      'INSERT INTO tree_state.partitions SELECT ' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', _root::VARCHAR, 1, count(*), true, now() FROM ' || tbl_name || ' GROUP BY _root' END AS s_partitions,
    CASE WHEN abstract THEN NULL ELSE 'INSERT INTO tree_catalog.compiled VALUES (' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''projection'', ' || tree_sql_lit(proj_name) || ', ' || tree_sql_lit(proj_sql) || ')' END AS s_compiled,
+   CASE WHEN abstract THEN NULL ELSE tree_sql_attr_cols_insert(db, sch, nm, proj_name) END AS s_attr_cols,
    'COMMIT' AS s_commit
   FROM slot_rows WHERE ok
 )
 SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_commit IS NULL
-            -- plain error(), not (SELECT error(...)): an uncorrelated scalar subquery is
+            -- plain tree_err(), not (SELECT tree_err(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
-            THEN error('tree_ddl_create: internal: a required statement compiled to NULL')
-            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_commit], lambda x: x IS NOT NULL) END
+            THEN tree_err('tree_ddl_create: internal: a required statement compiled to NULL')
+            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);
 
 CREATE OR REPLACE MACRO tree_compile_drop(sch, nm) AS (
@@ -151,27 +242,52 @@ WITH t AS (
          tree_shape_from_catalog(current_database(), sch, nm) AS old_shape
   FROM tree_catalog.trees tr WHERE tr.database_name = current_database() AND tr.schema_name = sch AND tr.tree_name = nm
 ),
+-- Same expansion create does, for the same reason: the stored body and the compiled pseudo
+-- map are expression text, never a macro name (00_types.sql, tree_expand_pseudo). Tested
+-- against this alter's own `semantic` argument (never `sem`, its expansion): an explicit
+-- {prefix: 'sel_'} declaration is what this flag means, not the shared tier's own marker.
+ex AS (SELECT *, tree_expand_pseudo(semantic) AS sem,
+              len(list_filter(COALESCE((semantic).pseudo, []), lambda p: (p).prefix = tree_shared_pseudo_prefix())) > 0 AS explicit_sel_prefix
+       FROM t),
 n AS (
   SELECT *,
     {root: (old_shape).root, "order": (old_shape)."order", key: (old_shape).key, level: (old_shape).level, parent: (old_shape).parent, sibling_order: (old_shape).sibling_order,
-     size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: semantic}::TREE_SHAPE AS shape,
-    COALESCE((semantic).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
+     size: (old_shape).size, children: (old_shape).children, next: (old_shape).next, semantic: sem}::TREE_SHAPE AS shape,
+    COALESCE((sem).attr, (old_shape).semantic.attr, CASE WHEN is_abstract THEN '' ELSE '*' END) AS attr_text,
+    -- Whether the tree has an S GROUP after this alter, which is what tree_match reads to decide
+    -- whether an S clause may be asked for. The same predicate create reads (tree_semantic_declares,
+    -- sql/00_types.sql), asked of THIS ALTER'S semantic and nothing else.
+    --
+    -- Nothing is OR'd in from the flag the tree already carried. Alter REPLACES the S group -- the
+    -- statement list below DELETEs every S slot of the tree and re-inserts only the ones this
+    -- semantic declares -- so a flag that survived its slots was a flag about slots that are gone:
+    -- a TYPE tree altered to an ATTR-only semantic stayed marked S-ful, and a TYPE clause then
+    -- compiled against the 'node' default and returned nothing where a refusal was owed. 13_alter
+    -- carries the record. (The comment here used to say "alter adds to what create declared",
+    -- which the DELETE two dozen lines below has always made false.)
+    tree_semantic_declares(sem) AS has_semantic,
     'tree_catalog.' || tree_sql_object_name('proj', sch, nm) AS proj_name,
     'tree_catalog.' || tree_sql_object_name('t', sch, nm) AS tbl_name
-  FROM t
+  FROM ex
 ),
 c AS (
   SELECT *, CASE WHEN is_abstract THEN NULL ELSE tree_compile_projection(shape, source_sql, attr_text) END AS proj_sql,
-    tree_sql_check_semantic(semantic, attr_text, 'tree_ddl_alter') AS ok,
+    -- the same two halves create runs, in this verb's words: the prefix check reads `semantic`,
+    -- the argument as written, because a prefix that bound no macro is gone from `sem`
+    tree_sql_check_prefixes(semantic, 'tree_ddl_alter')
+      AND tree_sql_check_semantic(sem, attr_text, 'tree_ddl_alter') AS ok,
     list_filter([
-      {b: 'S', s: 'TYPE', e: (semantic).type}, {b: 'S', s: 'ID', e: (semantic).id}, {b: 'S', s: 'CLASSES', e: (semantic).classes},
-      {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (semantic).attr_map}], lambda x: (x).e IS NOT NULL) AS rows
+      {b: 'S', s: 'TYPE', e: (sem).type}, {b: 'S', s: 'ID', e: (sem).id}, {b: 'S', s: 'CLASSES', e: (sem).classes},
+      {b: 'S', s: 'ATTR', e: attr_text}, {b: 'S', s: 'ATTR_MAP', e: (sem).attr_map},
+      {b: 'S', s: 'ELEMENT', e: (sem).element}, {b: 'S', s: 'PSEUDO_ARGS', e: (sem).pseudo_args}], lambda x: (x).e IS NOT NULL) AS rows
   FROM n
 )
-SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; nothing to alter')
+SELECT CASE WHEN semantic IS NULL THEN tree_err('tree_ddl_alter: semantic is NULL; nothing to alter')
   -- evaluated outside FROM c: when the tree does not exist c has no rows, and a compiler
-  -- that returns NULL instead of refusing hands the executor nothing to run
-  WHEN NOT EXISTS (SELECT 1 FROM t) THEN error('tree_ddl_alter: tree ' || sch || '.' || nm || ' not found') ELSE
+  -- that returns NULL instead of refusing hands the executor nothing to run (F11). The
+  -- COALESCEs close the same hole by the other route: a NULL schema or name makes this the
+  -- branch that fires AND makes its message NULL, and error(NULL) is NULL in 1.5.5.
+  WHEN NOT EXISTS (SELECT 1 FROM t) THEN tree_err('tree_ddl_alter: tree ' || COALESCE(sch, '<NULL>') || '.' || COALESCE(nm, '<NULL>') || ' not found') ELSE
   (SELECT list_filter(['BEGIN TRANSACTION',
    CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE
    'SELECT CASE WHEN count(*) > 0 THEN error(''tree_ddl_alter: tree ' || replace(sch || '.' || nm, '''', '''''')
@@ -190,14 +306,16 @@ SELECT CASE WHEN semantic IS NULL THEN error('tree_ddl_alter: semantic is NULL; 
    'DELETE FROM tree_catalog.pseudo_classes WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', '),
-   CASE WHEN len(COALESCE((semantic).pseudo, [])) = 0 THEN NULL ELSE
-   'INSERT INTO tree_catalog.pseudo_classes VALUES ' || list_aggregate(list_transform((semantic).pseudo, lambda x:
-       '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).name) || ', ''expression'', ' || tree_sql_lit((x).body) || ', ''local'', ''unknown'')'), 'string_agg', ', ') END,
-   'UPDATE tree_catalog.trees SET has_semantic = true WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
+   tree_sql_pseudo_insert(db, sch, nm, (sem).pseudo, explicit_sel_prefix),
+   'UPDATE tree_catalog.trees SET has_semantic = ' || has_semantic || ' WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm),
    CASE WHEN is_abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE OR REPLACE TABLE ' || tbl_name || ' AS ' || proj_sql END,
    CASE WHEN is_abstract THEN NULL WHEN storage = 'materialized' THEN 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE SELECT * FROM ' || tbl_name
         ELSE 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE ' || proj_sql END,
    CASE WHEN is_abstract THEN NULL ELSE 'UPDATE tree_catalog.compiled SET sql_text = ' || tree_sql_lit(proj_sql) || ' WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''projection''' END,
+   -- deleted and re-inserted rather than updated: the new column list is computed by describing
+   -- the rebuilt projection, which an UPDATE ... SET sql_text = (subquery) cannot do portably
+   CASE WHEN is_abstract THEN NULL ELSE 'DELETE FROM tree_catalog.compiled WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''attribute_columns''' END,
+   CASE WHEN is_abstract THEN NULL ELSE tree_sql_attr_cols_insert(db, sch, nm, proj_name) END,
    'COMMIT'], lambda x: x IS NOT NULL) FROM c WHERE ok) END);
 
 -- The canonical projection of a registered tree. query() folds the concatenated literal to a constant.

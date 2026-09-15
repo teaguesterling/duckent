@@ -9,7 +9,7 @@ SELECT len(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'blo
 query IIII rowsort
 SELECT node_id, parent_id, kind, COALESCE(value, op, alias) FROM (SELECT unnest(tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block', "as": 'b'}]), recursive := true));
 ----
-0	NULL	selector	NULL
+0	NULL	selector	treeql
 1	0	step	NULL
 2	1	type	function_definition
 3	0	step	child
@@ -58,8 +58,46 @@ SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'x', "as": 'src'}])), 
 ----
 (TYPE 'x') AS src
 
+# An alias becomes a SQL relation alias and an output column name, so it has to be an
+# identifier. `my-cap` passed every producer -- tree_steps built it, the printer printed it,
+# both css front-ends accepted `@my-cap` -- and then died in DuckDB's binder on
+# `... AS my-cap`, an error naming nothing the user wrote. Refused where it is written now,
+# in all three front-ends and in the compiler behind them.
+statement error
+SELECT tree_steps([{type: 'x', "as": 'my-cap'}]);
+----
+tree_steps: alias my-cap is not an identifier
+
+# the same rule on a hand-built selector handed to the splice
+statement error
+SELECT tree_steps_group([{node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+                         {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: 'my-cap'}]::TREE_SELECTOR,
+                        'my-cap', 'has', tree_steps([{type: 'b'}]));
+----
+tree_steps_group: alias my-cap is not an identifier
+
 # a step with no combinator after the first defaults to DESCENDANT
 query I
 SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}])), chr(10), ' | ');
 ----
 (TYPE 'a') | DESCENDANT (TYPE 'b')
+
+# ...and a combinator WRITTEN on the first step is refused rather than dropped. The first step of
+# the outer chain has nothing to its left, so a comb there means nothing; dropping it silently
+# made `[{comb: 'child', type: 'a'}]` and `[{type: 'a'}]` the same selector, while the css parser
+# refuses the same shape ("a combinator with nothing on its left"). Two front-ends, one answer.
+statement error
+SELECT tree_steps([{comb: 'child', type: 'a'}]);
+----
+tree_steps: the first step takes no combinator
+
+statement error
+SELECT tree_steps([{comb: 'desc', type: 'a'}, {comb: 'child', type: 'b'}]);
+----
+tree_steps: the first step takes no combinator
+
+# the first step of a GROUP's chain does take one -- that is what anchors the group
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a', has: [{comb: 'child', type: 'b'}]}])), chr(10), ' | ');
+----
+(TYPE 'a', HAS ( CHILD (TYPE 'b') ))

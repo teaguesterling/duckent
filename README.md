@@ -4,7 +4,7 @@ Tree semantics for ordered relations: the contract every duck sits on.
 
 duckent is a (planned) DuckDB extension that implements **tree semantics over ordered relations**: the layer *below* every parser. It defines what makes a set of rows a tree, what a CSS-style selector means over those rows, and how a `MATCH` compiles to ordinary SQL. Parsers such as [sitting_duck](https://github.com/teaguesterling/sitting_duck) (ASTs) and [duck_block_utils](https://github.com/teaguesterling/duckdb_duck_block_utils) (documents), and every adjacency list already in your warehouse (org charts, category trees, BOMs, file hierarchies), become *vocabularies over one contract*.
 
-> **Status: macro prototype.** `sql/` holds a macro-only reference implementation of M0, M1, and M1½: the catalog, the projection compiler, both basis derivations, forest DML with P13 on ingest, and TREEQL matching through `tree_steps`. It runs on DuckDB 1.5.5 with no extension dependency. `test/sql/` holds the sqllogictest suites and `test/mutants/` the planted mutants; both carry over unchanged to the C++ extension. The design is in [`docs/superpowers/specs/2026-09-13-duckent-core-design.md`](docs/superpowers/specs/2026-09-13-duckent-core-design.md).
+> **Status: macro prototype, M2 runs.** `sql/` holds a macro-only reference implementation of M0, M1, M1½ and M2: the catalog, the projection compiler, both basis derivations, forest DML with P13 on ingest, TREEQL matching through `tree_steps`, and now nested `HAS`/`NOT` groups with a `SELF` relation, two css front-ends bound to each other by a row-level differential, a typed `ATTR MAP`, element rows, four pseudo-class binding forms with a shared `sel_*` tier, and a selector corpus checked against frozen sitting_duck references. It runs on DuckDB 1.5.5 with no extension dependency. `test/sql/` holds the sqllogictest suites and `test/mutants/` the planted mutants; both carry over unchanged to the C++ extension. The design is in [`docs/superpowers/specs/2026-09-13-duckent-core-design.md`](docs/superpowers/specs/2026-09-13-duckent-core-design.md) and, for M2, [`docs/superpowers/specs/2026-09-14-duckent-m2-design.md`](docs/superpowers/specs/2026-09-14-duckent-m2-design.md). Where the build differed from either, `FINDINGS.md` says so.
 
 The name: Ents speak Tree, and Treebeard's policy of never saying anything unless it is worth taking a long time to say is bind-time checking's motto.
 
@@ -85,20 +85,48 @@ Four blocks, taught in dependency order (R, S, O, W). Rearranged, the initials s
 |---|---|---|
 | M0 | Shape and tree registry, projection compiler, per-partition well-formedness | Property tests over generated level sequences; sitting_duck output as oracle fixture |
 | M1 | Basis derivations (level to parent, parent to order and level), sibling-free profile | Round-trip identities; legible refusals |
-| M2 | Matcher core over R and S | Differential oracle against sitting_duck's shipped `ast_select` |
+| M2 | Matcher core over R and S | Differential oracle against sitting_duck's shipped `ast_select` — **met**: 107 of 108 frozen references asserted and passing, the 108th adjudicated against upstream in `FINDINGS.md` (sitting_duck's bare type selector prefix-matches) |
 | M3 | O layer and planner use of it | Auto-generated conformance assertions; module-boundary mutant |
 | M4 | Pseudo-class dispatch, profiles, introspection, docs | Cheatsheet generated from catalog queries |
 
-Twenty-one planted mutants are listed in the handover document. All must die before a milestone closes.
+Planted mutants are listed in the handover document and tracked in `test/mutants/manifest.yaml`.
+All must die before a milestone closes. Eighteen are planted today and all eighteen die; the
+remaining ids are deferred or reserved — the W block, the O-layer one that arrives with M3, the
+retired host-escape number, and one that waits on the selector-language work. A surviving mutant
+is fixed by a test, never by a manifest edit, and a manifest states what a mutant does rather
+than what one hopes it does.
+
+A mutant of the copy-and-edit kind is *that macro, with one edit*, and that claim does not hold
+by itself: a sweep over the sources leaves the copies quoting macros that no longer exist, and
+they go on being killed, because a macro from two commits ago fails the same tests a wrong one
+does. So the copies are generated (`test/mutants/regen.py`) from the macro plus a declared edit,
+`--check` refuses a drifted one before any suite runs, and each generated mutant has a
+`.control.sql` — the same copy with the edit left out — which the harness applies and requires to
+PASS. A kill with no passing control is reported, not counted.
 
 ## Running the prototype
 
 ```bash
 pip install duckdb==1.5.5 pyyaml
 python3 test/run.py test/sql          # the suites
-python3 test/run_mutants.py           # every planted mutant must die
+python3 test/run_mutants.py           # every planted mutant must die, and each kill is
+                                      #   verified against its control (--no-verify skips)
+python3 test/mutants/regen.py         # rewrite the generated mutant copies and controls
+python3 test/test_css_parser.py       # unit tests for the runner's css parser
+python3 test/spike_listspace.py       # the D-N17 measurement; prints timings, changes nothing
+                                      #   --materialized also times the pre-built list form
+python3 test/import_astcss_eval.py    # regenerates the corpus suites 40-44; idempotent
 python3 test/gen_fixtures.py          # only to regenerate fixtures; needs sitting_duck and markdown
 ```
+
+Three suites open with `require sitting_duck` — `38_css_lower`, `41b_live_sitting_duck` and
+`44_parsers`, the ones that run the SQL css front-end or the live engine. The runner skips a file
+whose `require` will not load, so the suite is green without the extension: the differential
+itself (`41_differential_sitting_duck.test`) needs no `require`, because it compares against
+**frozen** references committed with the corpus, and the fixtures carry the columns
+(`css_classes`, `is_element`, `params`) that sitting_duck would otherwise have to supply.
+`41b_live_sitting_duck.test` additionally reads the astcss-eval fixture directory, which the
+runner cannot skip for — a `require` covers a missing extension, not a missing directory.
 
 Quick tour in a DuckDB session after loading `sql/*.sql` in order (the runner does this for you):
 
@@ -119,6 +147,9 @@ In the macro phase `CALL tree_ddl_*`, the DML verbs, and `tree_match` are execut
 | [`docs/11-duckent-handover-v21.md`](docs/11-duckent-handover-v21.md) | The build brief. Identity, doctrine, the normative contract, API surface, milestones, planted mutants, open decisions. Usable verbatim as an engineer brief or a Claude Code session prompt. |
 | [`docs/14-shape-syntax-options-v13.md`](docs/14-shape-syntax-options-v13.md) | The settled DDL and DML family, with the design-space enumeration, verdicts, and the experiment log showing every ingredient verified on DuckDB 1.x. |
 | [`docs/12-tree-contract-lesson-v18.html`](docs/12-tree-contract-lesson-v18.html) | The public teaching layer: a hands-on lesson from `grep` to `CREATE TREE`. Self-contained HTML. Published at <https://teaguesterling.github.io/pages/static/tree-contract-lesson.html>. |
+| [`docs/superpowers/specs/2026-09-13-duckent-core-design.md`](docs/superpowers/specs/2026-09-13-duckent-core-design.md) | The implementation architecture: catalog schema, types, operations, the projection, match evaluation, what the C++ port replaces. Amended at the close of M2. |
+| [`docs/superpowers/specs/2026-09-14-duckent-m2-design.md`](docs/superpowers/specs/2026-09-14-duckent-m2-design.md) | The M2 design: nesting, the two css front-ends, the differential harness, the mutants. Marked "built"; the amended paragraphs say where the build and the design differ. |
+| [`FINDINGS.md`](FINDINGS.md) | Every oracle divergence with its adjudication, every DuckDB 1.5.5 constraint the design had to bend around, the spike numbers, and the open items after M2. |
 
 The handover names other companion documents (the assertion plan, the trees-to-rows paper, the sitting_duck verification pass) that are not yet in this repository.
 

@@ -9,6 +9,9 @@ is replaced by its compiled query.
 import argparse, glob, os, re, sys
 import duckdb
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import css_parser
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SQL_DIR = os.path.join(ROOT, "sql")
 EXEC_VERBS = ("tree_ddl_create", "tree_ddl_drop", "tree_ddl_alter",
@@ -56,9 +59,10 @@ def split_statements(text):
     return out
 
 
-def find_call(text, fname):
-    """Return (start, end, args) of the first fname(...) with balanced parens, or None."""
-    m = re.search(r"\b" + fname + r"\s*\(", text)
+def find_call(text, fname, pos=0):
+    """Return (start, end, args) of the first fname(...) at or after pos with balanced
+    parens, or None. `end` is one past the closing paren."""
+    m = re.compile(r"\b" + fname + r"\s*\(").search(text, pos)
     if not m: return None
     depth, i, n = 1, m.end(), len(text)
     quote = None
@@ -73,6 +77,41 @@ def find_call(text, fname):
         elif c == ")": depth -= 1
         i += 1
     return (m.start(), i, text[m.end():i - 1])
+
+
+def split_args(text):
+    """Split an argument list at top-level commas, respecting quotes and nesting. Parens,
+    brackets and braces all nest, so a list or struct literal passed as one argument keeps
+    its own commas. Each part is returned with its original spacing."""
+    parts, buf, depth, quote, i, n = [], [], 0, None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == quote:
+                if i + 1 < n and text[i + 1] == quote: buf.append(c); i += 1
+                else: quote = None
+        elif c in ("'", '"'): quote = c
+        elif c in "([{": depth += 1
+        elif c in ")]}": depth -= 1
+        elif c == "," and depth == 0:
+            parts.append("".join(buf)); buf = []; i += 1; continue
+        buf.append(c); i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def string_literal(text):
+    """The value of a single-quoted SQL literal, or None if `text` is not exactly one."""
+    s = text.strip()
+    if len(s) < 2 or not s.startswith("'") or not s.endswith("'"): return None
+    body = s[1:-1]
+    # a quote that is not part of a doubled pair would have ended the literal early, which
+    # means `text` is an expression over several literals rather than one literal
+    if "'" in body.replace("''", ""): return None
+    return body.replace("''", "'")
+
+
+NAMED_ARG_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.*)$", re.S)
 
 
 class Session:
@@ -91,7 +130,74 @@ class Session:
             except Exception as e:
                 raise RuntimeError(f"{label}: {e}\n  in: {stmt[:200]}") from e
 
+    @staticmethod
+    def language_arg(args):
+        """(the call carries a `language :=` argument, its literal value or None). The two are
+        not the same question, and the rewrite below needs both: a call that carries one must not
+        have a second appended to it, whatever the argument says -- DuckDB refuses a duplicate
+        named parameter -- while only a LITERAL one tells the parser which front-end to use."""
+        for part in args[3:]:
+            m = NAMED_ARG_RE.match(part)
+            if m and m.group(1) == "language":
+                return True, string_literal(m.group(2))
+        return False, None
+
+    @staticmethod
+    def written_language(args):
+        """The language the call NAMES, or None when it names none (or names it with something
+        other than a text literal, which the parse-time lookup cannot read)."""
+        return Session.language_arg(args)[1]
+
+    def default_language(self):
+        """The catalog's default selector language: which front-end parses selector TEXT that
+        names no language. Emulates the parse-time lookup the extension will do."""
+        return self.con.execute(
+            "SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language'").fetchone()[0]
+
+    def selector_language(self, args):
+        """The language a selector argument list is written in: the `language := ...` named
+        argument if it carries one, else the catalog's default."""
+        return self.written_language(args) or self.default_language()
+
+    def rewrite_selectors(self, sql):
+        """Replace a *text* selector in tree_match/tree_explain with the IR its language parses
+        it to, leaving every other argument alone. A selector already handed over as IR is not
+        text and is left untouched.
+
+        When the call names no language, the default from `tree_catalog.settings` is applied AND
+        WRITTEN BACK as `language := '<default>'`. That is the front-end recording the language it
+        used: the compiler reports `_match_language = COALESCE(language, 'treeql')` and sees only
+        IR, so without this a selector parsed as css reported `treeql` -- provenance naming a
+        language nothing had parsed. Here the parse and the provenance are the same decision, made
+        once, by the thing that made it. A call that names its language keeps the one it named --
+        and so does one that names it with an expression rather than a literal: the parse-time
+        lookup cannot read that, so the default front-end parses it as before, but nothing is
+        appended, because a second `language :=` would be a duplicate named parameter."""
+        for fname in ("tree_match", "tree_explain"):
+            pos = 0
+            while True:
+                hit = find_call(sql, fname, pos)
+                if not hit: break
+                start, end, argtext = hit
+                args = split_args(argtext)
+                text = string_literal(args[2]) if len(args) >= 3 else None
+                if text is None:
+                    pos = end; continue
+                named, lang = self.language_arg(args)
+                if lang is None:
+                    lang = self.default_language()
+                    if not named:
+                        args.append(" language := '" + lang.replace("'", "''") + "'")
+                if lang != "css":
+                    raise RuntimeError("tree_match: TREEQL text parsing arrives with M-LANG; pass tree_steps(...)")
+                args[2] = " " + css_parser.to_sql(css_parser.parse(text))
+                call = sql[start:sql.index("(", start) + 1] + ",".join(args) + ")"
+                sql = sql[:start] + call + sql[end:]
+                pos = start + len(call)
+        return sql
+
     def rewrite_match(self, sql):
+        sql = self.rewrite_selectors(sql)
         while True:
             hit = find_call(sql, "tree_match")
             if not hit: return sql

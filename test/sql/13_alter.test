@@ -64,3 +64,125 @@ statement error
 CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', attr := 'CAST(depth AS BIGINT) _size, name'));
 ----
 shadows a canonical column: _size
+
+# alter runs the same pseudo expansion create does (a macro binding is stored expanded, with
+# kind = macro), records ELEMENT as an S slot, and refreshes the attribute_columns artifact
+# for the narrowed attribute list
+statement ok
+CREATE MACRO is_leaf(n) AS n = 0;
+
+statement ok
+CALL tree_ddl_alter('main', 'app', tree_semantic(type := 'type', attr := 'name, depth',
+  element := 'depth > 0', pseudo := [{name: 'leaf', macro: 'is_leaf', args: 'descendant_count'}]));
+
+query IIII
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'app' AND slot = 'ELEMENT'),
+       (SELECT kind || ' ' || body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'app' AND name = 'leaf'),
+       (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'app' AND artifact = 'attribute_columns'),
+       (SELECT count(*) FILTER (WHERE NOT _element) FROM tree_project('main', 'app'));
+----
+depth > 0	macro is_leaf(descendant_count)	[{"name":"name","type":"VARCHAR"},{"name":"depth","type":"UINTEGER"}]	1
+
+# error(NULL) audit (Task 13): F11 made the existence check fire outside the FROM so that an
+# alter on a missing tree refuses instead of returning NULL. A NULL schema or name defeated it
+# again by a different route -- the check fired, but its message concatenated the NULL and
+# error(NULL) evaluates to NULL in 1.5.5, so the compiler returned NULL all the same. The
+# identity is COALESCEd into the message now, and every refusal goes through tree_err().
+statement error
+CALL tree_ddl_alter(NULL, 'app', tree_semantic(id := 'name'));
+----
+tree_ddl_alter: tree <NULL>.app not found
+
+statement error
+CALL tree_ddl_alter('main', NULL, tree_semantic(id := 'name'));
+----
+tree_ddl_alter: tree main.<NULL> not found
+
+# has_semantic says whether the tree has an S GROUP -- which is what tree_match reads to decide
+# whether an S clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. Alter used to set
+# it to true unconditionally, so an ATTR-only alter -- which declares no S slot; ATTR names the
+# projected columns -- marked an R-only tree S-ful. The S clause then compiled against TYPE's
+# `'node'` default and returned zero rows, which reads as "no such node" rather than as "this
+# tree has no types". The flag is now the predicate create reads (tree_semantic_declares), asked
+# of this alter's own semantic -- see the record at the end of this file for why nothing is OR'd
+# in from the flag the tree already carried.
+statement ok
+CALL tree_ddl_create('main', 'ronly', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src'));
+
+query I
+SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly';
+----
+false
+
+statement ok
+CALL tree_ddl_alter('main', 'ronly', tree_semantic(attr := 'node_id, type'));
+
+query I
+SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly';
+----
+false
+
+statement error
+FROM tree_match('main', 'ronly', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
+# the ATTR alter did land -- the narrowed attribute list is what the projection now carries --
+# and an ATTR CLAUSE is refused with the same sentence, because ATTR is an S clause in the match
+# compiler whatever ATTR the shape declares. That is the point of the flag: the tree is still
+# R-only, so it says so instead of answering with an empty result.
+query I
+SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'ronly' AND artifact = 'attribute_columns';
+----
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"}]
+
+statement error
+SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{attr: 'node_id = 0'}]));
+----
+has no SEMANTIC group
+
+# a combinator-and-WHERE selector is what an R-only tree does have, and it still works
+query I
+SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{"where": 'node_id = 0'}]));
+----
+1
+
+# ...and an alter that DOES declare an S slot sets the flag, as it always did
+statement ok
+CALL tree_ddl_alter('main', 'ronly', tree_semantic(type := 'type', attr := 'node_id, type'));
+
+query II
+SELECT (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'ronly'),
+       (SELECT count(*) FROM tree_match('main', 'ronly', tree_steps([{type: 'function_definition'}])));
+----
+true	2
+
+# ALTER REPLACES the S group. The compiler DELETEs every S slot the tree had and re-inserts only
+# the ones this alter declares, so the flag has to be computed from the NEW semantic alone. It
+# used to be OR'd with the flag the tree already carried ("alter adds to what create declared",
+# which the DELETE above it makes false): a tree that HAD a TYPE and is altered to an ATTR-only
+# semantic kept has_semantic = true while its TYPE slot was gone, and a TYPE clause then compiled
+# against the 'node' default and answered with no rows where a refusal was owed.
+statement ok
+CALL tree_ddl_create('main', 'wasty', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'src'));
+
+query II
+SELECT has_semantic, (SELECT string_agg(slot, ',' ORDER BY slot) FROM tree_catalog_slots() WHERE tree_name = 'wasty' AND block = 'S')
+FROM tree_catalog_trees() WHERE tree_name = 'wasty';
+----
+true	ATTR,TYPE
+
+statement ok
+CALL tree_ddl_alter('main', 'wasty', tree_semantic(attr := 'node_id, type, depth'));
+
+query II
+SELECT has_semantic, (SELECT string_agg(slot, ',' ORDER BY slot) FROM tree_catalog_slots() WHERE tree_name = 'wasty' AND block = 'S')
+FROM tree_catalog_trees() WHERE tree_name = 'wasty';
+----
+false	ATTR
+
+statement error
+FROM tree_match('main', 'wasty', tree_steps([{type: 'module'}]));
+----
+has no SEMANTIC group

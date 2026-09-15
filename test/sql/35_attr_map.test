@@ -1,0 +1,198 @@
+# name: test/sql/35_attr_map.test
+# description: ATTR MAP typed comparison: attribute resolution order (column, then map, then
+# refuse), the literal-typed cast for BIGINT/DOUBLE/BOOLEAN vs. quoted text, and the distinction
+# between an unresolvable NAME (refused) and a map KEY the data doesn't carry (reads as no match)
+
+statement ok
+CREATE TABLE src AS SELECT node_id, depth, type, name, MAP {'lines': CAST(end_line - start_line + 1 AS VARCHAR), 'kind': type} AS extra FROM 'test/data/app.parquet';
+
+statement ok
+CALL tree_ddl_create('main', 'm', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name', attr_map := 'extra')), source := 'src'));
+
+# a projected column wins: name is an ATTR projection column, never a map lookup
+query I rowsort
+FROM tree_match('main', 'm', tree_steps([{type: 'function_definition', attr: 'name = ''greet'''}])) SELECT name;
+----
+greet
+
+# the map, numeric literal: in app.parquet greet spans lines 4-6 (3 lines), shout 9-10 (2
+# lines) -- verified independently against the fixture, not read off the brief's guess. String
+# order would put '3' between '10' and '2' wrongly either way; numeric compares correctly.
+query I rowsort
+FROM tree_match('main', 'm', tree_steps([{type: 'function_definition', attr: 'lines > 2'}])) SELECT name;
+----
+greet
+
+# the map, quoted literal compares as text: app.parquet has exactly two rows with
+# type = 'block' (greet's and shout's bodies), counted independently against the fixture
+query I
+SELECT count(*) FROM tree_match('main', 'm', tree_steps([{attr: 'kind = ''block'''}]));
+----
+2
+
+# a KEY the map doesn't carry is not an error: the map's keys are data, so a lookup miss reads
+# as NULL, TRY_CAST(NULL) stays NULL, and the NULL-definite COALESCE turns that into no match --
+# unlike the refusal below, which is about a bare NAME the compiler cannot resolve to anything
+# (neither a projected column nor a declared ATTR MAP) and so refuses before running any SQL.
+query I
+SELECT count(*) FROM tree_match('main', 'm', tree_steps([{attr: 'nosuch = 1'}]));
+----
+0
+
+# the refusal needs a MAP-LESS tree to fire: on 'm' above, ANY name compiles to a map lookup
+# (the map serves any key), so nothing is ever neither-nor. 'plain' declares no ATTR MAP.
+statement ok
+CALL tree_ddl_create('main', 'plain', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name')), source := 'src'));
+
+statement error
+FROM tree_match('main', 'plain', tree_steps([{attr: 'nosuch = 1'}]));
+----
+neither a projected column nor served by ATTR MAP
+
+# ATTR here projects 'type' itself (not '' -- canonical _type is EXCLUDEd from match output, so
+# without this the SELECT type below would have nothing to select), so the MN13 row is: '9' vs
+# '10' must compare numerically, and mixed in are the string/boolean/double typed-cast cases.
+statement ok
+CREATE TABLE nine AS SELECT * FROM (VALUES
+  (0, 0, 'a', MAP {'n': '9', 'f': 'true', 'x': '1.5'}),
+  (1, 1, 'b', MAP {'n': '10', 'f': 'false', 'x': '2.5'})) v(node_id, depth, type, extra);
+
+statement ok
+CALL tree_ddl_create('main', 'nine', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'type', attr_map := 'extra')), source := 'nine'));
+
+# unquoted literal: numeric cast, so '10' > 9 is true
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'n > 9'}])) SELECT type;
+----
+b
+
+# the same comparison, quoted: no cast, text order, and '9' > '9' is false while '10' > '9' is
+# also false as text (compares first character, '1' < '9') -- zero rows either way
+query I
+SELECT count(*) FROM tree_match('main', 'nine', tree_steps([{attr: 'n > ''9'''}]));
+----
+0
+
+# BOOLEAN: true/false literals cast the map value
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'f = true'}])) SELECT type;
+----
+a
+
+# DOUBLE: a decimal literal casts the map value
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'x > 2.0'}])) SELECT type;
+----
+b
+
+# ---------------------------------------------------------------------------------------
+# Attribute NAMES are resolved case-insensitively, and the canonical columns are not
+# attributes at all
+# ---------------------------------------------------------------------------------------
+
+# an open-ATTR tree over the same source: every non-canonical column of `src` is an attribute
+statement ok
+CALL tree_ddl_create('main', 'open', tree_spec(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'src'));
+
+# SQL identifiers are case-insensitive and the projection's columns are SQL identifiers, so a
+# selector that names one in another case names the same column. It used to be a byte
+# comparison against the attribute_columns artifact: `Name` missed the column and, on a
+# MAP-less tree, was refused as a name nothing serves.
+query I
+SELECT count(*) FROM tree_match('main', 'open', tree_steps([{attr: 'Name = ''greet'''}]));
+----
+4
+
+# ... and the column is emitted with the spelling the projection stores, not the one the
+# selector wrote, so the generated SQL binds
+query I
+SELECT (tree_explain('main', 'open', tree_steps([{attr: 'NAME = ''greet'''}]))).sql LIKE '%"name" = ''greet''%';
+----
+true
+
+# a canonical column is the tree's own representation, not one of its attributes (P14: MATCH
+# sees the projection's DECLARED attributes), so naming one in an ATTR clause is refused --
+# with the WHERE clause, which is where a query about the representation belongs, named
+statement error
+FROM tree_match('main', 'open', tree_steps([{attr: '_level > 0'}]));
+----
+tree_match: attribute _level is a canonical column, not an attribute; use a WHERE clause
+
+# the same refusal on a tree that DOES declare ATTR MAP, where the name would otherwise have
+# resolved to a map lookup for a key the map cannot hold and answered with no rows
+statement error
+FROM tree_match('main', 'm', tree_steps([{attr: '_level > 0'}]));
+----
+tree_match: attribute _level is a canonical column, not an attribute; use a WHERE clause
+
+# and on the MAP tree the case-insensitive lookup reaches the COLUMN first, as it does on any
+# other tree: `Name` used to fall past the column list into the map, which serves every key,
+# so it answered 0 rows instead of 4 -- the resolution order silently inverted by a letter
+query I
+SELECT count(*) FROM tree_match('main', 'm', tree_steps([{attr: 'Name = ''greet'''}]));
+----
+4
+
+# ---------------------------------------------------------------------------------------
+# A numeric literal against a projected column of TEXT type: compared as text, not cast
+# ---------------------------------------------------------------------------------------
+
+# `name` is VARCHAR. `name = 5` used to compile to `name = 5`, which DuckDB binds by casting
+# the COLUMN to a number -- so the first row whose name is not a number aborted the whole
+# query. The attribute_columns artifact carries each column's type now, so the comparison is
+# made in the column's own type: no rows match, and nothing aborts.
+query I
+SELECT count(*) FROM tree_match('main', 'open', tree_steps([{attr: 'name = 5'}]));
+----
+0
+
+query I
+SELECT (tree_explain('main', 'open', tree_steps([{attr: 'name = 5'}]))).sql LIKE '%"name" = ''5''%';
+----
+true
+
+# a numeric literal against a NUMERIC column still compares numerically -- which is the
+# reading corpus row c16 (`.fn[params=2]`) depends on
+statement ok
+CALL tree_ddl_create('main', 'sc', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', attr := 'name, params')), source := 'read_parquet(''test/data/scripts.parquet'')'));
+
+query II
+SELECT (SELECT count(*) FROM tree_match('main', 'sc', tree_steps([{type: 'function_definition', attr: 'params = 2'}]))),
+       (SELECT count(*) FROM 'test/data/scripts.parquet' WHERE type = 'function_definition' AND params = 2);
+----
+8	8
+
+query I
+SELECT (tree_explain('main', 'sc', tree_steps([{attr: 'params = 2'}]))).sql LIKE '%"params" = 2%';
+----
+true
+
+# ---------------------------------------------------------------------------------------
+# The artifact's reader is backward compatible: a row written before column types were
+# recorded is a bare list of names, and a name read from one has no type
+# ---------------------------------------------------------------------------------------
+
+statement ok
+CALL tree_ddl_create('main', 'legacy', tree_spec(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'src'));
+
+statement ok
+DELETE FROM tree_catalog.compiled WHERE tree_name = 'legacy' AND artifact = 'attribute_columns';
+
+statement ok
+INSERT INTO tree_catalog.compiled VALUES (current_database(), 'main', 'legacy', 'attribute_columns', '', '["node_id","depth","type","name","extra"]');
+
+# the names still resolve, case-insensitively, and a numeric literal against a column whose
+# type is not recorded takes the reading that cannot abort the query
+query I
+SELECT count(*) FROM tree_match('main', 'legacy', tree_steps([{attr: 'Name = ''greet'''}]));
+----
+4
+
+query II
+SELECT (SELECT count(*) FROM tree_match('main', 'legacy', tree_steps([{attr: 'name = 5'}]))),
+       (tree_explain('main', 'legacy', tree_steps([{attr: 'name = 5'}]))).sql LIKE '%TRY_CAST(s1."name" AS BIGINT) = 5%';
+----
+0	true

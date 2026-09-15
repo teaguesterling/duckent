@@ -1,0 +1,249 @@
+# name: test/sql/36_pseudo.test
+# description: pseudo-class binding forms expand to expression bodies
+
+query I
+SELECT (tree_semantic(element := 'is_construct(flags)')).element;
+----
+is_construct(flags)
+
+# macro form: body is macro(args)
+query II
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{name: 'docblock', macro: 'has_docblock', args: 'file_path, node_id'}]))).pseudo) AS p);
+----
+docblock	has_docblock(file_path, node_id)
+
+# map form with shared args
+query II rowsort
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo_map := MAP {'busy': 'is_busy', 'leaf': 'is_leaf'}, pseudo_args := 'node_id'))).pseudo) AS p);
+----
+busy	is_busy(node_id)
+leaf	is_leaf(node_id)
+
+# prefix form: every catalog scalar macro starting with the prefix, name = the remainder
+statement ok
+CREATE MACRO sel_ast_leafy(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_deep(n) AS n > 3;
+
+query III rowsort
+SELECT (p).name, (p).body, (p).prefix FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}]))).pseudo) AS p);
+----
+deep	sel_ast_deep(descendant_count)	sel_ast_
+leafy	sel_ast_leafy(descendant_count)	sel_ast_
+
+# expression form passes through unchanged
+query I
+SELECT (p).body FROM (SELECT unnest((tree_expand_pseudo(tree_semantic(pseudo := [{name: 'x', body: 'a > 1'}]))).pseudo) AS p);
+----
+a > 1
+
+query IIII
+SELECT tree_sql_literal_type('100'), tree_sql_literal_type('-2.5'), tree_sql_literal_type('true'), tree_sql_literal_type('''x''') IS NULL;
+----
+BIGINT	DOUBLE	BOOLEAN	true
+
+query II
+SELECT language, bare_safe FROM tree_catalog_languages() WHERE language = 'css';
+----
+css	true
+
+query I
+SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
+----
+css
+
+# sel_ast_leafy and sel_ast_deep (above) are no longer needed and would otherwise contaminate
+# the shared tier below: the shared tier scans every catalog macro named sel_<rest>, and both
+# names start with the literal "sel_" prefix (not just "sel_ast_"), so leaving them defined
+# would bind two extra, untested pseudo-classes on every tree created from here on.
+statement ok
+DROP MACRO sel_ast_leafy;
+
+statement ok
+DROP MACRO sel_ast_deep;
+
+# shared tier: sel_* macros bind with the tree's pseudo_args unless shadowed
+statement ok
+CREATE MACRO sel_leaf(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_leaf(n) AS n < 0;
+
+statement ok
+CALL tree_ddl_create('main', 'shadow', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo_args := 'descendant_count', pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}, {name: 'busy', body: 'children_count > 2'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shadow';
+----
+busy	local	children_count > 2
+leaf	prefix	sel_ast_leaf(descendant_count)
+
+# :leaf resolves to the prefix binding (n < 0: nothing), not the shared sel_leaf (n = 0: every leaf)
+query I
+SELECT count(*) FROM tree_match('main', 'shadow', tree_steps([{pseudo: 'leaf'}]));
+----
+0
+
+# a shared-tier name with no local or prefix binding is bound
+statement ok
+CREATE MACRO sel_deep(n) AS n > 20;
+
+statement ok
+CALL tree_ddl_create('main', 'shared', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo_args := 'descendant_count')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the full row set, not a name filter: at this point sel_leaf, sel_ast_leaf and sel_deep are all
+# live, 'shared' declares no local or prefix pseudo of its own, so all three bind as shared
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shared';
+----
+ast_leaf	shared	sel_ast_leaf(descendant_count)
+deep	shared	sel_deep(descendant_count)
+leaf	shared	sel_leaf(descendant_count)
+
+# independently verified: read_parquet('test/data/app.parquet') WHERE descendant_count > 20
+# groups as (function_definition, 2), (module, 1)
+query I rowsort
+FROM tree_match('main', 'shared', tree_steps([{pseudo: 'deep'}])) SELECT type;
+----
+function_definition
+function_definition
+module
+
+# a bare sel_ macro has an empty remainder: skipped, not bound as '', and not an error
+statement ok
+CREATE MACRO sel_(n) AS n > 0;
+
+query I
+SELECT list_contains(list_transform((tree_expand_pseudo(tree_semantic(pseudo_args := 'descendant_count'))).pseudo, lambda p: (p).name), '');
+----
+false
+
+# LIKE provenance: a child that does not redeclare 'leaf' inherits shadow's prefix-bound entry
+# (not a fresh local one) and pseudo_args, so the shared tier still applies at the child too.
+# The child ALSO gaining :deep (absent from the parent's own row set) is correct by design: PSEUDO
+# is resolved against the live catalog at create time, and sel_deep already existed by then.
+statement ok
+CALL tree_ddl_create('main', 'shadow_like', tree_spec(tree_shape(), "like" := 'shadow', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'shadow_like';
+----
+busy	local	children_count > 2
+deep	shared	sel_deep(descendant_count)
+leaf	prefix	sel_ast_leaf(descendant_count)
+
+# tree_ddl_alter can add PSEUDO_ARGS to an existing tree: the S/PSEUDO_ARGS slot is stored,
+# has_semantic stays true, and (since altpseudo declares no local/prefix pseudo) the shared
+# tier binds every live sel_* macro
+statement ok
+CALL tree_ddl_create('main', 'altpseudo', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement ok
+CALL tree_ddl_alter('main', 'altpseudo', tree_semantic(type := 'type', pseudo_args := 'descendant_count'));
+
+query III
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'altpseudo' AND slot = 'PSEUDO_ARGS'),
+       has_semantic,
+       (SELECT count(*) FROM tree_catalog_pseudo_classes() WHERE tree_name = 'altpseudo' AND origin = 'shared')
+FROM tree_catalog_trees() WHERE tree_name = 'altpseudo';
+----
+descendant_count	true	3
+
+query II rowsort
+SELECT name, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'altpseudo';
+----
+ast_leaf	shared
+deep	shared
+leaf	shared
+
+# tree_match's per-query SEMANTIC overlay: a tree with no pseudo-classes at all, so any binding
+# below comes only from the overlay's own expansion
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# no overlay: an undeclared pseudo is unknown. Checked against the compiled SQL text
+# (tree_explain), not a row count: an unknown pseudo's clause is always false, so the query
+# itself returns no rows to read _match_unknown_pseudos back from.
+query I
+SELECT (tree_explain('main', 'bare', tree_steps([{pseudo: 'deep'}]))).sql LIKE '%1 AS _match_unknown_pseudos%';
+----
+true
+
+# overlay declares pseudo_args but no pseudo list: the shared tier must still be gated on the
+# EXPANDED overlay ((sem).pseudo), not the raw, undeclared (semantic).pseudo -- gating on the raw
+# field left the projection's _pseudo map without the shared binding while the matcher believed
+# :deep was known, so the clause compiled to a lookup that silently matched nothing.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'deep'}]), semantic := tree_semantic(type := 'type', pseudo_args := 'descendant_count'))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0
+module	0
+
+# An overlay that sets ONLY pseudo_args is not an empty overlay: the shared tier binds every live
+# sel_* macro from it -- the record just above, with `type :=` alongside, is the same expansion --
+# so refusing it as empty denied the query the one thing it was asking for. The emptiness test now
+# asks the question create and alter ask (does this SEMANTIC declare an S slot?) through the one
+# predicate all three share, and PSEUDO_ARGS is an S slot in all three.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'deep'}]), semantic := tree_semantic(pseudo_args := 'descendant_count'))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0
+module	0
+
+# a genuinely empty overlay still refuses
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]), semantic := tree_semantic());
+----
+semantic overlay is empty
+
+# ---------------------------------------------------------------------------------------
+# A PSEUDO prefix that binds nothing is a typo, not a declaration of nothing
+# ---------------------------------------------------------------------------------------
+#
+# A prefix entry names a NAMESPACE of catalog macros, and expansion replaces it with one
+# binding per macro that carries the prefix. When none does, expansion replaces it with
+# nothing: the tree was created, the S/PSEUDO rows were empty, and every `:name` the author
+# meant to mint was an unknown pseudo-class compiling to false. Nothing said so -- not at
+# create, not at match -- so `pseudo := [{prefix: 'sel_ats_', ...}]` read as a tree with no
+# pseudo-classes rather than as a misspelling of `sel_ast_`. It is checked against the live
+# catalog at create time, which is when the prefix is resolved.
+statement error
+CALL tree_ddl_create('main', 'nopfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'nosuch_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+tree_ddl_create: PSEUDO prefix nosuch_ binds no macro
+
+# the tree is not half-created: the refusal is in the compiler, before any statement runs
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'nopfx';
+----
+0
+
+# alter runs the same check, in its own verb's words
+statement error
+CALL tree_ddl_alter('main', 'bare', tree_semantic(type := 'type', pseudo := [{prefix: 'nosuch_', args: 'descendant_count'}]));
+----
+tree_ddl_alter: PSEUDO prefix nosuch_ binds no macro
+
+# a prefix that DOES bind is unaffected, and so is a local binding whose NAME happens to look
+# like a prefix (only an entry with a prefix and no name is a prefix declaration)
+statement ok
+CALL tree_ddl_create('main', 'okpfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'sel_ast_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT name, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'okpfx' AND origin = 'prefix';
+----
+leaf	prefix

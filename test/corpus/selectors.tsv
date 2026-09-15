@@ -1,0 +1,19 @@
+id	treeql	css	fixture	tags
+c01	tree_steps([{type: 'function_definition'}])	function_definition	app	portable sitting_duck_supported
+c02	tree_steps([{class: 'fn'}])	.fn	app	portable sitting_duck_supported
+c03	tree_steps([{id: 'greet', class: 'fn'}])	.fn#greet	app	portable sitting_duck_supported
+c04	tree_steps([{type: 'function_definition'}, {comb: 'child', type: 'block'}])	function_definition > block	app	portable sitting_duck_supported
+c05	tree_steps([{type: 'function_definition'}, {comb: 'desc', type: 'string'}])	function_definition string	app	portable sitting_duck_supported
+c06	tree_steps([{class: 'fn', "not": [{type: 'string'}]}])	.fn:not(:has(string))	app	portable sitting_duck_supported nested
+c07	tree_steps([{class: 'fn', has: [{type: 'string'}]}])	.fn:has(string)	app	portable sitting_duck_supported nested
+c08	tree_steps([{type: 'function_definition'}, {comb: 'next', type: 'function_definition'}])	function_definition + function_definition	app	portable sitting_duck_supported sibling
+c09	tree_steps([{type: 'module'}, {comb: 'child', type: 'function_definition'}])	module > function_definition	scripts	portable sitting_duck_supported
+c10	tree_steps([{type: 'class_definition'}, {comb: 'child', type: 'block'}, {comb: 'child', type: 'function_definition'}])	class_definition > block > function_definition	scripts	portable sitting_duck_supported chain3
+c11	tree_steps([{class: 'fn', attr: 'name LIKE ''generate\_%'' ESCAPE ''\'''}])	.fn[name^="generate_"]	scripts	portable sitting_duck_supported attr
+c12	tree_steps([{type: 'identifier'}, {comb: 'next', type: 'identifier'}])	identifier + identifier	py_variety	portable sibling element
+c13	tree_steps([{class: 'fn', "not": [{type: 'block', has: [{type: 'string'}]}]}])	.fn:not(:has(block:has(string)))	app	portable nested
+c14	tree_steps([{type: 'block'}, {comb: 'child', type: 'expression_statement', pseudo: 'first-child'}])	block > expression_statement:first-child	app	portable sitting_duck_supported
+c15	tree_steps([{class: 'def', "not": [{comb: 'self', class: 'fn'}]}])	.def:not(.fn)	app	portable nested self
+c16	tree_steps([{class: 'fn', attr: 'params = 2'}])	.fn[params=2]	scripts	portable sitting_duck_supported attr params
+c17	tree_steps([{class: 'fn', "not": [{comb: 'self', pseudo: 'nope'}]}])	.fn:not(:nope)	app	portable nested self pseudo unknown_pseudo
+c18	tree_steps([{class: 'fn', has: [{comb: 'child', type: 'block', attr: 'params = 0'}]}])	.fn:has(> block[params=0])	app	portable nested attr has_attr

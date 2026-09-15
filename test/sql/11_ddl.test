@@ -39,9 +39,10 @@ SELECT root_key, epoch, row_count FROM tree_state.partitions WHERE tree_name = '
 ----
 {'file_path': app.py}	1	54
 
-query I
+query I rowsort
 SELECT artifact FROM tree_catalog.compiled WHERE tree_name = 'app';
 ----
+attribute_columns
 projection
 
 # classes introspection is empty for a tree without CLASSES
@@ -234,6 +235,57 @@ SELECT count(*) FROM tree_match('main', 'kid', tree_steps([{id: 'greet(name).upp
 ----
 1
 
+# the converse: an S-less parent stays S-less through LIKE. Every tree stores an S/ATTR slot
+# ('' for a closed abstract, '*' for an open concrete one), so the merged shape of any LIKE
+# child has a non-NULL semantic.attr -- counting ATTR as an S declaration would make every
+# child S-ful and silently open the S-clause back door tree_match is supposed to refuse.
+statement ok
+CALL tree_ddl_create('main', 'sless', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), abstract := true));
+
+statement ok
+CALL tree_ddl_create('main', 'kid2', tree_spec(tree_shape(), "like" := 'sless', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'sless'),
+       (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'kid2');
+----
+false	false
+
+statement error
+SELECT count(*) FROM tree_match('main', 'kid2', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
+# ...and the same back door from the other side, on a tree with no LIKE in sight. A SEMANTIC
+# group that declares only ATTR fills no S slot: ATTR names the projected columns, it binds
+# nothing structural. Create used to lead its has_semantic expression with
+# `(spec).shape.semantic IS NOT NULL` -- counting the PRESENCE of the group rather than what the
+# group declared -- so this tree was marked S-ful, and a TYPE step then compiled against TYPE's
+# `'node'` default and returned zero rows: a refusal owed, an empty result delivered. Create now
+# reads the same per-slot expression tree_ddl_alter reads (13_alter carries the alter-side twin),
+# and ATTR is excluded from both for the reason the record above gives.
+statement ok
+CALL tree_ddl_create('main', 'attronly', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(attr := 'node_id, type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT has_semantic, (SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'attronly' AND artifact = 'attribute_columns')
+FROM tree_catalog_trees() WHERE tree_name = 'attronly';
+----
+false	[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"}]
+
+statement error
+SELECT count(*) FROM tree_match('main', 'attronly', tree_steps([{type: 'function_definition'}]));
+----
+has no SEMANTIC group
+
+# the ATTR declaration itself did land: R-only means no S GROUP, not no columns. A WHERE step --
+# the thing an S-less tree does have -- still matches, over the narrowed projection.
+query I
+SELECT count(*) FROM tree_match('main', 'attronly', tree_steps([{"where": 'node_id = 6'}]));
+----
+1
+
 # parent basis, sibling-free profile recorded
 statement ok
 CALL tree_ddl_create('main', 'cats', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'read_csv(''test/data/categories.csv'')'));
@@ -364,3 +416,62 @@ statement error
 SELECT * FROM tree_project('main', 'app');
 ----
 proj_4_main_app
+
+# ELEMENT reaches the catalog as an S slot and the projection as a per-row predicate; a
+# macro-bound PSEUDO is expanded to its call expression before it is stored
+statement ok
+CREATE MACRO is_leaf(n) AS n = 0;
+
+statement ok
+CALL tree_ddl_create('main', 'elem', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', element := 'regexp_matches(type, ''^[a-z_]'')', pseudo := [{name: 'leaf', macro: 'is_leaf', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'elem' AND slot = 'ELEMENT';
+----
+regexp_matches(type, '^[a-z_]')
+
+query III
+SELECT name, kind, body FROM tree_catalog_pseudo_classes() WHERE tree_name = 'elem';
+----
+leaf	macro	is_leaf(descendant_count)
+
+query I
+SELECT count(*) FILTER (WHERE NOT _element) > 0 FROM tree_project('main', 'elem');
+----
+true
+
+query I
+SELECT sql_text FROM tree_catalog.compiled WHERE tree_name = 'elem' AND artifact = 'attribute_columns';
+----
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"},{"name":"semantic_type","type":"UTINYINT"},{"name":"flags","type":"UTINYINT"},{"name":"name","type":"VARCHAR"},{"name":"qualified_name","type":"STRUCT(semantic_type UTINYINT, \"name\" VARCHAR, \"index\" INTEGER)[]"},{"name":"signature_type","type":"VARCHAR"},{"name":"parameters","type":"STRUCT(\"name\" VARCHAR, \"type\" VARCHAR)[]"},{"name":"modifiers","type":"VARCHAR[]"},{"name":"annotations","type":"VARCHAR"},{"name":"file_path","type":"VARCHAR"},{"name":"language","type":"VARCHAR"},{"name":"start_line","type":"UINTEGER"},{"name":"end_line","type":"UINTEGER"},{"name":"parent_id","type":"BIGINT"},{"name":"depth","type":"UINTEGER"},{"name":"sibling_index","type":"INTEGER"},{"name":"children_count","type":"UINTEGER"},{"name":"descendant_count","type":"UINTEGER"},{"name":"scope","type":"STRUCT(\"current\" BIGINT, \"function\" BIGINT, \"class\" BIGINT, module BIGINT, stack STRUCT(id BIGINT, kind UTINYINT)[])"},{"name":"peek","type":"VARCHAR"},{"name":"css_classes","type":"VARCHAR[]"},{"name":"is_element","type":"BOOLEAN"},{"name":"params","type":"INTEGER"}]
+
+# a prefix-bound PSEUDO binds every catalog macro carrying that prefix, is stored expanded
+# with origin = prefix, and is selectable like any other pseudo-class
+statement ok
+CREATE MACRO sel_x_top(d) AS d = 0;
+
+statement ok
+CALL tree_ddl_create('main', 'pfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', pseudo := [{prefix: 'sel_x_', args: 'depth'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query IIII
+SELECT name, kind, body, origin FROM tree_catalog_pseudo_classes() WHERE tree_name = 'pfx';
+----
+top	macro	sel_x_top(depth)	prefix
+
+query III
+FROM tree_match('main', 'pfx', tree_steps([{pseudo: 'top'}]))
+SELECT count(*), count(*) FILTER (WHERE depth <> 0), (SELECT count(*) FROM tree_project('main', 'pfx'));
+----
+1	0	54
+
+# a projection-mode tree records the artifact too (the projection macro is what gets described,
+# so one statement serves both storage modes), and an abstract tree records nothing
+query II
+SELECT (SELECT sql_text FROM tree_catalog.compiled WHERE schema_name = 'a_b' AND tree_name = 'c' AND artifact = 'attribute_columns'),
+       (SELECT count(*) FROM tree_catalog.compiled WHERE tree_name = 'ast_shape');
+----
+[{"name":"node_id","type":"BIGINT"},{"name":"type","type":"VARCHAR"},{"name":"semantic_type","type":"UTINYINT"},{"name":"flags","type":"UTINYINT"},{"name":"name","type":"VARCHAR"},{"name":"qualified_name","type":"STRUCT(semantic_type UTINYINT, \"name\" VARCHAR, \"index\" INTEGER)[]"},{"name":"signature_type","type":"VARCHAR"},{"name":"parameters","type":"STRUCT(\"name\" VARCHAR, \"type\" VARCHAR)[]"},{"name":"modifiers","type":"VARCHAR[]"},{"name":"annotations","type":"VARCHAR"},{"name":"file_path","type":"VARCHAR"},{"name":"language","type":"VARCHAR"},{"name":"start_line","type":"UINTEGER"},{"name":"end_line","type":"UINTEGER"},{"name":"parent_id","type":"BIGINT"},{"name":"depth","type":"UINTEGER"},{"name":"sibling_index","type":"INTEGER"},{"name":"children_count","type":"UINTEGER"},{"name":"descendant_count","type":"UINTEGER"},{"name":"scope","type":"STRUCT(\"current\" BIGINT, \"function\" BIGINT, \"class\" BIGINT, module BIGINT, stack STRUCT(id BIGINT, kind UTINYINT)[])"},{"name":"peek","type":"VARCHAR"},{"name":"css_classes","type":"VARCHAR[]"},{"name":"is_element","type":"BOOLEAN"},{"name":"params","type":"INTEGER"}]	0

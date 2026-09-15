@@ -42,12 +42,14 @@ SELECT min(_pre), count(*) FILTER (WHERE _pre <> node_id) FROM p;
 ----
 0	0
 
-# an undeclared ATTR MAP is a typed NULL, not an untyped one (M8)
+# an undeclared ATTR MAP is a typed NULL, not an untyped one (M8), and its type is the
+# canonical map type: a declared one is cast to it, so the column type never depends on
+# what the declaration happened to produce
 query II
 WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '')))
 SELECT column_name, column_type FROM (DESCRIBE FROM p) WHERE column_name = '_attr_map';
 ----
-_attr_map	VARCHAR
+_attr_map	MAP(VARCHAR, VARCHAR)
 
 # derived _parent and _size are scoped to the ROOT partition: the same check as the first
 # query, over the multi-tree fixture where node_id and depth restart per file
@@ -77,3 +79,19 @@ WITH p AS (FROM query(tree_compile_projection(tree_shape(key := 'email', parent 
 SELECT (SELECT _size FROM p WHERE email = 'ada@co'), (SELECT _size FROM p WHERE email = 'bo@co');
 ----
 6	2
+
+# ELEMENT is a per-row predicate (default true) and ATTR MAP is a typed MAP, not text
+query III
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(element := 'regexp_matches(type, ''^[a-z_]'')', attr_map := 'MAP {''k'': CAST(node_id AS VARCHAR)}')),
+  'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT count(*) FILTER (WHERE NOT _element), typeof(any_value(_attr_map)), any_value(_attr_map['k']) FROM p WHERE _pre = 6;
+----
+0	MAP(VARCHAR, VARCHAR)	6
+
+# with no ELEMENT declared every row is an element
+query I
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT count(*) FILTER (WHERE NOT _element) FROM p;
+----
+0
