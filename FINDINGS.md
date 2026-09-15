@@ -2,6 +2,96 @@
 
 What first contact showed. Newest first. Every oracle divergence gets an entry with adjudication before any test changes.
 
+## DuckDB 1.5.5 constraints met in M2 (2026-09-15)
+
+Each of these changed the shape of the code, not just a line of it. The design-phase section at
+the foot of this file has the ones M0–M1½ met; these are new, and each is stated once.
+
+- **`CREATE OR REPLACE MACRO` with a different arity DROPS the other overload** instead of adding
+  to it. `tree_sql_root(root_csv, qual)` already existed when the fragment table wanted a
+  one-argument root test, and creating `tree_sql_root(a)` would have silently unbound every
+  projection compile. The fragment is named `tree_sql_is_root(a)`; the name is the whole fix, and
+  the lesson is that overload sets are not additive here.
+- Two constraints already stated in the design-phase section below are recorded here only for
+  what M2 made of them, not restated: **a subquery or aggregate inside a lambda-bearing
+  expression is refused after macro inlining** — which is why `tree_compile_match` carries its
+  settings as joined CTEs rather than as subqueries; and **`recurring.<cte>` is illegal inside a
+  correlated subquery** — which is why the bottom-up fold is a fixed number of unrolled passes
+  and not `WITH RECURSIVE … USING KEY`. A group compiles to `[NOT] EXISTS (…)`, the exact shape
+  1.5.5 refuses there. The unrolling is total rather than approximate because the IR has its own
+  ceiling (`tree_group_depth_limit()` = 2).
+- **Chained level-parameterized macro passes hit `INTERNAL Error: Failed to bind column
+  reference: inequal types (INTEGER != BIGINT)`.** The printer in `sql/06_selector.sql` wanted
+  one pass macro applied twice; it is kept as two unrolled passes for this reason, with the
+  attempt recorded in a comment so the next person does not re-try it blind.
+- **Table- and scalar-function NAMES bind at `CREATE MACRO` time.** A macro cannot name a
+  function that does not exist yet, which is why `tree_parse_css` reaches sitting_duck's
+  `parse_ast_list_table` through core `query()` rather than by calling it. The consequence for
+  callers: the argument must be constant-foldable.
+- **`error(NULL)` does not raise — it evaluates to NULL.** This is the nastiest of them,
+  because it turns a refusal into a wrong answer: a message built by concatenation goes NULL if
+  any operand is NULL, `error()` then returns NULL, and the NULL propagates — a NULL SQL fragment
+  makes the whole compiled query NULL, a NULL context struct makes every statement built from it
+  NULL and `list_filter` drops them, so a verb that should have refused runs `BEGIN … COMMIT` over
+  nothing. Found in `sql/09_css.sql` (55 of 187 probe inputs returned a NULL selector instead of
+  refusing) and answered there with `tree_css_err`. The M2 audit extended it: `tree_err(msg)` in
+  `sql/00_types.sql` is the backstop, every refusal in the macro files goes through it, and the
+  operands that can actually be NULL are `COALESCE`d to `'<NULL>'` so the message still names
+  what was wrong. See the audit entry below for the sites.
+- **A guard can be optimized out of existence.** `tree_compile_delete` and `tree_compile_check`
+  build every statement by string concatenation over the identity, so with a NULL identity each
+  statement constant-folds to NULL *before* anything reads the DML context — and the planner then
+  prunes the column that holds it, so the refusal inside `tree_dml_context` was never evaluated
+  at all. `CALL tree_check('main', NULL)` reached the executor as `[BEGIN, NULL, NULL, COMMIT]`
+  and died on an `INTERNAL Error: Attempted to dereference shared_ptr that is NULL`.
+  `tree_compile_insert` and `_replace` escaped it only by accident: they also call
+  `tree_compile_projection(x.shape, …)`, which forces the context. Both now read the context in a
+  predicate that cannot fold. **A refusal placed where the planner can prune it is not a
+  refusal**, and "it raises when I test it" is not evidence that it raises in every plan.
+- **`unnest(…) AS p` in a scalar context flattens the struct's fields** rather than binding the
+  struct to `p`, so `p.name` afterwards is not a field access. Use `list_filter` /
+  `list_transform` with a lambda instead. (The related parenthesization rule for struct access
+  inside macro bodies is in the design-phase section below.)
+
+## The `error(NULL)` audit (2026-09-15)
+
+Task 13 grepped every `error(` in `sql/*.sql` whose message is a concatenation with a
+possibly-NULL operand, and probed each one live. Seven sites leaked a NULL instead of raising,
+in three shapes:
+
+| site | reachable with | what happened instead of a refusal |
+|---|---|---|
+| `tree_sql_comb` unknown combinator | a hand-built IR step with a NULL `op` | NULL fragment → NULL compiled query |
+| `tree_sql_clause` unknown clause kind | a hand-built IR node with a NULL `kind` | same |
+| `tree_sql_clause` attribute not served | an `attr` node with a NULL `value` | same |
+| `tree_compile_match` tree not found | `tree_match(NULL, 'app', …)` | compiler returned NULL; the runner then failed on the Python side |
+| `tree_compile_alter` tree not found | `tree_ddl_alter(NULL, 'app', …)` | same (F11 closed the other route to this) |
+| `tree_dml_context` tree not found | `tree_insert(NULL, 'app', …)` | context NULL → every statement NULL → `BEGIN … COMMIT` over nothing |
+| `tree_compile_delete` / `_check` | `tree_check('main', NULL)` | the refusal was *pruned out of the plan* (see above) |
+
+Fixes: `tree_err(msg)` = `error(COALESCE(msg, 'duckent: internal: refusal with a NULL message …'))`
+in `sql/00_types.sql`, with every refusal in `sql/00_types.sql`, `03_ddl.sql`, `04_dml.sql`,
+`06_selector.sql` and `07_match.sql` routed through it; `COALESCE(x, '<NULL>')` on the operands
+above so the message stays specific rather than falling back to the internal one; and the two
+pruned guards rewritten to read the context in a predicate. `sql/09_css.sql` keeps its own
+`tree_css_err`, whose fallback names the css parse. Twelve test records cover the seven rows —
+`31_match.test` (6, including `tree_err`'s own backstop), `12_dml.test` (4) and `13_alter.test`
+(2) — and every one of them failed first.
+
+What generalizes past this table: **a refusal is code, and untested code does not work.** Each of
+these sites had a correctly worded message and no record asserting that it is ever raised. The
+audit was a grep for a pattern (`error(` over a concatenation with a possibly-NULL operand) and a
+probe of every hit; the pattern found all seven, and the probe is what told the difference
+between a hazard and a shape that cannot occur.
+
+## Element rows: which spelling (D-N18)
+
+The element predicate can be written as a regexp over the node type or as `is_construct(flags)`,
+and **the two disagree on keyword tokens**. `(flags & 1) = 0` reproduces `is_construct` on all
+three fixtures and is what the corpus trees declare, through the `is_element` column
+`test/gen_fixtures.py` derives at fixture time. The regexp spelling is not equivalent and should
+not be used as if it were.
+
 ## D-N17 list-space spike
 
 `test/spike_listspace.py` (2026-09-15, DuckDB 1.5.5, one machine, best of three runs after a
@@ -13,7 +103,7 @@ self-join and `GROUP BY`, tested with `list_has_any` against the root's list of 
 Inputs: `scripts.parquet` (14,265 rows, 15 roots) and ten copies of it with distinct roots
 (`file_path || '#' || i`; 142,650 rows, 150 roots). Both trees declare `SIZE`.
 
-| input | selector | EXISTS | list-space | ratio | same answer |
+| input | selector | EXISTS | list-space | EXISTS ÷ list | same answer |
 |---|---|---|---|---|---|
 | scripts | `.fn:has(string)` | 0.004 s | 0.059 s | 0.08× | yes (38 rows) |
 | scripts | `.fn:not(:has(string))` | 0.004 s | 0.061 s | 0.07× | yes (1 row) |
@@ -104,9 +194,9 @@ emits it as a commented no-op naming the reason). 107 of 108 references are asse
 The M2 design's §9 mutant table names a killing suite per mutant. Planting the nine remaining
 mutants (task 12) showed six of those rows are wrong or incomplete. Every line below was
 established by running `python3 test/run.py <suite> --mutant test/mutants/<file>` on the suite in
-question, in both directions where a suite was expected to fail and did not. **Task 13 should
-correct the spec table from this entry.** The manifest (`test/mutants/manifest.yaml`) is the live
-record; this is the reasoning behind it.
+question, in both directions where a suite was expected to fail and did not. The manifest
+(`test/mutants/manifest.yaml`) is the live record; this is the reasoning behind it, and the M2
+design's §9 table now carries the corrected rows *(done 2026-09-15)*.
 
 | mutant | §9 says | actually killed by | why the difference |
 |---|---|---|---|
@@ -160,8 +250,8 @@ And one mechanism: **MN08** mutates the runner's css parser, which is Python, no
 an optional `env:` map that `test/run_mutants.py` adds to each subprocess environment; the mutant's
 SQL file is comment-only, so every mutant is still one id, one file, one row.
 
-Two mutants are also shaped differently from the §9 table's sentence, for reasons task 13 should
-carry into the spec text:
+Two mutants are also shaped differently from the §9 table's sentence — three, counting MN13 below
+— for reasons the spec text now carries *(done 2026-09-15)*:
 
 - **MN3** as §9 words it ("the compiler reads `_size` through a fragment that consults
   declared-versus-derived status") would die trivially: a fragment that reads the catalog cannot be
@@ -179,7 +269,7 @@ carry into the spec text:
 
 ## Spec deviations in this milestone
 
-Where the prototype knowingly differs from `docs/superpowers/specs/2026-09-13-duckent-core-design.md`. Each is a deviation to carry forward or close in M2, not an accident.
+Where the prototype knowingly differs from `docs/superpowers/specs/2026-09-13-duckent-core-design.md`. Each is a deviation to carry forward or close in M2, not an accident. *(2026-09-15: both specs were amended at the close of M2 and now carry the surviving items in place, marked "(amended 2026-09-15, M2 build)". This list stays as the record of what moved and why — a spec that has been corrected no longer shows where it was wrong.)*
 
 - `tree_state.partitions.root_key` is `VARCHAR` (the ROOT struct cast to text), not the STRUCT §2.2 describes; one column type serves every tree's ROOT shape. Tests compare against `{...}::VARCHAR` renderings.
 - `tree_catalog.compiled` records only the `projection` artifact. `encoder`, `ingest`, `assert_p13` and `assert_o_<slot>` rows are not written.
@@ -241,3 +331,58 @@ Deferred cleanups the review named, not addressed here:
 - Declared O columns (parent, size, children, next) must be carried through the projection stages under hidden aliases (`__size_raw` etc.) because a closed or explicit ATTR list otherwise drops the source column before the stage that reads it.
 - A runner-level lesson: a stub macro in a smoke test must be CREATE OR REPLACE because the real macro of the same name exists once the suite matures.
 - Mutant lessons: a fragment macro can be shadowed by an earlier guard (MN17's delete predicate was already ROOT-restricted by the gone-partition computation), so the mutant had to override the whole compiler; and a mutant with no test surface survives silently (MN14 needed a multi-root match test).
+
+## Open after M2
+
+The triage list for the final review. None of these is a wrong answer today; each is a place the
+code and the contract have not been made to agree, and each is written so the next reader can
+decide rather than re-discover.
+
+**Element rows (D-N18), the half that was not finished.**
+
+- The projection's `_next` column is **element-blind** — it is the raw structural next sibling
+  (`_pre + _size + 1`) — while `tree_next_sibling` and the `next` combinator are element-aware.
+  Nothing in the matcher reads `_next`, so nothing is wrong today; but the column and the
+  relation of the same name mean different things, which needs either a comment saying so or a
+  decision to make `_next` element-aware and pay for it.
+- `tree_siblings` is unfiltered by element, while `tree_next_sibling`, `tree_prev_sibling`,
+  `tree_first_child` and `tree_last_child` are. The same inconsistency, in the traversal surface
+  rather than the projection.
+
+**Refusals that are narrower than they read.**
+
+- `tree_compile_alter` sets `has_semantic = true` unconditionally, so an alter that changes only
+  ATTR marks an S-less tree as S-ful.
+- "semantic overlay is empty" ignores a `pseudo_args`-only overlay: such an overlay *would* bind
+  the shared tier, so refusing it as empty is wrong, if harmlessly so.
+- The compiler does not police `SELF`'s position. §2 of the M2 design says it is legal only as a
+  group's first inner step, and `tree_steps` / `tree_steps_group` enforce that, but the compiler
+  also takes hand-built IR and would compile a `SELF` anywhere.
+- `tree_steps_group`'s `self` guard covers only top-level inner steps.
+- An unknown-kind node that is **not under a step** (under the root, or under a group) is dropped
+  by the compiler rather than refused. Hand-built IR only — the printer refuses it.
+- The printer's own unknown-kind check reads `min(kind)`, which is NULL when the offending node's
+  `kind` is NULL, so a NULL-kind node is silently dropped instead of refused. Same family as the
+  `error(NULL)` audit above — a guard that does not fire — and it wants the same fix.
+
+**Language and front-end.**
+
+- LIKE patterns are not `%`-escaped in either css front-end, so `[attr^=50%]` means more than it
+  says. v0, in both, deliberately.
+- A **bare text selector reports `treeql` in provenance** although it was parsed as css. The
+  runner substitutes the IR without synthesizing the `language :=` its caller did not write, and
+  `_match_language` is `COALESCE(language, 'treeql')` by design — the compiler sees IR and cannot
+  know what text, if any, produced it. Having a front-end record the language it used is an
+  M-LANG item; it is listed here because the default flip is what made the case reachable.
+
+**Fixtures and cost.**
+
+- `test/gen_fixtures.py` is not byte-reproducible for `scripts.parquet` and `py_variety.parquet`:
+  the row *order* moves between runs although the content is equal. Regenerating them produces a
+  diff that is not a change.
+- Derived `_size` is O(n²) **within a root**, and `test/spike_listspace.py` says where that
+  starts to matter: 13× the declared cost on a 142,650-row input whose roots hold ~9,510 rows
+  each, and only 2.6× on the same rows spread over ten times as many roots. The M3 replacement is
+  the per-level ASOF form (and the C++ port's stack walk).
+- Create and alter still run the compiled projection more than once (once per guard, plus the
+  materialization). Named in the PR #1 review and still open.

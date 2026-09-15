@@ -9,7 +9,7 @@
 | deliverable | implementation architecture; the contract stays as written | the handover already fixes R, S, O, W, milestones, and mutants |
 | substrate | SQL macros first, as the executable reference; C++ extension later, from the DuckDB extension template | semantics must stop moving before they are ported; macros run today on DuckDB 1.5.5 |
 | surface | functional API first; grammar lowers to it later | DuckDB 1.5.5 has no runtime grammar API; DuckDB main has a preview `GrammarExtension` API (PR 24919, merged 2026-09-04) that is not in any tagged release |
-| default selector language | `treeql` initially, flipped to `css` by setting before first public release | TREEQL needs no parser to start and mirrors the S block; CSS lands as a translation into tested semantics |
+| default selector language | `treeql` initially, flipped to `css` by setting before first public release — *(amended 2026-09-15: flipped at the close of M2; `tree_catalog.settings` seeds `css`)* | TREEQL needs no parser to start and mirrors the S block; CSS lands as a translation into tested semantics |
 | evaluation | one compiler: selector IR to SQL text, executed by the test runner now and by a bound table function in the extension | one matcher (doctrine 1); handles TREEQL step `WHERE`; DuckDB plans the whole query |
 | tests | sqllogictest `.test` files from day one | identical files run under the Python `duckdb` package now and under the extension's `unittest` binary later |
 
@@ -24,8 +24,8 @@ Every tree row is identified by `(database_name, schema_name, tree_name)`. Sourc
 | table | one row per | columns |
 |---|---|---|
 | `trees` | abstract or concrete tree | identity; `is_abstract`; `like_tree` (three-part name of the LIKE parent, nullable); `source_sql` (null when abstract); `basis` (`level` or `parent`); `profile` (`full` or `sibling_free`); `storage` (`materialized` or `projection`); `order_source` (`declared` or `frozen`); `has_semantic` (true iff a SEMANTIC group was declared); `description` |
-| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `KEY`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTR`, `ATTR_MAP`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTR` holds a whole select list). The S slots (`TYPE` through `ATTR_MAP`, plus `pseudo_classes`) together form the tree's `SEMANTIC` group, which may be absent |
-| `pseudo_classes` | one pseudo-class binding of one tree | identity; `name`; `kind` (`expression` or `selector`); `body`; `origin` (`local`, `prefix`, `shared`); `purity` (`pure`, `volatile`, `unknown`) |
+| `slots` | one slot of one tree | identity; `block` (`R`, `S`, `O`); `slot` (`ROOT`, `ORDER`, `KEY`, `LEVEL`, `PARENT`, `SIBLING_ORDER`, `TYPE`, `ID`, `CLASSES`, `ATTR`, `ATTR_MAP`, `ELEMENT`, `PSEUDO_ARGS`, `SIZE`, `CHILDREN`, `NEXT`); `expression` (SQL text in row scope; list slots hold their comma-separated list text; `ATTR` holds a whole select list). The S slots (`TYPE` through `PSEUDO_ARGS`, plus `pseudo_classes`) together form the tree's `SEMANTIC` group, which may be absent |
+| `pseudo_classes` | one pseudo-class binding of one tree | identity; `name`; `kind` (`expression` or `macro`, *amended 2026-09-15: a macro-bound entry stores `body` as `'macro(args)'`, from which `macro` and `args` are recovered on read-back; the `selector` kind waits for selector-bodied pseudos*); `body`; `origin` (`local`, `prefix`, `shared`); `purity` (`pure`, `volatile`, `unknown`) |
 | `selector_languages` | one registered selector language | `language`; `parser` (function name: text to `TREE_SELECTOR`); `printer` (function name: `TREE_SELECTOR` to text, nullable); `bare_safe BOOLEAN` |
 | `attachments` | one W1 attachment | `child_tree`, `parent_tree` (three-part names); `join_sql`. Interface only, per D-N4 |
 | `compiled` | one generated artifact of one tree | identity; `artifact` (`projection`, `encoder`, `ingest`, `assert_p13`, `assert_o_<slot>`); `object_name`; `sql_text` |
@@ -55,10 +55,14 @@ Rules encoded by the schema:
 
 ### 3.1 `TREE_SHAPE`
 
+*(amended 2026-09-15, M2 build: `TREE_SEMANTIC` gained `element` and `pseudo_args`, and the
+pseudo entry gained `macro` and `args`.)*
+
 ```sql
 CREATE TYPE TREE_SEMANTIC AS STRUCT(
   type VARCHAR, id VARCHAR, classes VARCHAR, attr VARCHAR, attr_map VARCHAR,
-  pseudo STRUCT(name VARCHAR, body VARCHAR, prefix VARCHAR)[]);
+  element VARCHAR, pseudo_args VARCHAR,
+  pseudo STRUCT(name VARCHAR, body VARCHAR, macro VARCHAR, args VARCHAR, prefix VARCHAR)[]);
 CREATE TYPE TREE_SHAPE AS STRUCT(
   root VARCHAR, "order" VARCHAR, key VARCHAR, level VARCHAR, parent VARCHAR, sibling_order VARCHAR,
   size VARCHAR, children VARCHAR, next VARCHAR,
@@ -66,7 +70,13 @@ CREATE TYPE TREE_SHAPE AS STRUCT(
 CREATE TYPE TREE_SPEC AS STRUCT(shape TREE_SHAPE, abstract BOOLEAN, "like" VARCHAR, source VARCHAR, storage VARCHAR);
 ```
 
-R and O fields sit at the top level; the S block is the nested `semantic` group and may be NULL. Every text field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructors are the macros `tree_shape(order := 'node_id', level := 'depth', semantic := tree_semantic(type := 'kind', …))` with named parameters, which refuse an unknown name at bind. The full spec passed to create is a `TREE_SPEC`, built with `tree_spec(shape, abstract := false, like := NULL, source := NULL, storage := 'materialized')`; `source` is FROM-able SQL text such as `read_parquet('test/data/app.parquet')` or a table name.
+`element` is a row-scope boolean expression, default true, that governs the sibling and
+positional relations (D-N18; M2 design §4): rows for which it is false are invisible to `+`,
+`~`, `:first-child` and `:last-child`, as text nodes are in the DOM. Containment is unaffected —
+subtree and child relations count every row. `pseudo_args` is the default row-scope argument
+list for macro-bound pseudo-classes, and declaring it is what opts a tree into the shared
+`sel_*` tier (M2 design §7). R and O fields sit at the top level; the S block is the nested
+`semantic` group and may be NULL. Every text field is SQL expression text in the source's row scope. `CAST({level: 'depth'} AS TREE_SHAPE)` fills absent fields with NULL (verified on 1.5.5). The cast silently drops unknown fields, so the recommended constructors are the macros `tree_shape(order := 'node_id', level := 'depth', semantic := tree_semantic(type := 'kind', …))` with named parameters, which refuse an unknown name at bind. The full spec passed to create is a `TREE_SPEC`, built with `tree_spec(shape, abstract := false, like := NULL, source := NULL, storage := 'materialized')`; `source` is FROM-able SQL text such as `read_parquet('test/data/app.parquet')` or a table name.
 
 ### 3.2 `TREE_SELECTOR`
 
@@ -91,7 +101,7 @@ Rule: every mutating operation is a pure compiler plus a thin executor. Compiler
 |---|---|---|
 | `tree_ddl_*` | `tree_ddl_create(schema, name, spec)`, `tree_ddl_alter(schema, name, semantic := TREE_SEMANTIC)` (adds or replaces the S group and recompiles the projection), `tree_ddl_drop(schema, name)` | the catalog |
 | `tree_*` data | `tree_insert(schema, name, source)`, `tree_replace(schema, name, source)`, `tree_delete(schema, name, root_predicate)`, `tree_check(schema, name)` | a tree's storage and `tree_state` |
-| `tree_*` read | `tree_project(schema, name)`, `tree_apply(shape, source)`, `tree_match(schema, name, selector, language := <default>, semantic := NULL)` (a non-NULL `semantic` overlays an S group for this query only), `tree_explain(schema, name, selector, language)` | nothing |
+| `tree_*` read | `tree_project(schema, name)`, `tree_apply(shape, source)`, `tree_match(sch, nm, sel, semantic := NULL, language := NULL)` (a non-NULL `semantic` overlays an S group for this query only), `tree_explain(sch, nm, sel, semantic := NULL, language := NULL) → {treeql, sql, language}` | nothing |
 | `tree_*` traversal | `tree_children`, `tree_descendants`, `tree_ancestors`, `tree_next_sibling`, `tree_first_child`, each over a projection by `_pre`, `_level`, `_size`, `_parent` | nothing |
 | `tree_*` derivation | `tree_encode(source, parent_expr, sibling_order)`, `tree_derive_parent(source)` | nothing |
 | `tree_compile_*` | `tree_compile_projection`, `tree_compile_encoder`, `tree_compile_ingest`, `tree_compile_assertions`, `tree_compile_match` | nothing; return SQL text |
@@ -100,6 +110,24 @@ Rule: every mutating operation is a pure compiler plus a thin executor. Compiler
 Validation at `tree_ddl_create`, all bind-time, each naming the missing or offending slot: `LEVEL` or `PARENT` required; `PARENT` without `SIBLING_ORDER` records `profile = sibling_free`; abstract with a source, or concrete without one, refused; `ATTR` names colliding with the canonical prefix refused; a pseudo-class bound both locally and via prefix refused (S-coherence); `ORDER` absent on a projection-mode tree refused; `ORDER` absent on a materialized tree with `preserve_insertion_order` off refused. ROOT-absent-but-multiple-trees is not knowable at create; it surfaces as a P13 failure at ingest with the hint to declare `ROOT`.
 
 DML semantics: `tree_insert` appends whole partitions and refuses an existing ROOT value; `tree_replace` drops matching partitions, re-ingests, bumps epoch; `tree_delete` accepts predicates over ROOT columns only; a predicate on a non-ROOT column is ill-typed (P21).
+
+**The `language` parameter and what it is for** *(amended 2026-09-15, M2 build)*. `selector` is
+either a `TREE_SELECTOR` value or selector text. `language := ` is **provenance**, not a
+directive: the compiler reports `_match_language = COALESCE(language, 'treeql')` and never reads
+the catalog for it. The reason is mechanical — by the time the compiler sees a selector it is
+IR, so it cannot tell whether that IR was parsed from text or constructed. So an IR selector
+reports `treeql` (TREEQL is the IR's own spelling; it was never parsed), and a selector reports
+`css` exactly when its caller says the text was written in css. `tree_explain` returns the same
+value in its `language` field beside the printed `treeql` and the compiled `sql`.
+
+A second setting, `tree_catalog.settings.tree_default_selector_language`, governs one different
+thing: which front-end parses a selector handed over as **text** with no language named. That is
+the runner's job in the macro phase (`test/run.py` rewrites the text to IR before the call) and
+the binder's job in the extension. It was seeded `treeql` and flipped to `css` by the last M2
+task, as §1 said it would be. The two never meet, and the residue of that is visible: a bare
+text selector is *parsed* as css and still reports `treeql` in provenance, because the runner
+substitutes the IR without synthesizing the argument the caller did not write. Making a
+front-end record the language it used is an M-LANG item, alongside the TREEQL text parser.
 
 ## 5. The projection
 
@@ -117,6 +145,7 @@ DML semantics: `tree_insert` appends whole partitions and refuses an existing RO
 | `_type` | TYPE expression, default `'node'` |
 | `_id`, `_classes` | ID and CLASSES expressions, NULL when undeclared |
 | `_attr_map` | ATTR MAP expression, NULL when undeclared; access compiled by its type (MAP, JSON, VARIANT, STRUCT) |
+| `_element` | ELEMENT expression made NULL-definite (`COALESCE(<expr>, false)`), `true` when undeclared *(amended 2026-09-15, M2 build; D-N18)* |
 | `_pseudo` | `MAP(VARCHAR, BOOLEAN)` of every expression-bodied pseudo-class, evaluated per row |
 | attribute columns | the ATTR select list, verbatim |
 
@@ -128,7 +157,11 @@ MATCH physically cannot see a column the projection did not emit; that is the me
 
 ### 6.1 Compiler
 
-`tree_compile_match(schema, name, selector)` is a bottom-up fold over the `TREE_SELECTOR` rows, implemented as a `WITH RECURSIVE … USING KEY` CTE whose rows are `(node_id, sql_fragment)`. Each iteration compiles the nodes whose children are all compiled. Emission per kind:
+`tree_compile_match(schema, name, selector)` is a bottom-up fold over the `TREE_SELECTOR` rows whose rows are `(node_id, sql_fragment)`; each pass compiles the nodes whose children are all compiled.
+
+*(amended 2026-09-15, M2 build.)* The fold is **unrolled to a fixed depth**, not run as a `WITH RECURSIVE … USING KEY` CTE. 1.5.5 refuses a `recurring.<cte>` reference inside a correlated subquery, and a group's `[NOT] EXISTS` is exactly that, so the recursive form cannot be written. The unrolling is total rather than approximate because the IR has its own ceiling: `tree_group_depth_limit()` = 2 group levels, stated once and enforced identically by `tree_steps`, `tree_steps_group`, the printer, and the compiler. The compiler does not trust its caller — IR can arrive hand-built or from a front-end — so it **refuses** rather than drops: a group nested past the ceiling, a group with no inner steps, and a clause hung off anything but a step each raise. All three would otherwise widen the match set silently, which is the worst way for a matcher to fail. `sql/06_selector.sql`'s printer is unrolled the same way for the same reason.
+
+Emission per kind:
 
 - clauses become predicates on the step's alias: `_type = v`, `_id = v`, `list_contains(_classes, v)`, `<attr> <op> <literal>` against the attribute column, else against `_attr_map` by its type (refused at compile if neither serves the name), and any S clause refused when the tree has no `SEMANTIC` group, `_pseudo[v]` (refused if undeclared and not `pseudo_unknown`), and `where` text inlined against the step alias;
 - a step chain becomes a join chain over `tree_project(schema, name)` with structural predicates: `desc` as `b._root = a._root AND b._pre BETWEEN a._pre + 1 AND a._pre + a._size`; `child` as `b._parent = a._pre`; `next` as `b._parent IS NOT DISTINCT FROM a._parent AND b._pre = a._pre + a._size + 1`; `after` as `b._parent IS NOT DISTINCT FROM a._parent AND b._pre > a._pre` (the sibling comparison is NULL-blind, not NULL-definite: the level-0 rows of one partition all have a NULL `_parent` and are siblings of each other, as `tree_next_sibling` already has it). `next` and `after` are refused when `trees.profile = sibling_free`, naming `SIBLING_ORDER`;
@@ -141,9 +174,19 @@ Semantics inherited from sitting_duck and adopted into the contract: attribute f
 
 ### 6.2 Selector languages
 
-`treeql` is the initial default and the canonical form. The functional constructor `tree_steps` and the printer `tree_selector_to_treeql` ship in M1½; the text parser ships in M-LANG. `css` ships in M2 as a translation to `TREE_SELECTOR`, parsed in the prototype through sitting_duck's tree-sitter-css output reshaped by a normalizing macro, and in the extension through embedded tree-sitter. CSS has no host escape; a `[WHERE` token refuses with the hint "css has no host escape: mint a PSEUDO, or MATCH USING TREEQL". CSS keeps postfix `@name` captures. TREEQL step `WHERE` is the system's only host door and compiles against the projection alias only. A step `WHERE` may reference other steps' aliases explicitly; unqualified names resolve to the step's own row first (every alias is a projection of the same tree, so P14 holds on columns either way), and the row is unnested one level only so `_root` and the other canonical columns stay addressable. `$( )` is required only for language tags and quoting certainty.
+`treeql` is the initial default and the canonical form *(amended 2026-09-15: it remains the canonical form and the IR's own spelling; `css` is the default from the close of M2 — see §4 on which of those two claims the setting actually governs)*. The functional constructor `tree_steps` and the printer `tree_selector_to_treeql` ship in M1½; the text parser ships in M-LANG. `css` ships in M2 as a translation to `TREE_SELECTOR`, parsed in the prototype through sitting_duck's tree-sitter-css output reshaped by a normalizing macro, and in the extension through embedded tree-sitter.
+
+*(amended 2026-09-15, M2 build.)* M2 ships **two** css front-ends, not one, and binds them to each other by test. The SQL lowering (`tree_css_lower` / `tree_parse_css`) is the reference; the runner's recursive-descent parser (`test/css_parser.py`) stands in for the built-in the extension will have, and is what makes MN8 testable today. A row-level differential over 3,444 selectors found **0 divergences** — same IR, same refusal reason — and three lossy families are documented in the lowering rather than papered over:
+
+1. a compound that follows a whitespace descendant combinator and begins with a pseudo-class or a quoted type (`a :has(x)`, `a "b"`): tree-sitter-css reads that shape as CSS property syntax. The lowering refuses; write the combinator explicitly. A `*` universal-selector rewrite could close this family and is an M-LANG item;
+2. argument-less `:where` / `:is`;
+3. a depth case — plus, separately, a wording-only difference on trailing junk (both refuse, at the same token, saying it differently).
+
+Two front-ends are not a hedge: the differential is what a semantics has instead of a proof, and it is the same discipline §5 applies to the sitting_duck oracle. CSS has no host escape; a `[WHERE` token refuses with the hint "css has no host escape: mint a PSEUDO, or MATCH USING TREEQL". CSS keeps postfix `@name` captures. TREEQL step `WHERE` is the system's only host door and compiles against the projection alias only. A step `WHERE` may reference other steps' aliases explicitly; unqualified names resolve to the step's own row first (every alias is a projection of the same tree, so P14 holds on columns either way), and the row is unnested one level only so `_root` and the other canonical columns stay addressable. `$( )` is required only for language tags and quoting certainty.
 
 The IR is the semantic anchor: a language that cannot lower a construct refuses it; no language interprets privately.
+
+The front-ends after css are xpath, tree-sitter-query, the TREEQL text parser, and — added at the close of M2 — **cycle-free Cypher (D-N19)**: node patterns become steps, relationship types become combinators, node variables become captures, and `WHERE` becomes step `WHERE`, because Cypher is a host-door language like TREEQL rather than a closed one like css. A pattern graph with a cycle names no tree relation and is refused at lowering. All of them sit in M-LANG behind the language-registration API (D-N10); the statement of D-N19 is in the M2 design §12.
 
 ### 6.3 Captures
 
@@ -156,6 +199,8 @@ Format: sqllogictest `.test` files, run by a small Python runner over the `duckd
 Fixtures are pinned parquet or CSV under `test/data/`, generated once and committed: `app.parquet` (sitting_duck on `docs/examples/app.py`), `scripts.parquet` (sitting_duck on a pinned commit of `sitting_duck/scripts/*.py`, multi-tree, the M0 oracle fixture), `readme_blocks.parquet` (markdown on this README), `employees.csv` (parent basis with sibling key), `categories.csv` (parent basis, sibling-free), `coa.csv` and `ledger.csv`, and generated `levels_*.csv` for P13 property tests. Only the differential suite needs sitting_duck installed.
 
 The selector corpus is one file of `(treeql, css, fixture, tags)` rows; tags are `portable`, `sitting_duck_supported`, `v0`. Every corpus row carries its TREEQL spelling from the start, so the CSS front-end's first test is the round trip.
+
+*(amended 2026-09-15, M2 build.)* There are two corpus sources, not one: the hand-written `test/corpus/selectors.tsv` above, and `test/corpus/astcss_eval.jsonl` — 108 execution-verified css/fixture pairs imported from the astcss-eval set, each carrying a **frozen reference** (a node set and a hash) produced by sitting_duck at a pinned commit. A third fixture, `py_variety.parquet`, comes with it. The frozen references are what make the differential runnable with no extension installed, and what make it an oracle rather than a comparison: a reference is never edited, and a row we disagree with is adjudicated in `FINDINGS.md` before any test changes.
 
 Suites by milestone:
 
@@ -201,6 +246,14 @@ Matching itself is joins with range predicates and never was recursive.
 
 D-N3 refuse per query (adopted). D-N4 attachment interface in core, registry above. D-N5 tri-state frontier and load callback slot in core. D-N8 O3/O4 spellings provisional. D-N9 capture residue: alias/table-name collisions. D-N10 language registration API. D-N12 no first-step keyword (adopted). D-N13 `FOLLOWING` for `~` (candidate). D-N14 nested `HAS`/`NOT` step groups in TREEQL (adopted here; to be reflected in the proposal). D-N15 clause operands as bare identifiers (`TYPE foo`) versus string literals (`TYPE 'foo'`); the proposal's examples use both. D-N16 the `ATTR` / `ATTRS` spelling; this document uses `ATTR` for the list, `ATTR MAP`, and `ATTR JSON`.
 
+*(amended 2026-09-15, M2 build — three decisions settled or opened in M2, mirrored from the M2 design §12.)*
+
+- **D-N17 list-space navigation — closed, against.** `EXISTS` stays. Measured (`test/spike_listspace.py`, numbers in FINDINGS): the list-space form loses by 50× to 60× on 143k rows and the gap widens with size, because DuckDB answers `EXISTS` with a semi-join that stops at the first match while list-space must materialize every node's subtree to answer about a few.
+- **D-N18 element rows — adopted.** A shape-declared row-scope `element` predicate, default true, governs the sibling and positional relations only.
+- **D-N19 cycle-free Cypher as a registered selector language — future, not M2.** Node patterns become steps, relationship types become combinators, node variables become captures, `WHERE` becomes step `WHERE` (Cypher is a host-door language like TREEQL, not a closed one like css); a pattern graph with a cycle names no tree relation and is refused at lowering. It sits with xpath and tree-sitter-query in M-LANG (D-N10), and is the fourth front-end the one-semantics doctrine is meant to pay for. The full statement is in the M2 design §12.
+
+Two open items M2 leaves for M-LANG, both from the css work: the `:not` self relation's spelling in TREEQL text (the IR op is `self`), and the three lossy families of §6.2 — of which the first, the whitespace-descendant compound, could be closed by rewriting the combinator through the universal selector.
+
 ## 12. Verified during design
 
-On DuckDB 1.5.5: partial struct cast to a custom type fills NULLs and drops unknown fields; a macro constructor with named parameters refuses unknown names; `query()` runs macro-produced text with literal arguments, including inside a parameterized table macro; a `USING KEY` recursive CTE can fold a flattened selector AST bottom-up against a projection (`function_definition:not(:has(string))` on `app.py` returned `shout`, matching shipped `ast_select`), with the constraint that the recursive term must be a single SELECT and may reference `recurring.<cte>` only in FROM-clause position; `USING SAMPLE`, `TABLE src`, `COLUMNS(...) AS '\1'`, and `query_table` all behave as the syntax reference recorded. On DuckDB main at 2026-09-11: `GrammarExtension` with `GrammarChange::{AddRule, AddChoice, PrependChoice, ReplaceRule, SetTransformProcess, AddTerminalRuleOverride}`, activated by `SET active_grammar_extensions`, exists and is marked preview.
+On DuckDB 1.5.5: partial struct cast to a custom type fills NULLs and drops unknown fields; a macro constructor with named parameters refuses unknown names; `query()` runs macro-produced text with literal arguments, including inside a parameterized table macro; a `USING KEY` recursive CTE can fold a flattened selector AST bottom-up against a projection (`function_definition:not(:has(string))` on `app.py` returned `shout`, matching shipped `ast_select`), with the constraint that the recursive term must be a single SELECT and may reference `recurring.<cte>` only in FROM-clause position — *(amended 2026-09-15: that constraint turned out to rule the form out entirely for the real compiler, because a group compiles to a correlated `[NOT] EXISTS`; see §6.1)*; `USING SAMPLE`, `TABLE src`, `COLUMNS(...) AS '\1'`, and `query_table` all behave as the syntax reference recorded. On DuckDB main at 2026-09-11: `GrammarExtension` with `GrammarChange::{AddRule, AddChoice, PrependChoice, ReplaceRule, SetTransformProcess, AddTerminalRuleOverride}`, activated by `SET active_grammar_extensions`, exists and is marked preview.
