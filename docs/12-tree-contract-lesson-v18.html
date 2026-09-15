@@ -210,11 +210,10 @@ FROM read_ast(<span class="s">'app.py'</span>);
       </div>
       <aside>
         <div class="fig"><span class="seed">⧉</span>
-          <div class="body"><pre>FROM read_ast(<span class="s">'src/**/*.py'</span>)
-SELECT name, start_line
-WHERE ast_select(node,
-  <span class="s">'.fn:not(:has(:docblock))'</span>);</pre></div>
-          <div class="cap">Runs today. Same selector in Python (<code>squackit.pluck</code>) and the shell (<code>duckeye -Q</code>): one selector, three surfaces.</div>
+          <div class="body"><pre>FROM ast_select(<span class="s">'src/**/*.py'</span>,
+  <span class="s">'.fn:not(:has(string))'</span>)
+SELECT name, start_line;</pre></div>
+          <div class="cap">Runs today, in the nearest shipped spelling: <code>:has(string)</code> stands in for <code>:has(:docblock)</code>, which needs the pseudo-class registry duckent's M2 adds. Same selector in Python (<code>squackit.pluck</code>) and the shell (<code>duckeye -Q</code>): one selector, three surfaces.</div>
         </div>
       </aside>
     </div>
@@ -732,15 +731,17 @@ SELECT name, start_line
 WHERE is_function(semantic_type)\n  AND NOT has_docblock('src/**/*.py', node_id);`,
   v:"The query collapses to a sentence, and is_function quietly switches vocabularies: DEFINITION_FUNCTION spans all 27 grammars."},
  {k:"1",adds:"adds: THE GRAMMAR (30 years of muscle memory)",
-  code:`FROM read_ast('src/**/*.py')
-SELECT name, start_line
-WHERE ast_select(node, '.fn:not(:has(:docblock))');`,
-  v:"The macros became grammar: is_function is .fn, has_docblock is :has(:docblock). Yes, that's CSS in a WHERE clause; yes, it's load-bearing."},
+  code:`FROM ast_select('src/**/*.py', '.fn:not(:has(string))')
+SELECT name, start_line;
+
+-- the target spelling, once :docblock is a registered pseudo-class:
+-- .fn:not(:has(:docblock))`,
+  v:"The macros became grammar: is_function is .fn, has_docblock is :has(:docblock). Shipped ast_select accepts only a type, #id, or .class inside :has, so :has(string) is today's nearest spelling; the registry that makes :docblock legal is duckent's. Yes, that's CSS selecting rows; yes, it's load-bearing."},
  {k:"1.5",adds:"adds: THE SURFACE (chains — and a training corpus)",
   code:`from squackit import pluck
-for node in pluck("**/*.py", ".fn:not(:has(:docblock))"): ...
+for node in pluck("**/*.py", ".fn:not(:has(string))"): ...
 
-$ duckeye -Q ".fn:not(:has(:docblock))" **/*.py`,
+$ duckeye -Q ".fn:not(:has(string))" **/*.py`,
   v:"One selector, three surfaces — WHERE clause, Python iterator, shell one-liner. Surfaces are cheap because the selector is the invariant; small models can be grammar-constrained to speak it perfectly."}
 ];
 const bar=document.querySelector('.rungs');
