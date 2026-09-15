@@ -402,6 +402,25 @@ SELECT tree_parse_css('.fn@a@b');
 ----
 unexpected second capture
 
+# s<N> is the match compiler's generated alias for step N, so a capture of that shape either
+# loses its output column or names two relations the same. The runner parser refuses it, this
+# lowering refuses it, and the compiler behind both refuses it (C1).
+statement error
+SELECT tree_parse_css('.fn@s1');
+----
+alias s1 is reserved for generated step aliases
+
+statement error
+SELECT tree_parse_css('function_definition@s3 block');
+----
+alias s3 is reserved for generated step aliases
+
+# a capture that merely starts with s is untouched
+query I
+SELECT (SELECT alias FROM (SELECT unnest(tree_parse_css('.fn@src'), recursive := true)) WHERE kind = 'step');
+----
+src
+
 statement error
 SELECT tree_parse_css('.fn:has(block@b)');
 ----

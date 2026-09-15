@@ -167,6 +167,28 @@ FROM tree_match('main', 'app', '.fn@a@b', language := 'css');
 ----
 unexpected second capture
 
+# s<N> is the alias the match compiler generates for step N. tree_steps has refused a capture of
+# that shape since M1 1/2, but neither css front-end did: `@s1` on the first step silently lost
+# its output column (the compiler drops any alias equal to 's' || node_id) while tree_explain
+# still printed `AS s1`, and `@s3` named a second relation s3 and died in the binder. Both
+# front-ends refuse it now, positioned, and so does the compiler behind them (C1).
+statement error
+FROM tree_match('main', 'app', '.fn@s1', language := 'css');
+----
+alias s1 is reserved for generated step aliases
+
+statement error
+FROM tree_match('main', 'app', 'function_definition@s3 block', language := 'css');
+----
+alias s3 is reserved for generated step aliases
+
+# a capture that merely starts with s is still a capture
+query I rowsort
+FROM tree_match('main', 'app', 'function_definition@src > block', language := 'css') SELECT src.name;
+----
+greet
+shout
+
 statement error
 FROM tree_match('main', 'app', '.fn[name="sh]', language := 'css');
 ----

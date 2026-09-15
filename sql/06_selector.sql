@@ -12,13 +12,23 @@ CREATE OR REPLACE MACRO tree_group_depth_limit() AS 2;
 -- printer and tree_steps_group refuse a selector they cannot render or build.
 -- 1.5.5: a plain (non-USING KEY) recursive CTE binds inside a scalar macro body, so the walk does
 -- not have to be unrolled here the way the constructor's levels are.
+--
+-- The walk follows parent links, and a hand-built IR can repeat a node_id -- which makes those
+-- links a cycle (`0 -> 1, 1 -> 2, 2 -> 1`) and the walk non-terminating. The callers refuse a
+-- selector whose node ids are not unique before they ask for a depth, but this macro is also
+-- public, so it carries its own bound: `lv` counts NODE levels, not group levels, and stops the
+-- recursion past the deepest node a legal selector can have. Each group level costs two node
+-- levels (the group node and its first inner step) on top of the root and the top-level step,
+-- and one more level carries the innermost step's clauses; the +3 is that clause level plus the
+-- headroom that lets a group ONE level past the ceiling still be counted, which is what makes
+-- the "nested deeper than N levels" refusals fire instead of silently reading as legal.
 CREATE OR REPLACE MACRO tree_selector_group_depth(sel) AS (
   WITH RECURSIVE n AS (SELECT unnest(sel::TREE_SELECTOR) AS x),
-  walk(id, d) AS (
-      SELECT (x).node_id, 0 FROM n WHERE (x).parent_id IS NULL
+  walk(id, d, lv) AS (
+      SELECT (x).node_id, 0, 0 FROM n WHERE (x).parent_id IS NULL
     UNION ALL
-      SELECT (x).node_id, w.d + CASE WHEN (x).kind IN ('has', 'not') THEN 1 ELSE 0 END
-      FROM walk w, n WHERE (x).parent_id = w.id)
+      SELECT (x).node_id, w.d + CASE WHEN (x).kind IN ('has', 'not') THEN 1 ELSE 0 END, w.lv + 1
+      FROM walk w, n WHERE (x).parent_id = w.id AND w.lv < 2 * tree_group_depth_limit() + 3)
   SELECT COALESCE(max(d), 0) FROM walk);
 
 -- Normalize any list of step structs to one fixed shape so missing fields read as NULL, and
@@ -142,6 +152,13 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
   bad_self AS (
     SELECT count(*) AS n FROM allsteps a
     WHERE a.comb = 'self' AND NOT (a.depth > 0 AND a.chain_i = 1)),
+  -- The first step of the OUTER chain has nothing before it to relate to, so its written comb
+  -- is dropped for NULL above. Dropping it silently is the one thing this constructor does that
+  -- the css parser does not: there a leading combinator refuses (`a combinator with nothing on
+  -- its left`), so a selector that means nothing reads as an error in one front-end and as a
+  -- different selector in the other. It refuses here too (M7).
+  bad_first_comb AS (
+    SELECT min(a.comb) AS c FROM allsteps a WHERE a.depth = 0 AND a.chain_i = 1 AND a.comb IS NOT NULL),
   nodes AS (
     -- the root: a ppath no row carries, so the parent join leaves its parent_id NULL
     SELECT {i0: 0, a0: 0, i1: 0, a1: 0, i2: 0, a2: 0} AS path,
@@ -172,6 +189,9 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     WHEN (SELECT a FROM bad_attr) IS NOT NULL THEN tree_err('tree_steps: cannot parse ATTR clause: ' || (SELECT a FROM bad_attr))
     WHEN (SELECT n FROM bad_self) > 0
       THEN tree_err('tree_steps: SELF is only legal as the first step of a HAS/NOT group')
+    -- after bad_self, so `{comb: 'self'}` written first still refuses in SELF's own words
+    WHEN (SELECT c FROM bad_first_comb) IS NOT NULL
+      THEN tree_err('tree_steps: the first step takes no combinator')
     -- s<N> is what the match compiler names step N when the user names nothing; a user
     -- alias of that shape would collide with another step's generated alias
     WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
@@ -266,9 +286,17 @@ CREATE OR REPLACE MACRO tree_treeql_step(op, clauses, alias) AS
 -- raised before the query runs -- so the copies stay until that is fixed.
 CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
   WITH n AS (SELECT unnest(sel, recursive := true)),
+  -- COALESCE inside the aggregate, not outside it: `min(kind)` over a NULL-kind node is NULL,
+  -- so the arm below read "IS NOT NULL" as "no bad kind" and the node was dropped instead of
+  -- refused -- a guard that did not fire, the same family as the error(NULL) audit. NULL is
+  -- named in the whitelist test too, since `kind NOT IN (...)` is NULL for a NULL kind.
   bad_kind AS (
-    SELECT min(kind) AS k FROM n
-    WHERE kind NOT IN ('selector', 'step', 'has', 'not', 'type', 'id', 'class', 'attr', 'pseudo', 'where')),
+    SELECT min(COALESCE(kind, '<NULL>')) AS k FROM n
+    WHERE kind IS NULL
+       OR kind NOT IN ('selector', 'step', 'has', 'not', 'type', 'id', 'class', 'attr', 'pseudo', 'where')),
+  -- Node ids are the parent links, so a repeated one makes the parent relation a graph rather
+  -- than a tree and the depth walk below a cycle. Refused before any walk is asked for.
+  bad_dup AS (SELECT count(*) <> count(DISTINCT node_id) AS bad FROM n),
   -- (step node id, part node id, part text) for every clause: the same at every level
   clause AS (
     SELECT c.parent_id AS step, c.node_id AS id, tree_treeql_clause(c.kind, c.value, c.op, c.arg) AS t
@@ -300,6 +328,8 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
   SELECT CASE
     WHEN (SELECT k FROM bad_kind) IS NOT NULL
       THEN tree_err('tree_selector_to_treeql: unknown node kind ' || (SELECT k FROM bad_kind))
+    WHEN (SELECT bad FROM bad_dup)
+      THEN tree_err('tree_selector_to_treeql: selector node ids are not unique')
     WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
       THEN tree_err('tree_selector_to_treeql: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE (SELECT string_agg(tree_treeql_step(op, body, alias), chr(10) ORDER BY node_id)

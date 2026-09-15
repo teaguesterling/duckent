@@ -409,6 +409,12 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   bad_qtype AS (SELECT min(nm) AS t FROM part
                 WHERE cls = 'str' AND NOT regexp_matches(substr(nm, 2, length(nm) - 2), '^[A-Za-z_][A-Za-z0-9_-]*$')),
   bad_cap_second AS (SELECT count(*) AS n FROM alias WHERE n > 1),
+  -- s<N> is the alias tree_compile_match generates for step N, and its capture list drops any
+  -- alias equal to its own generated one: `@s1` on the first step lost its output column while
+  -- the printer still showed it, and `@s3` on a two-step selector named a second relation s3 and
+  -- raised a bare Binder Error. tree_steps has refused the shape since M1 1/2; both css
+  -- front-ends refuse it here, and the compiler refuses it behind them (C1).
+  bad_cap_reserved AS (SELECT min(a) AS a FROM alias WHERE regexp_matches(a, '^s[0-9]+$')),
   -- a step inside HAS/NOT is a test, not a row of the result, so there is nothing to name
   bad_cap_in_group AS (SELECT count(*) AS n FROM alias a JOIN placed p ON p.anchor = a.anchor WHERE p.lvl > 0),
   bad_depth AS (SELECT max(lvl) AS d FROM chains)
@@ -460,6 +466,8 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
       THEN tree_css_err('css: expected a type name in quotes, got ' || tree_sql_lit((SELECT t FROM bad_qtype)))
     WHEN (SELECT n FROM bad_cap_second) > 0 THEN tree_css_err('css: unexpected second capture')
     WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN tree_css_err('css: capture inside :has/:not has no row to bind')
+    WHEN (SELECT a FROM bad_cap_reserved) IS NOT NULL
+      THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_reserved) || ' is reserved for generated step aliases')
     WHEN (SELECT d FROM bad_depth) > tree_group_depth_limit()
       THEN tree_css_err('css: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value,

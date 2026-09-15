@@ -38,7 +38,8 @@ chain is anchored on the step the group hangs off by the op of its first inner s
                  guessing an anchor is how `:not` came to mean a descendant test in the first place.
 
 A capture inside a group is refused for the reason tree_steps refuses one: a step inside HAS/NOT
-is a test, not a row of the result.
+is a test, not a row of the result. A capture named `s<N>` is refused for the reason tree_steps
+refuses one: that is the alias the match compiler generates for step N.
 
 Row order: the rows are the rows tree_steps builds for the equivalent literal, numbered the same
 way -- a compound's clauses are emitted in tree_steps' slot order (type, id, class, attr, pseudo;
@@ -238,7 +239,17 @@ class Parser:
                     self.error("capture inside :has/:not has no row to bind")
                 if step["alias"] is not None:
                     self.error("unexpected second capture")
-                step["alias"] = self.ident("capture name")
+                at = self.i
+                name = self.ident("capture name")
+                # s<N> is the alias the match compiler generates for step N, and it drops any
+                # capture whose alias equals its own generated one -- so `@s1` on step 1 would
+                # silently lose its output column, and `@s3` on a shorter selector would name a
+                # second relation s3 and die in the binder. tree_steps has refused the shape
+                # since M1 1/2; both css front-ends and the compiler refuse it now too.
+                if re.fullmatch(r"s[0-9]+", name):
+                    self.i = at
+                    self.error("alias %s is reserved for generated step aliases" % name)
+                step["alias"] = name
             else:
                 break
             seen = True

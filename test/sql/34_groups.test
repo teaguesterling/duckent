@@ -286,6 +286,40 @@ SELECT tree_selector_to_treeql([
 ----
 tree_selector_to_treeql: unknown node kind bogus
 
+# a NULL kind is the same defect the error(NULL) audit found, in a guard rather than a message:
+# `min(kind)` over a NULL-kind node is NULL, and the arm tested that aggregate for IS NOT NULL,
+# so the node was dropped exactly as an unknown kind would have been -- the check that was
+# supposed to stop it. The COALESCE is inside the aggregate now and the node is named.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: NULL, value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: unknown node kind <NULL>
+
+# a repeated node id makes the parent links a cycle, and the printer's depth check walks them:
+# this literal HUNG the printer. Uniqueness is refused before the walk is asked for.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: selector node ids are not unique
+
+# the walk itself carries a level bound, so tree_selector_group_depth is safe on a cyclic literal
+# even when it is called directly, without a caller's uniqueness check in front of it
+query I
+SELECT tree_selector_group_depth([
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'has', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 2, kind: 'step', value: NULL, op: 'desc', arg: NULL, alias: NULL}]::TREE_SELECTOR) > 0;
+----
+true
+
 # exactly at the ceiling still prints
 query I
 SELECT tree_selector_group_depth(tree_steps([{type: 'a', has: [{type: 'b', has: [{type: 'c'}]}]}]));

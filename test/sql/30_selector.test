@@ -63,3 +63,23 @@ query I
 SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {type: 'b'}])), chr(10), ' | ');
 ----
 (TYPE 'a') | DESCENDANT (TYPE 'b')
+
+# ...and a combinator WRITTEN on the first step is refused rather than dropped. The first step of
+# the outer chain has nothing to its left, so a comb there means nothing; dropping it silently
+# made `[{comb: 'child', type: 'a'}]` and `[{type: 'a'}]` the same selector, while the css parser
+# refuses the same shape ("a combinator with nothing on its left"). Two front-ends, one answer.
+statement error
+SELECT tree_steps([{comb: 'child', type: 'a'}]);
+----
+tree_steps: the first step takes no combinator
+
+statement error
+SELECT tree_steps([{comb: 'desc', type: 'a'}, {comb: 'child', type: 'b'}]);
+----
+tree_steps: the first step takes no combinator
+
+# the first step of a GROUP's chain does take one -- that is what anchors the group
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a', has: [{comb: 'child', type: 'b'}]}])), chr(10), ' | ');
+----
+(TYPE 'a', HAS ( CHILD (TYPE 'b') ))
