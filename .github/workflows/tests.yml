@@ -1,0 +1,93 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Suite 41b reads sitting_duck's own read_ast rows from ~/Projects/astcss-eval/fixtures. That
+# repository is private, but both fixture directories are byte-identical copies of files in the
+# public sitting_duck repository at pinned commits (astcss-eval fixtures/MANIFEST.json), so CI
+# rebuilds them from there instead.
+env:
+  SD_PY_VARIETY_COMMIT: db1b04349a6dc3b83435e97d951158bc6f121e28   # test/data/python
+  SD_REPO_SMALL_PY_COMMIT: 4eeeee6dec56530e717e4833929cf22ca32accd7 # scripts/
+
+jobs:
+  suites:
+    name: suites, css parser, mutant copies
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install DuckDB 1.5.5 and the harness's dependency
+        run: pip install duckdb==1.5.5 pyyaml
+      - name: Install sitting_duck, which suites 38, 41b and 44 require
+        run: python -c "import duckdb; duckdb.connect().execute('INSTALL sitting_duck FROM community')"
+      - name: Check out sitting_duck at the py-variety commit
+        uses: actions/checkout@v4
+        with:
+          repository: teaguesterling/sitting_duck
+          ref: ${{ env.SD_PY_VARIETY_COMMIT }}
+          path: .ci/sd-py-variety
+          sparse-checkout: test/data/python
+      - name: Check out sitting_duck at the repo-small-py commit
+        uses: actions/checkout@v4
+        with:
+          repository: teaguesterling/sitting_duck
+          ref: ${{ env.SD_REPO_SMALL_PY_COMMIT }}
+          path: .ci/sd-repo-small-py
+          sparse-checkout: scripts
+      - name: Stage the astcss-eval fixture directories
+        run: |
+          mkdir -p ~/Projects/astcss-eval/fixtures/py-variety ~/Projects/astcss-eval/fixtures/repo-small-py
+          cp .ci/sd-py-variety/test/data/python/*.py ~/Projects/astcss-eval/fixtures/py-variety/
+          cp .ci/sd-repo-small-py/scripts/*.py ~/Projects/astcss-eval/fixtures/repo-small-py/
+      - name: Suites (a skipped suite fails the job)
+        shell: bash
+        run: |
+          python test/run.py test/sql 2>&1 | tee suites.log
+          if grep -q '^SKIP' suites.log; then echo "::error::a suite was skipped"; exit 1; fi
+      - name: css parser unit tests
+        run: python test/test_css_parser.py
+      - name: Copy-and-edit mutants match the macros they copy
+        run: python test/mutants/regen.py --check
+
+  mutants:
+    name: mutant harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install DuckDB 1.5.5 and the harness's dependency
+        run: pip install duckdb==1.5.5 pyyaml
+      - name: Install sitting_duck, which suites 38, 41b and 44 require
+        run: python -c "import duckdb; duckdb.connect().execute('INSTALL sitting_duck FROM community')"
+      - name: Check out sitting_duck at the py-variety commit
+        uses: actions/checkout@v4
+        with:
+          repository: teaguesterling/sitting_duck
+          ref: ${{ env.SD_PY_VARIETY_COMMIT }}
+          path: .ci/sd-py-variety
+          sparse-checkout: test/data/python
+      - name: Check out sitting_duck at the repo-small-py commit
+        uses: actions/checkout@v4
+        with:
+          repository: teaguesterling/sitting_duck
+          ref: ${{ env.SD_REPO_SMALL_PY_COMMIT }}
+          path: .ci/sd-repo-small-py
+          sparse-checkout: scripts
+      - name: Stage the astcss-eval fixture directories
+        run: |
+          mkdir -p ~/Projects/astcss-eval/fixtures/py-variety ~/Projects/astcss-eval/fixtures/repo-small-py
+          cp .ci/sd-py-variety/test/data/python/*.py ~/Projects/astcss-eval/fixtures/py-variety/
+          cp .ci/sd-repo-small-py/scripts/*.py ~/Projects/astcss-eval/fixtures/repo-small-py/
+      - name: Every planted mutant dies, and each kill is checked against its control
+        run: python test/run_mutants.py
