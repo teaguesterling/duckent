@@ -1,0 +1,86 @@
+# name: test/sql/35_attr_map.test
+# description: ATTR MAP typed comparison: attribute resolution order (column, then map, then
+# refuse), the literal-typed cast for BIGINT/DOUBLE/BOOLEAN vs. quoted text, and the distinction
+# between an unresolvable NAME (refused) and a map KEY the data doesn't carry (reads as no match)
+
+statement ok
+CREATE TABLE src AS SELECT node_id, depth, type, name, MAP {'lines': CAST(end_line - start_line + 1 AS VARCHAR), 'kind': type} AS extra FROM 'test/data/app.parquet';
+
+statement ok
+CALL tree_ddl_create('main', 'm', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name', attr_map := 'extra')), source := 'src'));
+
+# a projected column wins: name is an ATTR projection column, never a map lookup
+query I rowsort
+FROM tree_match('main', 'm', tree_steps([{type: 'function_definition', attr: 'name = ''greet'''}])) SELECT name;
+----
+greet
+
+# the map, numeric literal: in app.parquet greet spans lines 4-6 (3 lines), shout 9-10 (2
+# lines) -- verified independently against the fixture, not read off the brief's guess. String
+# order would put '3' between '10' and '2' wrongly either way; numeric compares correctly.
+query I rowsort
+FROM tree_match('main', 'm', tree_steps([{type: 'function_definition', attr: 'lines > 2'}])) SELECT name;
+----
+greet
+
+# the map, quoted literal compares as text: app.parquet has exactly two rows with
+# type = 'block' (greet's and shout's bodies), counted independently against the fixture
+query I
+SELECT count(*) FROM tree_match('main', 'm', tree_steps([{attr: 'kind = ''block'''}]));
+----
+2
+
+# a KEY the map doesn't carry is not an error: the map's keys are data, so a lookup miss reads
+# as NULL, TRY_CAST(NULL) stays NULL, and the NULL-definite COALESCE turns that into no match --
+# unlike the refusal below, which is about a bare NAME the compiler cannot resolve to anything
+# (neither a projected column nor a declared ATTR MAP) and so refuses before running any SQL.
+query I
+SELECT count(*) FROM tree_match('main', 'm', tree_steps([{attr: 'nosuch = 1'}]));
+----
+0
+
+# the refusal needs a MAP-LESS tree to fire: on 'm' above, ANY name compiles to a map lookup
+# (the map serves any key), so nothing is ever neither-nor. 'plain' declares no ATTR MAP.
+statement ok
+CALL tree_ddl_create('main', 'plain', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'name')), source := 'src'));
+
+statement error
+FROM tree_match('main', 'plain', tree_steps([{attr: 'nosuch = 1'}]));
+----
+neither a projected column nor served by ATTR MAP
+
+# ATTR here projects 'type' itself (not '' -- canonical _type is EXCLUDEd from match output, so
+# without this the SELECT type below would have nothing to select), so the MN13 row is: '9' vs
+# '10' must compare numerically, and mixed in are the string/boolean/double typed-cast cases.
+statement ok
+CREATE TABLE nine AS SELECT * FROM (VALUES
+  (0, 0, 'a', MAP {'n': '9', 'f': 'true', 'x': '1.5'}),
+  (1, 1, 'b', MAP {'n': '10', 'f': 'false', 'x': '2.5'})) v(node_id, depth, type, extra);
+
+statement ok
+CALL tree_ddl_create('main', 'nine', tree_spec(tree_shape("order" := 'node_id', level := 'depth', semantic := tree_semantic(type := 'type', attr := 'type', attr_map := 'extra')), source := 'nine'));
+
+# unquoted literal: numeric cast, so '10' > 9 is true
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'n > 9'}])) SELECT type;
+----
+b
+
+# the same comparison, quoted: no cast, text order, and '9' > '9' is false while '10' > '9' is
+# also false as text (compares first character, '1' < '9') -- zero rows either way
+query I
+SELECT count(*) FROM tree_match('main', 'nine', tree_steps([{attr: 'n > ''9'''}]));
+----
+0
+
+# BOOLEAN: true/false literals cast the map value
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'f = true'}])) SELECT type;
+----
+a
+
+# DOUBLE: a decimal literal casts the map value
+query I
+FROM tree_match('main', 'nine', tree_steps([{attr: 'x > 2.0'}])) SELECT type;
+----
+b
