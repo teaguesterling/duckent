@@ -3,11 +3,16 @@
 -- The parent join is tree_sql_parent_join() verbatim (its CTE reads __rn, which is why the
 -- stage is named that here): the lemma and the projection compiler must derive parent the
 -- same way, and a copy of the text would let a mutation of the fragment survive here.
--- (__rn, not __r: M3 §2.1 makes _pre the rank of ORDER, computed in a stage of its own that
--- sits after __r, so the join that reads _pre reads __rn there and must read __rn here too.)
+--
+-- The WHOLE __r -> __rn chain is mirrored, not just the join. Since M3 §2.1 _pre is the RANK of
+-- ORDER within ROOT, not the ORDER value, so a lemma that went on casting ORDER straight to _pre
+-- would agree with the compiler only where ORDER is already dense and 0-based -- which is every
+-- fixture here, and precisely the case in which the disagreement cannot be observed. "The same
+-- way" is a claim about every ORDER or it is not worth making.
 CREATE OR REPLACE MACRO tree_derive_parent(source, root_csv, order_col, level_col) AS TABLE
   FROM query(
-    'WITH __rn AS (SELECT *, ' || tree_sql_root(root_csv, '') || ' AS _root, CAST(' || order_col || ' AS BIGINT) AS _pre, CAST(' || level_col || ' AS BIGINT) AS _level FROM ' || source || '), '
+    'WITH __r AS (SELECT *, ' || tree_sql_root(root_csv, '') || ' AS _root, ' || order_col || ' AS __order, CAST(' || level_col || ' AS BIGINT) AS _level FROM ' || source || '), '
+    || '__rn AS (SELECT *, CAST(row_number() OVER (PARTITION BY _root ORDER BY __order) - 1 AS BIGINT) AS _pre FROM __r), '
     || tree_sql_parent_join() || '__out AS (SELECT * FROM __p) SELECT * FROM __out');
 
 CREATE OR REPLACE MACRO tree_encode(source, key, parent, sibling_order) AS TABLE

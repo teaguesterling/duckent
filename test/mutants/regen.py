@@ -248,7 +248,8 @@ def overridden_macros_missing_from_sql(mutant_text):
     mutant overriding a removed macro mutates nothing the suites still call."""
     defined = set()
     for f in sorted(glob.glob(os.path.join(ROOT, "sql", "*.sql"))):
-        defined |= {n.lower() for n in MACRO_RE.findall(open(f).read())}
+        with open(f) as fh:
+            defined |= {n.lower() for n in MACRO_RE.findall(fh.read())}
     return [n for n in MACRO_RE.findall(mutant_text) if n.lower() not in defined]
 
 
