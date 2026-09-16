@@ -11,9 +11,7 @@ CREATE OR REPLACE MACRO tree_sql_children(a, b) AS
 -- node's siblings include the identically-placed rows of every other partition.
 CREATE OR REPLACE MACRO tree_sql_siblings(a, b) AS
   b || '._parent IS NOT DISTINCT FROM ' || a || '._parent AND ' || b || '._pre <> ' || a || '._pre';
--- The derived size ignores roots too, so the mutation is consistent on a size-less shape: without
--- this, a cross-partition _pre range would still be bounded by a correctly-partitioned _size.
--- (This was added to make the mutant bite in 12_dml on the multi-file scripts fixture; it never
--- did -- see the manifest -- but it keeps the mutant coherent, so it stays.)
-CREATE OR REPLACE MACRO tree_sql_size_expr() AS
-  'COALESCE((SELECT min(b._pre) FROM __p b WHERE b._pre > a._pre AND b._level <= a._level), max(a._pre) OVER () + 1) - a._pre - 1';
+-- (A fourth override, a root-blind copy of the old derived-size fragment macro, stood here until
+-- M3 Task 6 replaced that derivation with a level-expanded ASOF join. It never bit -- see the
+-- manifest -- and was kept only for coherence, so it was dropped rather than re-expressed against
+-- the new stages. The three mutations above are the live ones.)

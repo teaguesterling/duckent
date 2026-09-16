@@ -149,3 +149,53 @@ WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'ordv', next
 SELECT list(_level ORDER BY _pre), list(_next ORDER BY _pre) FROM p;
 ----
 [0, 0, 0, 0, 0]	[4, 4, 3, 4, 5]
+
+# Several level-0 rows inside ONE root -- a YAML file with `---` separators is one ROOT holding
+# several documents, each starting again at level 0. P13 allows it: its predicate refuses a
+# DESCENT of more than one (`d > 1`) and a partition that starts above level 0, not a RETURN to
+# 0. A document's subtree must therefore stop at the next document's first row rather than run
+# to the end of the partition: row 0 owns rows 1-2 and stops at row 3, so its _size is 2, not 5.
+statement ok
+CREATE TABLE docs AS SELECT * FROM (VALUES
+  (0, 0), (1, 1), (2, 1), (3, 0), (4, 1), (5, 0)) v(ordv, lvl);
+
+query IIII
+WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'ordv', level := 'lvl'), 'docs', '*')))
+SELECT list(_size ORDER BY _pre), list(_next ORDER BY _pre), list(_children ORDER BY _pre),
+       list(_parent ORDER BY _pre) FROM p;
+----
+[2, 0, 0, 1, 0, 0]	[3, 2, 3, 5, 5, 6]	[2, 0, 0, 1, 0, 0]	[NULL, 0, 0, NULL, 3, NULL]
+
+# Parent basis, declared NEXT: a value in KEY space, TRANSLATED to a position by joining the key
+# (M3 2.2), never cast. The keys here are integers that are NOT positions (10, 20, 30, 40), so a
+# cast and a translation are told apart: at _pre 0 the declared NEXT 30 names the row keyed 30,
+# whose _pre is 3 -- a cast would read 30. A NEXT naming no row (NULL) keeps the structural
+# successor _pre + _size + 1.
+statement ok
+CREATE TABLE knext AS SELECT * FROM (VALUES
+  (10, NULL, 30), (20, 10, 40), (30, 10, NULL), (40, 20, 10)) v(k, par, nxt);
+
+query IIII
+WITH p AS (FROM query(tree_compile_projection(tree_shape(key := 'k', parent := 'par', next := 'nxt'), 'knext', '*')))
+SELECT list(k ORDER BY _pre), list(_next ORDER BY _pre), list(_size ORDER BY _pre),
+       list(_children ORDER BY _pre) FROM p;
+----
+[10, 20, 40, 30]	[3, 2, 0, 4]	[3, 1, 0, 0]	[2, 1, 0, 0]
+
+# and the parent basis's own helper column does not reach the output: __key is EXCLUDEd there
+# exactly as __order is in the level basis. That EXCLUDE list is built TWICE -- once as the gate
+# deciding whether a clause is emitted at all, once as the clause itself -- so a name added to
+# only one of the two either leaks into the output or is promised and missing.
+# The PLAIN shape is the one that tests the GATE: with nothing declared, __key is the only name
+# in the list, so a gate that does not know about it finds the list empty, emits no EXCLUDE clause
+# at all and leaks __key. The shape WITH a declared NEXT tests the EMITTER: __next_raw keeps the
+# gate non-empty either way, so only the clause itself can drop __key.
+query II
+SELECT (SELECT count(*) FROM (DESCRIBE FROM query(tree_compile_projection(
+          tree_shape(key := 'k', parent := 'par'), 'knext', '*')))
+        WHERE column_name LIKE '\_\_%' ESCAPE '\'),
+       (SELECT count(*) FROM (DESCRIBE FROM query(tree_compile_projection(
+          tree_shape(key := 'k', parent := 'par', next := 'nxt'), 'knext', '*')))
+        WHERE column_name LIKE '\_\_%' ESCAPE '\');
+----
+0	0

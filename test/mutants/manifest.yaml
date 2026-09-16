@@ -45,18 +45,12 @@
   what: derive parent as nearest prior row at the same level, not level - 1
   expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
   also_kills: parent join without root equality (no id reserved; see FINDINGS)
-- id: MN03
-  file: MN03_size_status.sql
-  what: a DECLARED SIZE column compiles to a subtree range one short of a derived one
-  expect_fail: [test/sql/42_second_differential.test]
-  also_kills: nothing. 42 is the ONLY suite that sees this mutant -- checked, not assumed
-    (40_corpus and 41 both PASS under it, although their trees do declare SIZE). 40 compares
-    two SPELLINGS of one selector on ONE tree, so a shortened _size moves both sides equally
-    and cancels, exactly as it cancels for MN22/MN24 below; 41's frozen references never turn
-    on a subtree's LAST descendant, which is the only row a range one short drops, and on
-    these fixtures that row is almost always an anonymous token no selector can name (the
-    same fact that made 42 write SIZE_WITNESS by hand). 42 fails twice -- on the record
-    comparing the two projections column for column, and on SIZE_WITNESS.
+# MN03 was RETIRED by M3 Task 6. Its edit was a textual one on the `__s` line of
+# tree_compile_projection, and that line was restructured into tree_sql_size_join(), so regen.py
+# could no longer find the text to plant. The id is NOT reused for the same claim: M3 Task 9
+# re-plants MN03 as a DIFFERENT mutant (a semantics-path function reading an O accessor, in
+# sql/07_match.sql), which is why the edit was dropped rather than re-pointed. The mutant count
+# is 17 until Task 9 restores it to 18.
 - id: MN05
   file: MN05_has_child_only.sql
   what: a group's first inner step is joined as a CHILD whatever its op, so :has() is child-only

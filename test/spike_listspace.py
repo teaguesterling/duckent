@@ -63,6 +63,52 @@ DEEP_NOTE = ("scripts_deep is scripts10's rows under the ORIGINAL 15 roots: same
              "~9,510 per root instead of ~951. It is a cost probe, not a tree -- its levels do "
              "not form one, so the declared and derived sums are not expected to agree.")
 
+# --- the M3 derivation cost probe (--sizes) -----------------------------------------------
+# The shapes spec 2.3 names as the derived SIZE's best and worst cases, each a relation of
+# file_path / node_id / depth / descendant_count. The descendant_count is EXACT and is computed
+# in SQL from the generated rows -- by aggregates over them, never typed by hand and never by
+# the boundary rule being measured -- so "sizes agree" is an independent check rather than a
+# restatement of the derivation.
+SIZE_SHAPES = {
+    # Best case for a declared SIZE and worst for the derivation: one root, 5000 levels, so the
+    # candidate expansion is SUM(5000 - level) ~ n^2/2 rows.
+    "chain depth 5000":
+        "SELECT 'r' AS file_path, i AS node_id, i AS depth, 4999 - i AS descendant_count"
+        " FROM range(5000) t(i)",
+    # The opposite: one level-0 row and 199,999 leaves, so every row expands to at most 2 levels.
+    "flat 200k":
+        "SELECT 'r' AS file_path, i AS node_id, (i > 0)::INT AS depth,"
+        " CASE WHEN i = 0 THEN 199999 ELSE 0 END AS descendant_count FROM range(200000) t(i)",
+    # The shape the comment in sql/02_projection.sql warns about: a deep spine BESIDE many
+    # shallow rows, so the 100k shallow rows each expand over the spine's full depth.
+    "2k spine + 100k shallow": """
+WITH gen AS (SELECT i AS node_id, i AS depth FROM range(2001) t(i)
+             UNION ALL SELECT 2001 + i, 1 FROM range(100000) t(i)),
+     agg AS (SELECT count(*) AS n, max(depth) AS mx,
+                    max(node_id) FILTER (WHERE node_id = depth) AS spine_last FROM gen)
+SELECT 'r' AS file_path, g.node_id, g.depth,
+       CASE WHEN g.node_id = 0 THEN a.n - 1
+            WHEN g.node_id <= a.spine_last THEN a.mx - g.depth
+            ELSE 0 END AS descendant_count
+FROM gen g CROSS JOIN agg a""",
+    # A real parse, ten times over, as ONE root: scripts' 15 files concatenated under a synthetic
+    # level-0 row, every real row pushed down one level. Each file's rows stay contiguous and the
+    # next block opens at level 1, so every original descendant_count still names the same subtree
+    # and carries over unchanged; the synthetic root owns everything.
+    "scripts x10 as one root": """
+WITH base AS (SELECT * FROM read_parquet('%s') CROSS JOIN range(10) t(i)),
+     ord AS (SELECT row_number() OVER (ORDER BY i, file_path, node_id) AS rn,
+                    depth, descendant_count FROM base)
+SELECT 'one' AS file_path, 0 AS node_id, 0 AS depth, (SELECT count(*) FROM ord) AS descendant_count
+UNION ALL
+SELECT 'one', rn, depth + 1, descendant_count FROM ord""" % SCRIPTS,
+}
+
+SIZE_DECL = ("tree_shape(root := 'file_path', \"order\" := 'node_id', level := 'depth',"
+             " size := 'descendant_count')")
+SIZE_DERIV = "tree_shape(root := 'file_path', \"order\" := 'node_id', level := 'depth')"
+
+
 SHAPE = """tree_shape(
   root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
   semantic := tree_semantic(type := 'type', id := 'name', classes := 'css_classes',
@@ -177,6 +223,31 @@ def derived_cost(con, source, timeout):
                                  "DIVERGED: declared %s, derived %s" % (declared, rows))
 
 
+def run_sizes(con, reps):
+    """--sizes: the derived SIZE against a declared one on each shape spec 2.3 names.
+
+    Both sides are compiled by the real projection compiler from the same relation; only the
+    shape differs (one declares `size := 'descendant_count'`, the other declares nothing and
+    derives). `sizes agree` compares the derived `_size` row for row against the relation's own
+    descendant_count, which the shape computed independently of the boundary rule."""
+    print("M3 derivation cost -- derived SIZE against a declared one (spec 2.3 shapes).\n")
+    print("%-26s %9s %11s %10s %8s  %s"
+          % ("shape", "rows", "declared s", "derived s", "ratio", "sizes agree"))
+    for name, gen in SIZE_SHAPES.items():
+        src = "(" + gen + ")"
+        decl = con.execute("SELECT tree_compile_projection(%s, ?, ?)" % SIZE_DECL,
+                           [src, "*"]).fetchone()[0]
+        deriv = con.execute("SELECT tree_compile_projection(%s, ?, ?)" % SIZE_DERIV,
+                            [src, "*"]).fetchone()[0]
+        d_best, _, _ = timeit(con, "SELECT count(*), sum(_size) FROM (%s)" % decl, reps)
+        v_best, _, rows = timeit(con, "SELECT count(*), sum(_size) FROM (%s)" % deriv, reps)
+        bad = con.execute("SELECT count(*) FROM (%s) WHERE _size IS DISTINCT FROM descendant_count"
+                          % deriv).fetchone()[0]
+        print("%-26s %9d %11.3f %10.3f %8.2fx  %s"
+              % (name, rows[0][0], d_best, v_best, v_best / d_best if d_best else float("nan"),
+                 "yes" if bad == 0 else "NO -- %d rows differ" % bad))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=3)
@@ -184,11 +255,17 @@ def main():
     ap.add_argument("--materialized", action="store_true",
                     help="also time the list-space form with both lists pre-built as temp tables,"
                          " so its build cost is paid once instead of per query")
+    ap.add_argument("--sizes", action="store_true",
+                    help="instead of the D-N17 list-space comparison, measure the DERIVED SIZE"
+                         " against a declared one on the spec 2.3 shapes (the M3 cost table)")
     args = ap.parse_args()
 
     s = runner.Session()
     con = s.con
     con.execute("SET enable_progress_bar = false")
+    if args.sizes:
+        run_sizes(con, args.reps)
+        return
     for tree, src in SRC.items():
         for stmt in con.execute("SELECT tree_compile_create('main', ?, tree_spec(%s, source := ?))"
                                 % SHAPE, [tree, src]).fetchone()[0]:

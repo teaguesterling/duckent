@@ -41,9 +41,6 @@ SPEC = {
     "MN14": ("sql/07_match.sql", ["tree_sql_subtree", "tree_sql_children", "tree_sql_siblings"], []),
     "MN15": ("sql/04_dml.sql", ["tree_sql_p13_pred"], []),
 
-    "MN03": ("sql/02_projection.sql", ["tree_compile_projection"], [
-        ("THEN 'CAST(a.__size_raw AS BIGINT)' END", "THEN 'CAST(a.__size_raw AS BIGINT) - 1' END", 1)]),
-
     "MN05": ("sql/07_match.sql", ["tree_sql_chain"], [
         ("ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem)"
          " || ' AND (' || (steps[1]).pred || ')' END",

@@ -40,12 +40,29 @@ CREATE OR REPLACE MACRO tree_sql_sem_cols(sem) AS
 CREATE OR REPLACE MACRO tree_sql_parent_join() AS
   '__p AS (SELECT a.*, b._pre AS _parent FROM __rn a ASOF LEFT JOIN __rn b ON a._root = b._root AND b._level = a._level - 1 AND b._pre < a._pre), ';
 
--- Derived size: distance to the next row at the same or higher level within the root. Quadratic; the C++ port replaces it with a stack walk.
-CREATE OR REPLACE MACRO tree_sql_size_expr() AS
-  'COALESCE((SELECT min(b._pre) FROM __p b WHERE b._root = a._root AND b._pre > a._pre AND b._level <= a._level), max(a._pre) OVER (PARTITION BY a._root) + 1) - a._pre - 1';
+-- Derived size: the first later row at the same or a shallower level ends a row's subtree. Each
+-- row is a candidate boundary for every level from its own down to the deepest level of its
+-- root, so one ASOF join per row finds the nearest later candidate at the row's own level.
+-- Cost is SUM(max level of the root - level + 1) candidate rows: ~8x on the fixtures, n^2/2 on a
+-- pure chain, worst for a deep spine beside many shallow rows (spec 2.3); declare SIZE there.
+--
+-- The level bound is what makes a ROOT holding SEVERAL documents work -- a YAML file with `---`
+-- separators is one root whose rows return to level 0 repeatedly, which P13 allows (its predicate
+-- refuses a DESCENT of more than one, not a return). Document one's subtree must stop at document
+-- two's first row, and it does: that row is a candidate at every level from 0 up, so it is the
+-- nearest boundary for every open row. A derivation that ran to max(_pre) of the partition would
+-- swallow the later documents; 10_projection.test pins the vector.
+CREATE OR REPLACE MACRO tree_sql_size_join() AS
+  '__mx AS (SELECT _root, max(_level) AS __ml, max(_pre) AS __mp FROM __p GROUP BY _root), '
+  || '__cand AS (SELECT p._root, p._pre, unnest(range(p._level, m.__ml + 1)) AS __lvl FROM __p p JOIN __mx m USING (_root)), '
+  || '__end AS (SELECT a._root, a._pre, c._pre AS __nx FROM __p a ASOF JOIN __cand c ON c._root = a._root AND c.__lvl = a._level AND c._pre > a._pre), '
+  || '__s AS (SELECT a.*, CAST(COALESCE(e.__nx, m.__mp + 1) - a._pre - 1 AS BIGINT) AS _size FROM __p a JOIN __mx m USING (_root) LEFT JOIN __end e USING (_root, _pre)), ';
 
-CREATE OR REPLACE MACRO tree_sql_children_expr() AS
-  '(SELECT count(*) FROM __s b WHERE b._root = a._root AND b._parent = a._pre)';
+-- Derived children: one grouped count over __s, joined back in __c. Rows whose _parent is NULL
+-- are the roots of their document and contribute no group; a row that is nobody's parent has no
+-- group either, which is why the join in __c defaults to 0 rather than NULL.
+CREATE OR REPLACE MACRO tree_sql_children_join() AS
+  '__ch AS (SELECT _root, _parent AS __cp, count(*) AS __cn FROM __s WHERE _parent IS NOT NULL GROUP BY _root, _parent), ';
 
 -- Encoder tiebreak after the sibling key: source order of the key. MN1 mutates this to DESC.
 CREATE OR REPLACE MACRO tree_sql_encoder_tiebreak() AS 'ASC';
@@ -133,20 +150,36 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || (CASE WHEN (shape).children IS NOT NULL THEN ', s.' || (shape).children || ' AS __children_raw' ELSE '' END)
      || (CASE WHEN (shape).next IS NOT NULL THEN ', s.' || (shape).next || ' AS __next_raw' ELSE '' END)
      || ' FROM __src s JOIN __walk w ON s.' || (shape).key || ' = w.__key AND ' || tree_sql_root((shape).root, 's.') || ' = w._root), '
-     || '__p AS (SELECT a.* EXCLUDE (__key, __pkey), b._pre AS _parent FROM __r0 a LEFT JOIN __r0 b ON b.__key = a.__pkey AND b._root = a._root), '
+     -- __key SURVIVES this stage (only __pkey is dropped): a declared NEXT in this basis is a
+     -- value in KEY space, and __c translates it by joining __s on the key. It is EXCLUDEd from
+     -- the FINAL select instead, where __order is excluded in the level basis.
+     || '__p AS (SELECT a.* EXCLUDE (__pkey), b._pre AS _parent FROM __r0 a LEFT JOIN __r0 b ON b.__key = a.__pkey AND b._root = a._root), '
    END)
-  || '__s AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).size IS NOT NULL THEN 'CAST(a.__size_raw AS BIGINT)' END, tree_sql_size_expr()) || ' AS _size FROM __p a), '
-  || '__c AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).children IS NOT NULL THEN 'CAST(a.__children_raw AS BIGINT)' END, tree_sql_children_expr()) || ' AS _children, '
-  -- A declared NEXT is a value in ORDER space too (§2.2), translated through __order in the level
-  -- basis. One that names no row keeps the structural successor, which §3.1 then counts as a
-  -- disagreement. In the parent basis NEXT is a value in KEY space and still casts; translating it
-  -- through the key belongs with the rest of that branch's numbering.
-  || CASE WHEN (shape).next IS NOT NULL AND ((shape).level IS NOT NULL OR (shape).parent IS NULL)
-          THEN 'COALESCE((SELECT nx._pre FROM __s nx WHERE nx._root = a._root AND nx.__order = a.__next_raw), a._pre + a._size + 1)'
-          WHEN (shape).next IS NOT NULL THEN 'CAST(a.__next_raw AS BIGINT)'
-          ELSE 'a._pre + a._size + 1' END || ' AS _next FROM __s a) '
+  -- A declared SIZE is the column; a derived one is the ASOF join above, which brings its own
+  -- __mx/__cand/__end stages with it. A declared CHILDREN is the column; a derived one is the
+  -- grouped count, joined here.
+  || CASE WHEN (shape).size IS NOT NULL THEN '__s AS (SELECT a.*, CAST(a.__size_raw AS BIGINT) AS _size FROM __p a), ' ELSE tree_sql_size_join() END
+  || CASE WHEN (shape).children IS NOT NULL THEN '' ELSE tree_sql_children_join() END
+  || '__c AS (SELECT a.*, '
+  || CASE WHEN (shape).children IS NOT NULL THEN 'CAST(a.__children_raw AS BIGINT)' ELSE 'COALESCE(ch.__cn, 0)' END || ' AS _children, '
+  -- A declared NEXT is a value in ORDER space (level basis) or KEY space (parent basis), TRANSLATED
+  -- to a position by joining __s, never cast (§2.2). One that names no row keeps the structural
+  -- successor, which §3.1 then counts as a disagreement.
+  || CASE WHEN (shape).next IS NULL THEN 'a._pre + a._size + 1'
+          ELSE 'COALESCE(nx._pre, a._pre + a._size + 1)' END || ' AS _next FROM __s a'
+  || CASE WHEN (shape).children IS NOT NULL THEN '' ELSE ' LEFT JOIN __ch ch ON ch._root = a._root AND ch.__cp = a._pre' END
+  || CASE WHEN (shape).next IS NULL THEN ''
+          WHEN (shape).level IS NOT NULL OR (shape).parent IS NULL
+          THEN ' LEFT JOIN __s nx ON nx._root = a._root AND nx.__order = a.__next_raw'
+          ELSE ' LEFT JOIN __s nx ON nx._root = a._root AND nx.__key = a.__next_raw' END
+  || ') '
+  -- The EXCLUDE list is built TWICE -- once as the gate that decides whether an EXCLUDE clause is
+  -- emitted at all, once as the clause itself -- so every hidden helper must be added to BOTH.
+  -- Emitter-only suppresses the clause and leaks the name; gate-only promises a name the list
+  -- does not contain.
   || (CASE WHEN COALESCE(list_aggregate(list_filter([
          CASE WHEN (shape).level IS NOT NULL OR (shape).parent IS NULL THEN '__order' END,
+         CASE WHEN NOT ((shape).level IS NOT NULL OR (shape).parent IS NULL) THEN '__key' END,
          CASE WHEN ((shape).level IS NOT NULL OR (shape).parent IS NULL) AND (shape)."order" IS NULL AND attr_text = '*' THEN '__seq' END,
          CASE WHEN (shape).level IS NOT NULL AND (shape).parent IS NOT NULL THEN '__parent_raw' END,
          CASE WHEN (shape).size IS NOT NULL THEN '__size_raw' END,
@@ -156,6 +189,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
        THEN 'SELECT * FROM __c'
        ELSE 'SELECT * EXCLUDE (' || list_aggregate(list_filter([
          CASE WHEN (shape).level IS NOT NULL OR (shape).parent IS NULL THEN '__order' END,
+         CASE WHEN NOT ((shape).level IS NOT NULL OR (shape).parent IS NULL) THEN '__key' END,
          CASE WHEN ((shape).level IS NOT NULL OR (shape).parent IS NULL) AND (shape)."order" IS NULL AND attr_text = '*' THEN '__seq' END,
          CASE WHEN (shape).level IS NOT NULL AND (shape).parent IS NOT NULL THEN '__parent_raw' END,
          CASE WHEN (shape).size IS NOT NULL THEN '__size_raw' END,

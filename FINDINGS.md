@@ -157,6 +157,53 @@ Two things the spike settled along the way, both worth carrying:
   is the whole cost on one big one, which is exactly the shape a whole-repository parse has.
   No timeout guard fired; nothing had to be skipped.
 
+## M3 derivation cost
+
+`test/spike_listspace.py --sizes` (2026-09-15, DuckDB 1.5.5, one machine, best of three after a
+warm-up). M3 Task 6 replaced the derived `_size` — a correlated `min` over the projection, O(n²)
+within a root — with a **level-expanded ASOF join**: every row is a candidate boundary for each
+level from its own down to its root's deepest, and one ASOF join per row takes the nearest later
+candidate at the row's own level. `_children` became a grouped count joined back, instead of a
+correlated `count(*)`.
+
+Four shapes, each a relation whose `descendant_count` is computed in SQL from the generated rows
+(by aggregates over them, never by the boundary rule being measured), so "sizes agree" is an
+independent check. Both sides go through the real compiler; only the shape differs.
+
+| shape | rows | declared | derived, before | derived, after | before | after |
+|---|---|---|---|---|---|---|
+| chain depth 5000 | 5,000 | 0.013 s | 0.044 s | 0.908 s | 1.0× | **72×** |
+| flat 200k | 200,000 | 0.102 s | 76.529 s | 0.164 s | 435× | **1.6×** |
+| 2k spine + 100k shallow | 102,001 | 0.066 s | 21.501 s | 21.033 s | 254× | **316×** |
+| scripts ×10 as one root | 142,651 | 0.227 s | 26.923 s | 0.281 s | 167× | **1.2×** |
+
+(The "before" column was measured by running the same shapes against HEAD's `02_projection.sql`
+in a scratch copy; declared times differ by a few ms between the two runs and are quoted from the
+"after" run. Derived and declared sums agree in every cell, in both versions.)
+
+**The case that matters got 96× faster and the pathological case did not move.** `scripts ×10 as
+one root` is the realistic target — a whole-repository parse, 142,651 rows under ONE root — and it
+goes from 26.9 s to 0.28 s, which is 1.2× a declared SIZE rather than 167×. `flat 200k` is 467×
+faster. Neither is a surprise: the quadratic was in the number of rows per root, and both shapes
+are shallow, so the candidate expansion is 2 levels deep.
+
+Two results are worth carrying, because they are the honest cost of the change:
+
+- **A pure deep chain got 21× SLOWER** (0.044 s → 0.908 s). The expansion is
+  Σ(max level − level + 1), which on a 5000-level chain is n²/2 ≈ 12.5M candidate rows — the
+  quadratic moved from the correlated subquery into the candidate relation. The old form was fast
+  here only because DuckDB optimizes a correlated `min` over a strictly-increasing level well.
+- **The deep-spine-beside-shallow-rows shape did not improve at all** (21.5 s → 21.0 s). This is
+  the shape spec §2.3 names as the worst case and it remains the worst case: 100k shallow rows
+  each expand over the spine's full 2000 levels, so the candidate relation is ~200M rows. The
+  comment on `tree_sql_size_join()` says so and says what to do about it — **declare SIZE** on a
+  source of that shape. A C++ port replaces the whole thing with a single stack walk, which is
+  O(n) on every shape here; until then the derivation is a convenience, not a guarantee.
+
+So the change is a large win on the shapes real sources have and a regression on one synthetic
+shape, with the known-bad shape unchanged. It is not a substitute for declaring SIZE when the
+source has one.
+
 ## M2 differential adjudications
 
 The corpus import (`test/import_astcss_eval.py`) runs all 108 accepted astcss-eval pairs against
@@ -222,9 +269,16 @@ question, in both directions where a suite was expected to fail and did not. The
 (`test/mutants/manifest.yaml`) is the live record; this is the reasoning behind it, and the M2
 design's §9 table now carries the corrected rows *(done 2026-09-15)*.
 
+*(2026-09-15, M3 Task 6: the MN03 row below is HISTORY. That mutant was retired when the `__s`
+stage it edited was restructured into `tree_sql_size_join()` — its edit was textual and no longer
+had text to plant. The id is not reused for the same claim: M3 Task 9 re-plants MN03 as a
+different mutant in `sql/07_match.sql`. The mutant count is 17 until it does. The reasoning in the
+MN03 paragraph below is kept because it is about 40 and 41's blindness to a symmetric change,
+which is a fact about those suites rather than about the retired mutant.)*
+
 | mutant | §9 says | actually killed by | why the difference |
 |---|---|---|---|
-| MN03 | 42 | **42 only** | 40 and 41 PASS, although both declare SIZE — see below |
+| MN03 *(retired, M3 Task 6)* | 42 | **42 only** | 40 and 41 PASS, although both declare SIZE — see below |
 | MN05 | 40/41 | **40, 41, 34_groups** | table is right; 34 is a third witness |
 | MN07 | 40 | **40, 37, 31, 34, 36** | only after corpus row c17 was added; 41 PASSES |
 | MN08 | 44 | **44, 37** | — |
