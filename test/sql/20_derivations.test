@@ -283,3 +283,42 @@ query II
 SELECT (SELECT count(*) FROM tree_project('main', 'ing')), (SELECT count(DISTINCT _root) FROM tree_project('main', 'ing'));
 ----
 10	2
+
+# ALTER never re-derives the shape, but it still evaluates the source through proj_sql (comment
+# above 03_ddl.sql's key and reach checks in the ALTER statement list), so a parent-basis source
+# that has drifted into an orphan or a repeated key since CREATE must be refused by ALTER too --
+# not just reported later as a row-count drift. Both trees are created clean, then their sources
+# are mutated in place before the ALTER that is expected to catch it.
+statement ok
+CREATE TABLE altorphansrc AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'altorphan', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'altorphansrc'));
+
+statement ok
+INSERT INTO altorphansrc VALUES ('b', 99, 'lost', 77);
+
+statement error
+CALL tree_ddl_alter('main', 'altorphan', tree_semantic(type := 'name'));
+----
+1 rows of tree main.altorphan are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+statement ok
+CREATE TABLE altdupsrc AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'altdup', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'altdupsrc'));
+
+# The duplicate takes a leaf's key (3, a childless row) and the deleted row is another leaf (5),
+# so root b's row count is unchanged at 5 -- the key check must catch this, not the row-count
+# drift check a few statements later, which a same-count mutation can't trip.
+statement ok
+DELETE FROM altdupsrc WHERE forest = 'b' AND cat_id = 5;
+
+statement ok
+INSERT INTO altdupsrc VALUES ('b', 3, 'again', 2);
+
+statement error
+CALL tree_ddl_alter('main', 'altdup', tree_semantic(type := 'name'));
+----
+KEY 3 appears 2 times in root {'forest': b} of tree main.altdup
