@@ -52,6 +52,11 @@ derived AS (
     CASE WHEN level_basis THEN 'level' ELSE 'parent' END AS basis,
     CASE WHEN NOT level_basis AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
     CASE WHEN NOT level_basis OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
+    -- The KEY the walk is driven by, or NULL when there is no walk: the two parent-basis ingest
+    -- checks are NULL-gated on it, so the level basis passes NULL here rather than each call site
+    -- re-deciding which basis this is. A level-basis tree may still DECLARE a KEY, so this asks
+    -- the basis, not whether a KEY exists.
+    CASE WHEN level_basis THEN NULL ELSE (shape).key END AS key_expr,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
     -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. The question -- does this
@@ -121,6 +126,11 @@ built AS (
    -- PARENT, multiplies rows through the __order join (M3 §3.2). Emitted for projection-mode trees
    -- too -- a tie there makes _pre change between queries.
    CASE WHEN abstract THEN NULL ELSE tree_compile_order_check((shape)."order", (shape).root, source, sch || '.' || nm) END AS s_order,
+   -- The parent basis's two, in this order and both ahead of everything that evaluates proj_sql:
+   -- a repeated KEY multiplies or collapses the walk, so the reach check run first would report
+   -- that as unreachable rows and name the wrong defect.
+   CASE WHEN abstract THEN NULL ELSE tree_compile_key_check(key_expr, (shape).root, source, sch || '.' || nm) END AS s_key,
+   CASE WHEN abstract THEN NULL ELSE tree_compile_reach_check(key_expr, (shape).root, source, '(' || proj_sql || ')', sch || '.' || nm, attr_text) END AS s_reach,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL, (shape).level) END AS s_p13,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
@@ -137,5 +147,5 @@ SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_comm
             -- plain tree_err(), not (SELECT tree_err(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
             THEN tree_err('tree_ddl_create: internal: a required statement compiled to NULL')
-            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_order, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
+            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_order, s_key, s_reach, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);

@@ -41,6 +41,55 @@ CREATE OR REPLACE MACRO tree_compile_order_check(order_expr, root_csv, source_sq
     || tree_sql_order_dup_rel(order_expr, root_csv, source_sql) || ')'
   END;
 
+-- The two parent-basis ingest checks (M3 §3.2's sibling: a structural basis that cannot be walked
+-- is refused, never silently walked part-way). Both return NULL when there is no KEY to walk --
+-- the level basis, where the caller passes NULL -- so the caller's list_filter drops them.
+--
+-- A NOTE ON THE ROOT CLAUSE, which both share. tree_sql_root(NULL, qual) is not NULL: it is the
+-- literal '{r0: 0}', the one-partition constant the projection uses when no ROOT was declared.
+-- That is deliberate and load-bearing here -- it is what makes both statements fail CLOSED on a
+-- rootless tree, rather than concatenating to NULL and being filtered out of the statement list,
+-- which is how an optional check disappears. But it also means a literal ' in root ' || __k
+-- clause would print `in root {r0: 0}` to someone who never wrote a ROOT, naming a synthetic
+-- partition as if it were theirs. So the clause is built only when ROOT was actually declared:
+-- rooted, the message names the offending partition; rootless, it says nothing about partitions.
+--
+-- Before the walk: the KEY must identify at most one row per ROOT. A key repeated within a root
+-- attaches every child to BOTH bearers, and the walk's recursive CTE -- keyed on (__key, _root),
+-- which is a node's identity in a forest -- then collapses the duplicates in an order nothing
+-- defines, so rows multiply or vanish depending on which copy won. Like the ORDER check, this runs
+-- over the SOURCE and before any statement that evaluates the projection: afterwards the damage is
+-- already numbered and reads as a well-formed tree.
+CREATE OR REPLACE MACRO tree_compile_key_check(key_expr, root_csv, source_sql, label) AS
+  CASE WHEN key_expr IS NULL THEN NULL ELSE
+    'SELECT CASE WHEN max(__n) > 1 THEN tree_err(''KEY '' || COALESCE(arg_max(__v::VARCHAR, __n), ''<NULL>'') || '' appears '' || max(__n) || '' times'
+    || CASE WHEN root_csv IS NULL THEN ' in tree ' || replace(label, '''', '''''') || ''')'
+            ELSE ' in root '' || COALESCE(arg_max(__k, __n), ''<NULL>'') || '' of tree ' || replace(label, '''', '''''') || ''')' END
+    || ' END FROM (SELECT __k, __v, count(*) AS __n FROM (SELECT ' || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, ' || key_expr || ' AS __v FROM ' || source_sql || ') GROUP BY __k, __v)'
+  END;
+
+-- After the key check: every source row must be reached by the walk from a NULL-parent row in
+-- its own root. A row that is not is an orphan or sits on a cycle; either way it is refused
+-- rather than silently left out of the tree. The parent basis requires KEY to be a plain column,
+-- so when ATTR is open (`*`) the projection carries that column and the refusal can name an
+-- example key; when ATTR is closed it compares row counts per root and names only the count.
+CREATE OR REPLACE MACRO tree_compile_reach_check(key_expr, root_csv, source_sql, rel_sql, label, attr_text) AS
+  CASE WHEN key_expr IS NULL THEN NULL
+       WHEN attr_text = '*' THEN
+    'SELECT tree_err(count(*) || '' rows of tree ' || replace(label, '''', '''''') || ' are not reachable from a root'
+    || CASE WHEN root_csv IS NULL THEN '' ELSE ' in root '' || COALESCE(min(__k), ''<NULL>'') || ''' END
+    || ': orphans or a cycle, e.g. key '' || COALESCE(min(__v::VARCHAR), ''<NULL>''))'
+    || ' FROM (SELECT s.__k, s.__v FROM (SELECT ' || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, ' || key_expr || ' AS __v FROM ' || source_sql || ') s'
+    || ' ANTI JOIN (SELECT _root::VARCHAR AS __k, ' || key_expr || ' AS __v FROM ' || rel_sql || ') r ON r.__k = s.__k AND r.__v = s.__v) HAVING count(*) > 0'
+       ELSE
+    'SELECT tree_err((s.__n - COALESCE(r.__n, 0)) || '' rows of tree ' || replace(label, '''', '''''') || ' are not reachable from a root'
+    || CASE WHEN root_csv IS NULL THEN '' ELSE ' in root '' || s.__k || ''' END
+    || ': orphans or a cycle'')'
+    || ' FROM (SELECT ' || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, count(*) AS __n FROM ' || source_sql || ' GROUP BY 1) s'
+    || ' LEFT JOIN (SELECT _root::VARCHAR AS __k, count(*) AS __n FROM ' || rel_sql || ' GROUP BY 1) r USING (__k)'
+    || ' WHERE s.__n <> COALESCE(r.__n, 0) LIMIT 1'
+  END;
+
 -- P13 plus the level checks it never had (M3 §7.3). One statement, one message per failure class,
 -- the first failing class reported: a NULL level, a negative level, a partition starting above
 -- level 0, then the jump/start predicate itself.
@@ -111,13 +160,21 @@ CREATE OR REPLACE MACRO tree_sql_frozen_guard(order_source, verb) AS
 
 CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
   WITH c AS (SELECT tree_dml_context('tree_insert', sch, nm) AS x),
-  p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
+  -- NULL in the level basis, which is how both parent-basis checks below drop out of the list
+  p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj,
+               CASE WHEN (x.shape).level IS NOT NULL OR (x.shape).parent IS NULL THEN NULL ELSE (x.shape).key END AS key_expr FROM c)
   SELECT list_filter(['BEGIN TRANSACTION',
     tree_sql_frozen_guard(x.order_source, 'tree_insert'),
     -- before the projection is evaluated, not after: a tie would otherwise be numbered first,
     -- and under a declared PARENT it multiplies rows rather than merely reordering them
     tree_compile_order_check((x.shape)."order", (x.shape).root, source, sch || '.' || nm),
+    -- The NEW source alone, never unioned with x.tbl: insert refuses a ROOT that is already
+    -- present (the statement below), so the roots arriving here are disjoint from the stored
+    -- ones and a key they share with a stored row is not a collision.
+    tree_compile_key_check(key_expr, (x.shape).root, source, sch || '.' || nm),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
+    -- and the reach check right after it, because __duckent_new IS the walk's output
+    tree_compile_reach_check(key_expr, (x.shape).root, source, '__duckent_new', sch || '.' || nm, x.attr),
     tree_sql_shadow_check('__duckent_new', 'tree_insert'),
     'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || replace(sch || '.' || nm, '''', '''''') || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
@@ -130,11 +187,17 @@ CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
 
 CREATE OR REPLACE MACRO tree_compile_replace(sch, nm, source) AS (
   WITH c AS (SELECT tree_dml_context('tree_replace', sch, nm) AS x),
-  p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
+  p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj,
+               CASE WHEN (x.shape).level IS NOT NULL OR (x.shape).parent IS NULL THEN NULL ELSE (x.shape).key END AS key_expr FROM c)
   SELECT list_filter(['BEGIN TRANSACTION',
     tree_sql_frozen_guard(x.order_source, 'tree_replace'),
     tree_compile_order_check((x.shape)."order", (x.shape).root, source, sch || '.' || nm),
+    -- The NEW source alone, as for insert, and here the union would be actively wrong: replace
+    -- rewrites whole partitions, so the rows it is about to delete are STILL PRESENT in x.tbl
+    -- while this runs, and every key in an unchanged tree would read as appearing twice.
+    tree_compile_key_check(key_expr, (x.shape).root, source, sch || '.' || nm),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
+    tree_compile_reach_check(key_expr, (x.shape).root, source, '__duckent_new', sch || '.' || nm, x.attr),
     tree_sql_shadow_check('__duckent_new', 'tree_replace'),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
     'CREATE TEMP TABLE __duckent_epochs AS SELECT root_key, epoch FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT DISTINCT _root::VARCHAR FROM __duckent_new)',

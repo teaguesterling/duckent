@@ -171,3 +171,115 @@ statement error
 CALL tree_ddl_create('main', 'wf8', tree_spec(tree_shape(root := 'r', "order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wfm WHERE g = ''w8'')'));
 ----
 P13 violated in tree main.wf8: 2 rows descend more than one level or start above level 0
+
+# A forest whose keys repeat per ROOT is valid: the walk must join child to parent WITHIN a root.
+statement ok
+CREATE TABLE cats2 AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'cats2', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'cats2'));
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'cats2')), (SELECT count(*) FROM cats2);
+----
+10	10
+
+statement ok
+CREATE TABLE orphan AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 99, 'lost', 77;
+
+statement error
+CALL tree_ddl_create('main', 'orphan', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'orphan'));
+----
+1 rows of tree main.orphan are not reachable from a root
+
+statement ok
+CREATE TABLE dupkey AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 2, 'again', 1;
+
+statement error
+CALL tree_ddl_create('main', 'dupkey', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'dupkey'));
+----
+KEY 2 appears 2 times
+
+statement ok
+CREATE TABLE cyc AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 90, 'x', 91 UNION ALL SELECT 91, 'y', 90;
+
+statement error
+CALL tree_ddl_create('main', 'cyc', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'cyc'));
+----
+2 rows of tree main.cyc are not reachable from a root
+
+# Both refusals name a ROOT the author declared, and say nothing about partitions when there are
+# none. tree_sql_root(NULL, ...) is the literal '{r0: 0}' rather than NULL -- which is what makes
+# both checks fail closed on a rootless tree instead of compiling to NULL and being filtered out
+# of the statement list -- but printing that synthetic constant would point the reader at a
+# partition they never wrote. Asserted through the END of each message, so an ' in root {r0: 0}'
+# clause creeping back in fails these records (the two above stop short of the clause and cannot).
+statement error
+CALL tree_ddl_create('main', 'dupkey2', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'dupkey'));
+----
+KEY 2 appears 2 times in tree main.dupkey2
+
+statement error
+CALL tree_ddl_create('main', 'orphan2', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'orphan'));
+----
+1 rows of tree main.orphan2 are not reachable from a root: orphans or a cycle, e.g. key 99
+
+# and with ROOT declared the clause is there, naming the partition that actually offends
+statement ok
+CREATE TABLE duproot AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', 2, 'again', 1;
+
+statement error
+CALL tree_ddl_create('main', 'duproot', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'duproot'));
+----
+KEY 2 appears 2 times in root {'forest': b} of tree main.duproot
+
+statement ok
+CREATE TABLE orphanroot AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', 99, 'lost', 77;
+
+statement error
+CALL tree_ddl_create('main', 'orphanroot', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'orphanroot'));
+----
+1 rows of tree main.orphanroot are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+# A closed ATTR does not carry the KEY column into the projection, so the reach check compares row
+# counts per root instead of anti-joining on the key, and names the count alone.
+statement error
+CALL tree_ddl_create('main', 'orphan3', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id', semantic := tree_semantic(attr := 'name')), source := 'orphan'));
+----
+1 rows of tree main.orphan3 are not reachable from a root: orphans or a cycle
+
+# The walk is refused, not silently truncated, at every ingest site -- not only create. tree_insert
+# compiles its checks over the NEW source alone: it refuses a ROOT already present, so a key shared
+# with a stored row is not a collision, and unioning the stored table in would make replace refuse
+# every unchanged tree.
+statement ok
+CALL tree_ddl_create('main', 'ing', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := '(SELECT ''a'' AS forest, * FROM read_csv(''test/data/categories.csv''))'));
+
+statement error
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv'') UNION ALL SELECT ''b'', 99, ''lost'', 77)');
+----
+1 rows of tree main.ing are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+statement error
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv'') UNION ALL SELECT ''b'', 2, ''again'', 1)');
+----
+KEY 2 appears 2 times in root {'forest': b} of tree main.ing
+
+# the same key in ANOTHER root is not a collision, and the insert lands
+statement ok
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv''))');
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'ing')), (SELECT count(DISTINCT _root) FROM tree_project('main', 'ing'));
+----
+10	2
+
+# and replacing a root with itself is not a key collision either: the rows it is about to delete
+# are still in the table while the check runs, so the check must read the new source alone
+statement ok
+CALL tree_replace('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv''))');
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'ing')), (SELECT count(DISTINCT _root) FROM tree_project('main', 'ing'));
+----
+10	2

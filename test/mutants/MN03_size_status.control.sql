@@ -35,6 +35,15 @@
 --     such column is now also carried as a hidden __*_raw alias from the first stage
 --     that sees the source, and every surviving hidden helper column (__parent_raw,
 --     __size_raw, __children_raw, __next_raw) is EXCLUDEd from the final SELECT.
+-- (d) The parent basis walks WITHIN a root. A forest whose KEY repeats per ROOT -- the same
+--     categories table loaded under two forest names, say -- is a perfectly good forest, and
+--     both halves of the walk have to say so. The joins are the obvious half: a child joins
+--     its parent on the key AND on the root, so a row in one root can never be attached under
+--     an identically-keyed parent in another. The recursive CTE's KEY is the half that is easy
+--     to miss: USING KEY (__key) makes the key the walk's identity, so two roots sharing a key
+--     COLLAPSE INTO ONE ROW -- measured, with the joins already root-aware: a 10-row two-root
+--     forest walked to 5 rows, and the rows that survived were then refused by P13 for starting
+--     above level 0. The identity of a node in a forest is (key, root), so that is the key.
 CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
   -- The level basis is taken when LEVEL is declared AND when neither LEVEL nor PARENT is:
   -- R2 defaults to LEVEL 0 (M3 §2.6), so a shape that declares no structure at all is a
@@ -63,14 +72,14 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
              ELSE tree_sql_parent_join() END
    ELSE
      'WITH RECURSIVE __src AS (SELECT * FROM ' || source || '), '
-     || '__walk USING KEY (__key) AS (SELECT ' || tree_sql_root((shape).root, '') || ' AS _root, ' || (shape).key || ' AS __key, 0 AS _level, '
+     || '__walk USING KEY (__key, _root) AS (SELECT ' || tree_sql_root((shape).root, '') || ' AS _root, ' || (shape).key || ' AS __key, 0 AS _level, '
      || '[row_number() OVER (PARTITION BY ' || tree_sql_root((shape).root, '') || ' ORDER BY ' || COALESCE((shape).sibling_order || ', ', '') || (shape).key || ' ' || tree_sql_encoder_tiebreak() || ')] AS __path '
      || 'FROM __src WHERE ' || (shape).parent || ' IS NULL '
      || 'UNION ALL SELECT ' || tree_sql_root((shape).root, 'c.') || ' AS _root, c.' || (shape).key || ', w._level + 1, '
      || 'w.__path || [row_number() OVER (PARTITION BY c.' || (shape).parent || ' ORDER BY '
      || COALESCE(list_aggregate(list_transform(tree_sql_list((shape).sibling_order), lambda x: 'c.' || x), 'string_agg', ', ') || ', ', '')
      || 'c.' || (shape).key || ' ' || tree_sql_encoder_tiebreak() || ')] '
-     || 'FROM __src c JOIN __walk w ON c.' || (shape).parent || ' = w.__key), '
+     || 'FROM __src c JOIN __walk w ON c.' || (shape).parent || ' = w.__key AND ' || tree_sql_root((shape).root, 'c.') || ' = w._root), '
      || '__r0 AS (SELECT ' || (CASE WHEN attr_text = '' THEN '' WHEN attr_text = '*' THEN 's.*, ' ELSE attr_text || ', ' END)
      || 'w._root, CAST(row_number() OVER (PARTITION BY w._root ORDER BY w.__path) - 1 AS BIGINT) AS _pre, '
      || 'CAST(w._level AS BIGINT) AS _level, s.' || (shape).key || ' AS __key, s.' || (shape).parent || ' AS __pkey, '
@@ -78,7 +87,7 @@ CREATE OR REPLACE MACRO tree_compile_projection(shape, source, attr_text) AS (
      || (CASE WHEN (shape).size IS NOT NULL THEN ', s.' || (shape).size || ' AS __size_raw' ELSE '' END)
      || (CASE WHEN (shape).children IS NOT NULL THEN ', s.' || (shape).children || ' AS __children_raw' ELSE '' END)
      || (CASE WHEN (shape).next IS NOT NULL THEN ', s.' || (shape).next || ' AS __next_raw' ELSE '' END)
-     || ' FROM __src s JOIN __walk w ON s.' || (shape).key || ' = w.__key), '
+     || ' FROM __src s JOIN __walk w ON s.' || (shape).key || ' = w.__key AND ' || tree_sql_root((shape).root, 's.') || ' = w._root), '
      || '__p AS (SELECT a.* EXCLUDE (__key, __pkey), b._pre AS _parent FROM __r0 a LEFT JOIN __r0 b ON b.__key = a.__pkey AND b._root = a._root), '
    END)
   || '__s AS (SELECT a.*, ' || COALESCE(CASE WHEN (shape).size IS NOT NULL THEN 'CAST(a.__size_raw AS BIGINT)' END, tree_sql_size_expr()) || ' AS _size FROM __p a), '
