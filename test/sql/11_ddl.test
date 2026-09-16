@@ -97,11 +97,14 @@ CALL tree_ddl_create('main', 'bad3', tree_spec(tree_shape(), "like" := 'nope', s
 ----
 nope
 
-# R2: LEVEL or PARENT required
-statement error
-CALL tree_ddl_create('main', 'bad4', tree_spec(tree_shape("order" := 'node_id'), source := 'read_parquet(''test/data/app.parquet'')'));
+# R2 defaults to LEVEL 0: a shape declaring neither LEVEL nor PARENT is a table of one-node trees
+statement ok
+CALL tree_ddl_create('main', 'flat_default', tree_spec(tree_shape("order" := 'node_id'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III
+SELECT count(*), max(_level), max(_size) FROM tree_project('main', 'flat_default');
 ----
-LEVEL or PARENT
+54	0	0
 
 # parent basis requires KEY
 statement error

@@ -95,3 +95,30 @@ WITH p AS (FROM query(tree_compile_projection(tree_shape("order" := 'node_id', l
 SELECT count(*) FILTER (WHERE NOT _element) FROM p;
 ----
 0
+
+# _pre is the rank of ORDER within ROOT, so any strictly increasing ORDER gives the same tree:
+# a gapped, offset ORDER and a declared PARENT/NEXT in that same ORDER space.
+statement ok
+CREATE TABLE gapped AS SELECT * REPLACE (node_id * 3 + 7 AS node_id,
+  CASE WHEN parent_id IS NULL THEN NULL ELSE parent_id * 3 + 7 END AS parent_id) FROM 'test/data/app.parquet';
+
+query IIII
+WITH d AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*'))),
+     g AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'gapped', '*'))),
+     gp AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', parent := 'parent_id'), 'gapped', '*')))
+SELECT (SELECT list(_pre ORDER BY _pre) FROM g) = (SELECT list(_pre ORDER BY _pre) FROM d),
+       (SELECT min(_pre) FROM g),
+       (SELECT count(*) FROM g JOIN d USING (_pre) WHERE g._parent IS DISTINCT FROM d._parent OR g._size IS DISTINCT FROM d._size),
+       (SELECT count(*) FROM gp JOIN d USING (_pre) WHERE gp._parent IS DISTINCT FROM d._parent);
+----
+true	0	0	0
+
+# ORDER need not be an integer: a VARCHAR ORDER that sorts as node_id does but cannot be cast
+# to one (the 'n' prefix is what makes this a record about rank rather than about lpad, which
+# zero-pads a number to a string that still casts).
+query I
+WITH d AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*'))),
+     s AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := '''n'' || lpad(node_id::VARCHAR, 4, ''0'')', level := 'depth'), 'read_parquet(''test/data/app.parquet'')', '*')))
+SELECT count(*) FROM s JOIN d USING (_pre) WHERE s.node_id <> d.node_id;
+----
+0

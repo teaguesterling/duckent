@@ -79,3 +79,18 @@ query I
 SELECT list(_size ORDER BY _pre) FROM tree_project('main', 'ok_flat');
 ----
 [0, 0, 0]
+
+# ROOT defaults to one forest, and several level-0 rows are anonymous trees whose top-level rows
+# are ordered siblings: a table with no R0/R1/R2 declared at all is every row a one-node tree.
+statement ok
+CREATE TABLE plain AS SELECT * FROM (VALUES ('a', 1), ('b', 2), ('c', 3)) v(name, n);
+
+statement ok
+CALL tree_ddl_create('main', 'plain_tree', tree_spec(tree_shape(semantic := tree_semantic(type := 'name')), source := 'plain'));
+
+query IIII
+SELECT list(_pre ORDER BY _pre), max(_level), max(_size),
+       (SELECT list(name ORDER BY name) FROM tree_match('main', 'plain_tree', tree_steps([{type: 'a'}, {comb: 'next', type: 'b'}])))
+FROM tree_project('main', 'plain_tree');
+----
+[0, 1, 2]	0	0	[b]

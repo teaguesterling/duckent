@@ -43,10 +43,15 @@ expanded AS (
 ),
 derived AS (
   SELECT *,
-    (shape).level IS NOT NULL AS level_basis,
-    CASE WHEN (shape).level IS NOT NULL THEN 'level' ELSE 'parent' END AS basis,
-    CASE WHEN (shape).level IS NULL AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
-    CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
+    -- R2 defaults to LEVEL 0 (M3 §2.6): the level basis is taken whenever LEVEL is declared and
+    -- whenever NEITHER LEVEL NOR PARENT is, so a table declaring no structure at all registers as
+    -- a forest of one-node trees instead of being refused. Everything downstream that asks which
+    -- basis this is reads THIS name -- profile, order_source and the refusal ladder included -- so
+    -- the basis cannot end up spelled two ways that disagree on the shape that declares neither.
+    ((shape).level IS NOT NULL OR (shape).parent IS NULL) AS level_basis,
+    CASE WHEN level_basis THEN 'level' ELSE 'parent' END AS basis,
+    CASE WHEN NOT level_basis AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
+    CASE WHEN NOT level_basis OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
     -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. The question -- does this
@@ -78,9 +83,8 @@ checked AS (
       WHEN abstract AND source IS NOT NULL THEN tree_err('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
       WHEN NOT abstract AND source IS NULL THEN tree_err('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
       WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN tree_err('tree_ddl_create: storage must be materialized or projection')
-      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN tree_err('tree_ddl_create: declare LEVEL or PARENT (R2)')
-      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
-      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
+      WHEN NOT level_basis AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
+      WHEN NOT level_basis AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
       WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN tree_err('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
       WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN tree_err('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
       -- both halves of the S ladder: the prefix check reads the group as written (a prefix that

@@ -1,11 +1,13 @@
 -- Standalone lemmas. The projection compiler emits the same text; these exist for direct use and for the M1 identities.
 
--- The parent join is tree_sql_parent_join() verbatim (its CTE reads __r, which is why the
+-- The parent join is tree_sql_parent_join() verbatim (its CTE reads __rn, which is why the
 -- stage is named that here): the lemma and the projection compiler must derive parent the
 -- same way, and a copy of the text would let a mutation of the fragment survive here.
+-- (__rn, not __r: M3 §2.1 makes _pre the rank of ORDER, computed in a stage of its own that
+-- sits after __r, so the join that reads _pre reads __rn there and must read __rn here too.)
 CREATE OR REPLACE MACRO tree_derive_parent(source, root_csv, order_col, level_col) AS TABLE
   FROM query(
-    'WITH __r AS (SELECT *, ' || tree_sql_root(root_csv, '') || ' AS _root, CAST(' || order_col || ' AS BIGINT) AS _pre, CAST(' || level_col || ' AS BIGINT) AS _level FROM ' || source || '), '
+    'WITH __rn AS (SELECT *, ' || tree_sql_root(root_csv, '') || ' AS _root, CAST(' || order_col || ' AS BIGINT) AS _pre, CAST(' || level_col || ' AS BIGINT) AS _level FROM ' || source || '), '
     || tree_sql_parent_join() || '__out AS (SELECT * FROM __p) SELECT * FROM __out');
 
 CREATE OR REPLACE MACRO tree_encode(source, key, parent, sibling_order) AS TABLE
