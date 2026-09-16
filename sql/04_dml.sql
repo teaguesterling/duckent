@@ -60,12 +60,27 @@ CREATE OR REPLACE MACRO tree_compile_order_check(order_expr, root_csv, source_sq
 -- defines, so rows multiply or vanish depending on which copy won. Like the ORDER check, this runs
 -- over the SOURCE and before any statement that evaluates the projection: afterwards the damage is
 -- already numbered and reads as a well-formed tree.
+--
+-- The root and the key are ONE arg_max over a struct, bound once as __w and read as (__w).k and
+-- (__w).v -- exactly as tree_compile_order_check picks its root and ORDER value, and for exactly
+-- the same reason. With two independent arg_max calls, two roots that each repeat a DIFFERENT key
+-- and tie at the same group size have nothing forcing the two calls to resolve their tie to the
+-- same row, so the message could name a (root, key) pair that does not actually collide. In
+-- practice both calls share one scan order and agree, which is precisely the problem: the message
+-- is correct by accident rather than by construction. Picking the pair structurally makes the
+-- mismatch unrepresentable. It must stay ONE binding -- writing the struct expression twice would
+-- be two aggregate instances again and close nothing.
+--
+-- Untested by construction, and deliberately so: which of several equally-tying roots gets named
+-- is nondeterministic, so a record pinning the message would be fragile. The records that do exist
+-- (dupkey, dupkey2, duproot) name a single colliding pair, where both forms agree byte for byte.
 CREATE OR REPLACE MACRO tree_compile_key_check(key_expr, root_csv, source_sql, label) AS
   CASE WHEN key_expr IS NULL THEN NULL ELSE
-    'SELECT CASE WHEN max(__n) > 1 THEN tree_err(''KEY '' || COALESCE(arg_max(__v::VARCHAR, __n), ''<NULL>'') || '' appears '' || max(__n) || '' times'
+    'SELECT CASE WHEN __mx > 1 THEN tree_err(''KEY '' || COALESCE((__w).v, ''<NULL>'') || '' appears '' || __mx || '' times'
     || CASE WHEN root_csv IS NULL THEN ' in tree ' || replace(label, '''', '''''') || ''')'
-            ELSE ' in root '' || COALESCE(arg_max(__k, __n), ''<NULL>'') || '' of tree ' || replace(label, '''', '''''') || ''')' END
-    || ' END FROM (SELECT __k, __v, count(*) AS __n FROM (SELECT ' || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, ' || key_expr || ' AS __v FROM ' || source_sql || ') GROUP BY __k, __v)'
+            ELSE ' in root '' || COALESCE((__w).k, ''<NULL>'') || '' of tree ' || replace(label, '''', '''''') || ''')' END
+    || ' END FROM (SELECT max(__n) AS __mx, arg_max({k: __k, v: __v::VARCHAR}, __n) AS __w'
+    || ' FROM (SELECT __k, __v, count(*) AS __n FROM (SELECT ' || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, ' || key_expr || ' AS __v FROM ' || source_sql || ') GROUP BY __k, __v))'
   END;
 
 -- After the key check: every source row must be reached by the walk from a NULL-parent row in
