@@ -187,7 +187,7 @@ CREATE OR REPLACE MACRO tree_sql_o_ord_expr(order_col) AS
 -- NAMES from its leading branch, and which branch leads here depends on which slots the shape
 -- declares -- so aliasing only the SIZE arm (the arm that happens to come first when SIZE is
 -- declared) left `__bad` with columns called ''PARENT'', ''CHILDREN'' or ''NEXT'' for any shape
--- that declared one of those WITHOUT a SIZE, and the ORDER BY k, pos below failed to bind.
+-- that declared one of those WITHOUT a SIZE, and the ORDER BY k, pos, slot below failed to bind.
 -- 11_ddl's with_children and with_next records are the shapes that have no SIZE.
 --
 -- __dnext is `_pre + _size + 1` UNCONDITIONALLY, because that is what the projection computes
@@ -225,9 +225,18 @@ CREATE OR REPLACE MACRO tree_sql_o_bad_cte(shape, rel_sql, order_col) AS
      ], lambda q: q IS NOT NULL), 'string_agg', ' UNION ALL ')
   || ') ';
 
--- Refuse the FIRST disagreement, in (root, position) order. A conforming tree yields no row, so
--- tree_err is never evaluated and nothing is raised -- the same shape as every other ingest
--- check here. NULL when the shape declares no O override, so the caller's list_filter drops it.
+-- Refuse the FIRST disagreement, in (root, position, slot) order. A conforming tree yields no
+-- row, so tree_err is never evaluated and nothing is raised -- the same shape as every other
+-- ingest check here. NULL when the shape declares no O override, so the caller's list_filter
+-- drops it.
+--
+-- `slot` is in the ORDER BY, and is not decoration. Two slots can disagree at the SAME (root,
+-- position) -- a source whose SIZE and CHILDREN are both wrong on one row -- and ordering by
+-- (k, pos) alone leaves the tie to scan order, so the same source and shape named SIZE on one
+-- run and CHILDREN on the next. Both messages were true, which is exactly the problem: the
+-- content was correct by accident rather than by construction. This is the same defect class as
+-- the arg_max pairings in tree_compile_order_check and tree_compile_key_check, and it is closed
+-- the same way -- structurally, so the mismatch is unrepresentable rather than merely unlikely.
 CREATE OR REPLACE MACRO tree_compile_o_conformance(shape, rel_sql, label, order_col) AS
   CASE WHEN NOT tree_sql_declares_o(shape) THEN NULL ELSE
     tree_sql_o_bad_cte(shape, rel_sql, order_col)
@@ -235,7 +244,7 @@ CREATE OR REPLACE MACRO tree_compile_o_conformance(shape, rel_sql, label, order_
     || ' || '' disagrees with its derived default at root '' || COALESCE(k, ''<NULL>'')'
     || ' || COALESCE('', ORDER '' || ord, '''') || '' (position '' || pos || ''): declared '' || COALESCE(declared, ''NULL'')'
     || ' || '', derived '' || COALESCE(derived, ''NULL'') || '' (a corrupted encoding, not a fast path)'')'
-    || ' FROM (SELECT * FROM __bad ORDER BY k, pos LIMIT 1)'
+    || ' FROM (SELECT * FROM __bad ORDER BY k, pos, slot LIMIT 1)'
   END;
 
 -- One RECORDED O assertion -- the DELETE and the INSERT for a single slot, as a two-element list

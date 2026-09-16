@@ -147,6 +147,39 @@ assert_o_size	ok
 assert_order	ok
 assert_p13	ok
 
+# ...and the OTHER branch, `violated`, which for a projection-mode tree is the only conformance
+# report that exists at all. Create deliberately compiles no raising conformance statement for
+# these trees -- their source can change under them between any two queries, so a create-time
+# refusal would be a promise the storage mode cannot keep -- which means a corrupt projection-mode
+# tree is accepted without complaint and tree_check is the ONLY thing that ever says otherwise.
+# Every other assertion record in the suite is an `ok`, so without this one the whole `violated`
+# branch could regress to always reporting `ok` and nothing would notice.
+statement ok
+CREATE TABLE corrupt_pm AS SELECT * REPLACE (CASE WHEN node_id = 6 THEN descendant_count + 1 ELSE descendant_count END AS descendant_count) FROM 'test/data/app.parquet';
+
+# accepted at create, exactly as designed: no conformance statement is compiled here
+statement ok
+CALL tree_ddl_create('main', 'corrupt_pm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'corrupt_pm', storage := 'projection'));
+
+statement ok
+CALL tree_check('main', 'corrupt_pm');
+
+# only the O assertion is violated: a corrupted SIZE leaves ORDER and the levels untouched, so
+# this also says the status is computed per artifact rather than smeared across the tree
+query II rowsort
+SELECT artifact, status FROM tree_state.assertions WHERE tree_name = 'corrupt_pm';
+----
+assert_o_size	violated
+assert_order	ok
+assert_p13	ok
+
+# and the detail names the first disagreement in the same terms the ingest refusal would have
+# used, which is what makes a recorded assertion actionable rather than a bare flag
+query I
+SELECT detail FROM tree_state.assertions WHERE tree_name = 'corrupt_pm' AND artifact = 'assert_o_size';
+----
+1 disagreeing rows, first at root {'file_path': app.py} position 6: declared 24, derived 23
+
 # a quote in the tree name is escaped where it lands inside a generated error literal (M9):
 # create compiles the P13 check, tree_insert compiles the already-present message
 statement ok

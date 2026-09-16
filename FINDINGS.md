@@ -373,9 +373,11 @@ projection's OUTPUT, and conformance sees only the output (ingest is handed
 can tell them apart. The options, and why each was rejected:
 
 - **Publish `__next_raw`, or a `_next_matched` flag.** Both add a column to every projection and
-  therefore to every materialized tree's stored table, and both break 10_projection's record that
-  no `__%` column reaches the output — a record that exists to catch the EXCLUDE list's
-  gate/emitter pair drifting apart, which is a live bug class.
+  therefore to every materialized tree's stored table. That is the cost that stands, and it is
+  enough on its own. *(An earlier version of this note also claimed both break 10_projection's
+  record that no `__%` column reaches the output. That is true of `__next_raw`, which is
+  double-underscored, but NOT of a single-underscore `_next_matched`, which the record's
+  `LIKE '\_\_%'` does not match. Corrected in fix round 1.)*
 - **Compare against the source relation.** Not reachable: ingest passes the projection as
   `rel_sql`, so this needs a signature change at every call site.
 - **Drop the COALESCE fallback**, so an unmatched NEXT is NULL and `IS DISTINCT FROM` catches it.
