@@ -29,10 +29,16 @@ CREATE OR REPLACE MACRO tree_sql_order_dup_rel(order_expr, root_csv, source_sql)
 CREATE OR REPLACE MACRO tree_compile_order_check(order_expr, root_csv, source_sql, label) AS
   CASE WHEN order_expr IS NULL THEN NULL ELSE
     'SELECT CASE'
-    || ' WHEN count(*) FILTER (WHERE __o IS NULL) > 0 THEN tree_err(''ORDER is NULL in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(__k) FILTER (WHERE __o IS NULL), ''<NULL>''))'
-    || ' WHEN max(__n) > 1 THEN tree_err(''ORDER is not a traversal in tree ' || replace(label, '''', '''''') || ': root '' || COALESCE(arg_max(__k, __n), ''<NULL>'') || '' has '' || max(__n) || '' rows with ORDER value '' || COALESCE(arg_max(__o::VARCHAR, __n), ''<NULL>'')'
+    || ' WHEN __nulls > 0 THEN tree_err(''ORDER is NULL in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(__null_k, ''<NULL>''))'
+    || ' WHEN __mx > 1 THEN tree_err(''ORDER is not a traversal in tree ' || replace(label, '''', '''''') || ': root '' || COALESCE((__w).k, ''<NULL>'') || '' has '' || __mx || '' rows with ORDER value '' || COALESCE((__w).o, ''<NULL>'')'
     || CASE WHEN root_csv IS NULL THEN ' || ''; if the relation holds several trees whose ORDER restarts, declare ROOT''' ELSE '' END
-    || ') END FROM ' || tree_sql_order_dup_rel(order_expr, root_csv, source_sql)
+    -- The root and the ORDER value are ONE arg_max over a struct, evaluated once and bound, not two
+    -- independent arg_max calls: with two roots tying at the same group size nothing made separate
+    -- calls resolve their tie to the same row, so the message could have named a root and a value
+    -- that do not actually collide. Picking the pair structurally makes that unrepresentable.
+    || ') END FROM (SELECT count(*) FILTER (WHERE __o IS NULL) AS __nulls, min(__k) FILTER (WHERE __o IS NULL) AS __null_k,'
+    || ' max(__n) AS __mx, arg_max({k: __k, o: __o::VARCHAR}, __n) AS __w FROM '
+    || tree_sql_order_dup_rel(order_expr, root_csv, source_sql) || ')'
   END;
 
 -- P13 plus the level checks it never had (M3 §7.3). One statement, one message per failure class,
@@ -49,14 +55,24 @@ CREATE OR REPLACE MACRO tree_compile_order_check(order_expr, root_csv, source_sq
 -- to write: a source whose levels are 1-based (duck_blocks' top-level blocks, §7.7) conforms with
 -- one declaration. `has_root` is no longer read -- the ROOT hint moved to tree_compile_order_check,
 -- where a resetting ORDER actually shows up -- and is kept for arity.
+--
+-- Every aggregate in the hint is filtered to the OFFENDING partitions (`rn = 1 AND _level > 0`),
+-- and the arm additionally requires them all to start at the SAME level. Unfiltered, the three
+-- min()s ranged over every partition's first row, so a multi-root source with one conforming root
+-- reported that root's level and advised subtracting it: two roots starting at 0 and 1 said "rows
+-- start at level 0 ... declare LEVEL as 'lvl - 0'", a remedy that changes nothing and leaves the
+-- tree refused -- worse diagnosis than the message this replaced, on exactly the shape ROOT is for.
+-- When the offending partitions disagree no single offset fixes the source, so the hint would be
+-- wrong whichever level it named; that case falls through to the jump arm below.
 CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root, level_expr) AS
   'SELECT CASE'
   || ' WHEN count(*) FILTER (WHERE _level IS NULL) > 0 THEN tree_err(''LEVEL is NULL in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(_root::VARCHAR) FILTER (WHERE _level IS NULL), ''<NULL>''))'
   || ' WHEN count(*) FILTER (WHERE _level < 0) > 0 THEN tree_err(''LEVEL is negative in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(_root::VARCHAR) FILTER (WHERE _level < 0), ''<NULL>''))'
   || ' WHEN count(*) FILTER (WHERE rn = 1 AND _level > 0) > 0 AND count(*) FILTER (WHERE rn > 1 AND d > 1) = 0'
-  || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': rows start at level '' || min(_level) FILTER (WHERE rn = 1)'
-  || ' || ''; if the source''''s levels are '' || min(_level) FILTER (WHERE rn = 1)'
-  || ' || ''-based, declare LEVEL as ''''' || replace(COALESCE(level_expr, '0'), '''', '''''') || ' - '' || min(_level) FILTER (WHERE rn = 1) || '''''''')'
+  || '   AND min(_level) FILTER (WHERE rn = 1 AND _level > 0) = max(_level) FILTER (WHERE rn = 1 AND _level > 0)'
+  || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': rows start at level '' || min(_level) FILTER (WHERE rn = 1 AND _level > 0)'
+  || ' || ''; if the source''''s levels are '' || min(_level) FILTER (WHERE rn = 1 AND _level > 0)'
+  || ' || ''-based, declare LEVEL as ''''' || replace(COALESCE(level_expr, '0'), '''', '''''') || ' - '' || min(_level) FILTER (WHERE rn = 1 AND _level > 0) || '''''''')'
   || ' WHEN count(*) FILTER (WHERE ' || tree_sql_p13_pred() || ') > 0'
   || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': '' || count(*) FILTER (WHERE ' || tree_sql_p13_pred() || ') || '' rows descend more than one level or start above level 0'')'
   || ' END FROM (SELECT _root, _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ')';

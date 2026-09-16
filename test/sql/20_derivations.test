@@ -150,3 +150,24 @@ statement error
 CALL tree_ddl_create('main', 'wf6', tree_spec(tree_shape("order" := 'ord', level := 'lvl', parent := 'par'), source := 'tiepar'));
 ----
 ORDER is not a traversal in tree main.wf6
+
+# The offset hint is about the OFFENDING partitions, not every partition (M3 §7.3: "a partition
+# whose first row starts above level 0"). With one root at 0 and one at 1 the hint must name 1 and
+# the '- 1' remedy; aggregating over every first row named 0 and advised 'lvl - 0', a no-op that
+# left the tree refused.
+statement ok
+CREATE TABLE wfm AS SELECT * FROM (VALUES
+  ('w7', 'a', 0, 0), ('w7', 'a', 1, 1), ('w7', 'b', 0, 1), ('w7', 'b', 1, 2),
+  ('w8', 'c', 0, 1), ('w8', 'c', 1, 2), ('w8', 'd', 0, 2), ('w8', 'd', 1, 3)) v(g, r, ord, lvl);
+
+statement error
+CALL tree_ddl_create('main', 'wf7', tree_spec(tree_shape(root := 'r', "order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wfm WHERE g = ''w7'')'));
+----
+rows start at level 1; if the source's levels are 1-based, declare LEVEL as 'lvl - 1'
+
+# and when the offending partitions disagree about where they start, no single offset fixes the
+# source: the hint would be wrong whichever level it named, so it falls through to the jump arm
+statement error
+CALL tree_ddl_create('main', 'wf8', tree_spec(tree_shape(root := 'r', "order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wfm WHERE g = ''w8'')'));
+----
+P13 violated in tree main.wf8: 2 rows descend more than one level or start above level 0
