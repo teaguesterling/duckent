@@ -106,28 +106,46 @@ SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'unrooted';
 ----
 0
 
-# check records a P13 assertion
+# check records a P13 assertion, and one assertion per declared O slot: `scripts` declares
+# SIZE, so its conformance with the derived default is recorded as well as raised at ingest.
 statement ok
 CALL tree_check('main', 'scripts');
 
-query II
+query II rowsort
 SELECT artifact, status FROM tree_catalog_assertions() WHERE tree_name = 'scripts';
 ----
+assert_o_size	ok
 assert_p13	ok
 
-# a projection-mode tree refuses DML, and tree_check says assertions rather than DML (M13)
+# a projection-mode tree refuses DML in duckent's own words (M13). tree_check is the one verb
+# M3 §3.4 lets through: assertions are exactly what a tree with no storage can still be asked
+# for, so the refusal above applies to every verb BUT that one.
 statement ok
 CALL tree_ddl_create('main', 'live', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src', storage := 'projection'));
-
-statement error
-CALL tree_check('main', 'live');
-----
-is projection-mode; assertions need storage := materialized
 
 statement error
 CALL tree_insert('main', 'live', 'first_file');
 ----
 is projection-mode; DML needs storage := materialized
+
+# tree_check works for BOTH storage modes. A projection-mode tree IS its source, so it records
+# the ORDER assertion a materialized tree does not (that one had its ORDER checked at the ingest
+# that stored it, and its source may since have moved on); P13 is recorded over the projection
+# MACRO rather than over a table this tree does not have; and every declared O slot is recorded
+# too. All three artifacts are what makes assert_order reachable at all -- it was dead
+# scaffolding while tree_dml_context refused projection-mode trees outright.
+statement ok
+CALL tree_ddl_create('main', 'scripts_pm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'first_file', storage := 'projection'));
+
+statement ok
+CALL tree_check('main', 'scripts_pm');
+
+query II rowsort
+SELECT artifact, status FROM tree_state.assertions WHERE tree_name = 'scripts_pm';
+----
+assert_o_size	ok
+assert_order	ok
+assert_p13	ok
 
 # a quote in the tree name is escaped where it lands inside a generated error literal (M9):
 # create compiles the P13 check, tree_insert compiles the already-present message
@@ -251,3 +269,24 @@ statement error
 CALL tree_insert('main', 'scripts', '(SELECT * REPLACE (0 AS node_id, ''tie.py'' AS file_path) FROM other_files LIMIT 2)');
 ----
 ORDER is not a traversal in tree main.scripts
+
+# O conformance is an INGEST check, not only a create-time one (M3 §3.1): `scripts` declares
+# SIZE, so a tree_insert whose source disagrees with the derivation is refused the same way
+# create refuses it. Without this the fast path could be corrupted by the back door -- create
+# checks the source it was given, and every later partition arrives unexamined.
+statement ok
+CREATE TABLE corrupt_ins AS SELECT * REPLACE ('corrupt.py' AS file_path,
+  CASE WHEN node_id = (SELECT min(node_id) FROM first_file) THEN descendant_count + 1 ELSE descendant_count END AS descendant_count)
+  FROM first_file;
+
+statement error
+CALL tree_insert('main', 'scripts', 'corrupt_ins');
+----
+SIZE disagrees with its derived default
+
+# and the refused insert stored nothing: no rows under the new root, no partition row
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'scripts') WHERE file_path = 'corrupt.py'),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts' AND root_key = '{''file_path'': corrupt.py}');
+----
+0	0

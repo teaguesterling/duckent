@@ -133,6 +133,13 @@ built AS (
    CASE WHEN abstract THEN NULL ELSE tree_compile_reach_check(key_expr, (shape).root, source, '(' || proj_sql || ')', sch || '.' || nm, attr_text) END AS s_reach,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
    CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL, (shape).level) END AS s_p13,
+   -- O conformance (M3 §3.1), after P13 so a malformed level is reported as that rather than as
+   -- the disagreeing SIZE it goes on to produce. MATERIALIZED ONLY: this statement pins what is
+   -- about to be STORED, and a projection-mode tree stores nothing -- its source can change
+   -- under it between any two queries, so a create-time refusal would be a promise the storage
+   -- mode cannot keep. tree_check RECORDS the same comparison for those trees instead (§3.4).
+   CASE WHEN abstract OR storage <> 'materialized' THEN NULL
+        ELSE tree_compile_o_conformance(shape, '(' || proj_sql || ')', sch || '.' || nm, tree_sql_o_order_col(shape, attr_text)) END AS s_conform,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
    CASE WHEN abstract THEN NULL WHEN storage = 'materialized' THEN 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE SELECT * FROM ' || tbl_name
         ELSE 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE ' || proj_sql END AS s_macro,
@@ -147,5 +154,5 @@ SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_comm
             -- plain tree_err(), not (SELECT tree_err(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
             THEN tree_err('tree_ddl_create: internal: a required statement compiled to NULL')
-            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_order, s_key, s_reach, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
+            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_order, s_key, s_reach, s_shadow, s_p13, s_conform, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);

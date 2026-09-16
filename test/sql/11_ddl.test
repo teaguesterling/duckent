@@ -505,3 +505,100 @@ query II
 SELECT (SELECT list(v) FROM tree_project('main', 'casey')), (SELECT count(*) FROM tree_catalog.trees WHERE tree_name = 'casey');
 ----
 [A]	1
+
+# ---------------------------------------------------------------------------------------
+# O conformance at ingest (M3 §3.1)
+# ---------------------------------------------------------------------------------------
+#
+# A declared O column is a FAST PATH, not a second opinion: it must carry the value the
+# derivation would have computed. One that does not is a corrupted encoding, and ingest refuses
+# it rather than serving wrong subtree ranges, parents, child counts or successors out of it.
+#
+# The fixture conforms on every O slot -- app.parquet's descendant_count, children_count and
+# parent_id, and node_id + descendant_count + 1 as a NEXT, all equal their derived defaults --
+# so each record below corrupts exactly ONE row of ONE slot, and the positive record beside it
+# is what says the arm is discriminating rather than refusing everything it is given.
+
+statement ok
+CREATE TABLE corrupt_size AS SELECT * REPLACE (CASE WHEN node_id = 6 THEN descendant_count + 1 ELSE descendant_count END AS descendant_count) FROM 'test/data/app.parquet';
+
+# the whole spec §3.1 message, pinned once: slot, root, ORDER value, position, both values, and
+# the closing clause that says what the refusal is about
+statement error
+CALL tree_ddl_create('main', 'corrupt_size', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'corrupt_size'));
+----
+O conformance violated in tree main.corrupt_size: SIZE disagrees with its derived default at root {'file_path': app.py}, ORDER 6 (position 6): declared 24, derived 23 (a corrupted encoding, not a fast path)
+
+# PARENT is an O slot when LEVEL is declared beside it: the level basis derives the parent, so a
+# declared one is a fast path over that derivation. Node 18's parent is 16; claiming 6 is a lie
+# the ASOF derivation catches.
+statement ok
+CREATE TABLE corrupt_parent AS SELECT * REPLACE (CASE WHEN node_id = 18 THEN 6 ELSE parent_id END AS parent_id) FROM 'test/data/app.parquet';
+
+statement error
+CALL tree_ddl_create('main', 'corrupt_parent', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', parent := 'parent_id'), source := 'corrupt_parent'));
+----
+PARENT disagrees with its derived default at root {'file_path': app.py}, ORDER 18 (position 18): declared 6, derived 16
+
+# CHILDREN: the positive first, so the refusal below is evidence about the corruption rather
+# than about the arm existing at all.
+statement ok
+CALL tree_ddl_create('main', 'with_children', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', children := 'children_count'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT count(*), count(*) FILTER (WHERE _children IS DISTINCT FROM children_count) FROM tree_project('main', 'with_children');
+----
+54	0
+
+statement ok
+CREATE TABLE corrupt_children AS SELECT * REPLACE (CASE WHEN node_id = 6 THEN children_count + 1 ELSE children_count END AS children_count) FROM 'test/data/app.parquet';
+
+statement error
+CALL tree_ddl_create('main', 'corrupt_children', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', children := 'children_count'), source := 'corrupt_children'));
+----
+CHILDREN disagrees with its derived default at root {'file_path': app.py}, ORDER 6 (position 6): declared 6, derived 5
+
+# NEXT, declared as the structural successor it already is
+statement ok
+CREATE TABLE with_next AS SELECT *, node_id + descendant_count + 1 AS next_pos FROM 'test/data/app.parquet';
+
+statement ok
+CALL tree_ddl_create('main', 'with_next', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', next := 'next_pos'), source := 'with_next'));
+
+# it conforms on every row, the LAST one included: node 53 declares 54, which names no row, and
+# the projection's COALESCE fallback makes that the structural successor 54 -- equal to the
+# derived default, so the tree is accepted.
+query II
+SELECT count(*), count(*) FILTER (WHERE _next IS DISTINCT FROM _pre + _size + 1) FROM tree_project('main', 'with_next');
+----
+54	0
+
+statement ok
+CREATE TABLE corrupt_next AS SELECT * REPLACE (CASE WHEN node_id = 9 THEN next_pos + 1 ELSE next_pos END AS next_pos) FROM with_next;
+
+statement error
+CALL tree_ddl_create('main', 'corrupt_next', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', next := 'next_pos'), source := 'corrupt_next'));
+----
+NEXT disagrees with its derived default at root {'file_path': app.py}, ORDER 9 (position 9): declared 14, derived 13
+
+# The LAST ROW of a root is the case a BOUNDED derived NEXT silently accepts. `__dnext` is the
+# structural successor UNCONDITIONALLY -- `_pre + _size + 1`, exactly what the projection
+# computes for _next (sql/02_projection.sql) -- so the comparison reaches node 53 like any
+# other row. Bounding it by the root's max _pre, and skipping rows where it came out NULL,
+# would leave the last row of EVERY root unchecked: here node 53 declares a NEXT of 10, which
+# names a real row, and 10 is not 54.
+statement ok
+CREATE TABLE corrupt_next_last AS SELECT * REPLACE (CASE WHEN node_id = 53 THEN 10 ELSE next_pos END AS next_pos) FROM with_next;
+
+statement error
+CALL tree_ddl_create('main', 'corrupt_next_last', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', next := 'next_pos'), source := 'corrupt_next_last'));
+----
+NEXT disagrees with its derived default at root {'file_path': app.py}, ORDER 53 (position 53): declared 10, derived 54
+
+# none of the refused creates left a catalog row, a macro or a partition behind
+query III
+SELECT (SELECT count(*) FROM tree_catalog_trees() WHERE tree_name LIKE 'corrupt%'),
+       (SELECT count(*) FROM tree_catalog_slots() WHERE tree_name LIKE 'corrupt%'),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name LIKE 'corrupt%');
+----
+0	0	0

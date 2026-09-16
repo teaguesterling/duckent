@@ -272,13 +272,15 @@ design's §9 table now carries the corrected rows *(done 2026-09-15)*.
 *(2026-09-15, M3 Task 6: the MN03 row below is HISTORY. That mutant was retired when the `__s`
 stage it edited was restructured into `tree_sql_size_join()` — its edit was textual and no longer
 had text to plant. The id is not reused for the same claim: M3 Task 9 re-plants MN03 as a
-different mutant in `sql/07_match.sql`. The mutant count is 17 until it does. The reasoning in the
+different mutant in `sql/07_match.sql`. Its CLAIM is carried from M3 Task 7 by **MN04**, which
+plants the same edit on the restructured line; the mutant count is 18. The reasoning in the
 MN03 paragraph below is kept because it is about 40 and 41's blindness to a symmetric change,
 which is a fact about those suites rather than about the retired mutant.)*
 
 | mutant | §9 says | actually killed by | why the difference |
 |---|---|---|---|
 | MN03 *(retired, M3 Task 6)* | 42 | **42 only** | 40 and 41 PASS, although both declare SIZE — see below |
+| MN04 *(M3 Task 7, carries MN03's claim)* | — | **11_ddl, 12_dml, 42**, and 31, 32, 33, 34, 37, 38, 40, 41, 41b, 43, 44 | O conformance refuses a declared SIZE at CREATE, so every suite that builds a SIZE tree now fails — the exact reverse of MN03's near-invisibility |
 | MN05 | 40/41 | **40, 41, 34_groups** | table is right; 34 is a third witness |
 | MN07 | 40 | **40, 37, 31, 34, 36** | only after corpus row c17 was added; 41 PASSES |
 | MN08 | 44 | **44, 37** | — |
@@ -344,6 +346,71 @@ Two mutants are also shaped differently from the §9 table's sentence — three,
   type VARCHAR and type INTEGER_LITERAL"), which would make MN13 a loud mutant that any suite
   comparing a map against a number kills. Casting the literal instead is the plausible wrong
   implementation: it binds, it runs, and it answers that `'10'` is not greater than `9`.
+
+## M3 Task 7: O conformance at ingest, and the one thing it cannot see
+
+O conformance (spec §3.1) compares each declared O column against the value the derivation would
+have produced, RAISES on the first disagreement at ingest, and RECORDS the same comparison as a
+`tree_state.assertions` row from `tree_check`. Both halves read one fragment,
+`tree_sql_o_bad_cte`, so the verb that refuses and the verb that reports cannot come to disagree
+about what a disagreement is.
+
+### The ORDER value is named only when the projection carries it
+
+The refusal names `ORDER <v>` by reading the ORDER column off the projection, which is possible
+only when ORDER is a plain column *and* ATTR is open (`*`). A computed ORDER (`node_id + 1`) or a
+closed ATTR list leaves nothing to read, and the message then gives the position alone
+(`tree_sql_o_order_col`). That is the one place this refusal says less than §3.1 asks for; the
+position identifies the row unambiguously either way.
+
+### A declared NEXT that names no row is invisible to conformance — deliberately
+
+`sql/02_projection.sql` compiles a declared NEXT as `COALESCE(nx._pre, a._pre + a._size + 1)`.
+When the declared value names no row, the COALESCE substitutes the structural successor — which
+is exactly what a *conforming* NEXT produces — so the two are indistinguishable in the
+projection's OUTPUT, and conformance sees only the output (ingest is handed
+`'(' || proj_sql || ')'`, and the raw `__next_raw` is EXCLUDEd). No comparison over that relation
+can tell them apart. The options, and why each was rejected:
+
+- **Publish `__next_raw`, or a `_next_matched` flag.** Both add a column to every projection and
+  therefore to every materialized tree's stored table, and both break 10_projection's record that
+  no `__%` column reaches the output — a record that exists to catch the EXCLUDE list's
+  gate/emitter pair drifting apart, which is a live bug class.
+- **Compare against the source relation.** Not reachable: ingest passes the projection as
+  `rel_sql`, so this needs a signature change at every call site.
+- **Drop the COALESCE fallback**, so an unmatched NEXT is NULL and `IS DISTINCT FROM` catches it.
+  That is a §2.2 semantic change ("one that names no row keeps the structural successor") pinned
+  by three 10_projection records — out of scope for this task, and a spec question rather than an
+  implementation one.
+
+**Decision: left open.** The cost of closing it is permanent and paid by every tree; the benefit
+is a diagnostic for a case that cannot produce a wrong answer. A declared NEXT naming no row
+yields the *correct* structural successor, so unlike a wrong SIZE, PARENT or CHILDREN it degrades
+to the derived tree rather than to a corrupted one — a declaration typo, not the corrupted
+encoding §3.1 is about. `sql/02_projection.sql` previously claimed "§3.1 then counts as a
+disagreement"; that was false and could not be made true without one of the above. The comment now
+says what actually happens.
+
+### Plan defect found and corrected
+
+The brief's `__bad` CTE aliased only its FIRST arm (`SIZE`) — `AS slot, AS k, AS pos, …` — and
+left the PARENT, CHILDREN and NEXT arms positional. A `UNION ALL` takes its column names from its
+LEADING branch, and which branch leads depends on which slots the shape declares, so any shape
+declaring CHILDREN or NEXT *without* a SIZE built a `__bad` whose columns were named `'CHILDREN'`
+or `'NEXT'`, and `ORDER BY k, pos` died with a Binder Error. Every arm now carries the full alias
+list; 11_ddl's `with_children` and `with_next` records are the shapes that have no SIZE, and they
+are what catch it.
+
+### `assert_order` is reachable and tested as of this task
+
+`tree_dml_context` refused projection-mode trees for every verb, so `tree_compile_check`'s ORDER
+assertion could not be run by anything — dead scaffolding since Task 4. The refusal now applies
+only when `verb <> 'tree_check'`, and the context carries a `rel:` field (the table for
+materialized trees, the projection macro call for projection-mode ones) so a read-only check never
+reaches for a table that does not exist. `assert_p13` reads `rel` rather than `tbl` for the same
+reason: lifting the refusal without that change turns dormant scaffolding into a live
+`Catalog Error: Table with name t_… does not exist`. 12_dml's `scripts_pm` record covers all
+three artifacts.
 
 ## Spec deviations in this milestone
 

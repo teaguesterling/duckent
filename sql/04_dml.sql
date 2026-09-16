@@ -141,6 +141,121 @@ CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root, level_expr) A
   || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': '' || count(*) FILTER (WHERE ' || tree_sql_p13_pred() || ') || '' rows descend more than one level or start above level 0'')'
   || ' END FROM (SELECT _root, _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ')';
 
+-- O CONFORMANCE (M3 §3.1). A declared O column is a FAST PATH over a derivation, not a second
+-- opinion about the tree's shape. SIZE, CHILDREN, NEXT -- and, in the level basis, PARENT --
+-- each have a derived default, and a declared one that disagrees with it is a corrupted
+-- encoding. Serving it would answer subtree, child, sibling and successor questions out of
+-- numbers the rest of the language contradicts, so ingest refuses it rather than trusting it.
+--
+-- Whether this shape declares anything to check at all. PARENT counts only beside a declared
+-- LEVEL: in the parent basis PARENT is the R slot the walk is BUILT from, so there is no
+-- independent derivation to compare it against. slot_rows in sql/03_ddl.sql decides the block
+-- the same way round (`CASE WHEN level_basis THEN 'O' ELSE 'R' END`), so the catalog and this
+-- check cannot come to disagree about what an O slot is.
+CREATE OR REPLACE MACRO tree_sql_declares_o(shape) AS
+  (shape).size IS NOT NULL OR (shape).children IS NOT NULL OR (shape).next IS NOT NULL
+  OR ((shape).parent IS NOT NULL AND (shape).level IS NOT NULL);
+
+-- The ORDER column the refusal may NAME A VALUE from, or NULL to name the position only.
+-- The message can read an ORDER value off the relation only when ORDER is a plain column the
+-- projection actually carries, which is when ATTR is open; a computed ORDER ('node_id + 1') or
+-- a closed ATTR list leaves nothing to read. That is the one place this refusal says less than
+-- spec §3.1 asks -- the position is always given, and it identifies the row on its own.
+CREATE OR REPLACE MACRO tree_sql_o_order_col(shape, attr_text) AS
+  CASE WHEN attr_text = '*' AND tree_sql_is_ident((shape)."order") THEN (shape)."order" END;
+
+-- Built once and used by all four arms: the ORDER value as text, or the literal NULL when there
+-- is no column to read it from. Spelling it in one place keeps the arms from drifting -- the
+-- EXCLUDE list in sql/02_projection.sql is the standing example of what "built twice" costs.
+CREATE OR REPLACE MACRO tree_sql_o_ord_expr(order_col) AS
+  COALESCE('x.' || tree_sql_ident(order_col) || '::VARCHAR', 'NULL');
+
+-- The disagreements between the declared O columns and their derived defaults, as CTE text
+-- ending in `__bad(slot, k, pos, ord, declared, derived)`. ONE definition, shared by the ingest
+-- check that RAISES and the tree_check assertion that RECORDS, so the two can never come to
+-- disagree about what a disagreement is.
+--
+-- rel_sql is the PROJECTION's output: it exposes _root, _pre, _level and the declared O columns
+-- under their canonical names. The derivation is recomputed from its R columns alone -- __r
+-- keeps _root, _pre and _level and nothing else -- so what is compared is "what this relation
+-- says" against "what its own structure implies", with the declared columns unable to influence
+-- the answer they are being checked against.
+--
+-- Comparisons are IS DISTINCT FROM: a NULL on either side is a disagreement, not a pass.
+--
+-- EVERY arm carries the full alias list, not just the first one. A UNION ALL takes its column
+-- NAMES from its leading branch, and which branch leads here depends on which slots the shape
+-- declares -- so aliasing only the SIZE arm (the arm that happens to come first when SIZE is
+-- declared) left `__bad` with columns called ''PARENT'', ''CHILDREN'' or ''NEXT'' for any shape
+-- that declared one of those WITHOUT a SIZE, and the ORDER BY k, pos below failed to bind.
+-- 11_ddl's with_children and with_next records are the shapes that have no SIZE.
+--
+-- __dnext is `_pre + _size + 1` UNCONDITIONALLY, because that is what the projection computes
+-- for _next (sql/02_projection.sql) -- for every row, with no bound at the end of the root.
+-- Bounding it by the root's max _pre and then skipping the rows where it came out NULL would
+-- leave the LAST ROW of every root unchecked, and that row is a row like any other: 11_ddl
+-- carries the record where it declares a NEXT naming a real earlier row.
+CREATE OR REPLACE MACRO tree_sql_o_bad_cte(shape, rel_sql, order_col) AS
+  'WITH __r AS (SELECT _root, _pre, _level FROM ' || rel_sql || '), '
+  || '__rn AS (SELECT * FROM __r), '
+  || tree_sql_parent_join()
+  || tree_sql_size_join()
+  || tree_sql_children_join()
+  || '__d AS (SELECT a._root, a._pre, a._parent AS __dparent, a._size AS __dsize, '
+  || 'COALESCE(ch.__cn, 0) AS __dchildren, a._pre + a._size + 1 AS __dnext '
+  || 'FROM __s a LEFT JOIN __ch ch ON ch._root = a._root AND ch.__cp = a._pre), '
+  || '__bad AS ('
+  || list_aggregate(list_filter([
+       CASE WHEN (shape).size IS NOT NULL THEN
+         'SELECT ''SIZE'' AS slot, x._root::VARCHAR AS k, x._pre AS pos, ' || tree_sql_o_ord_expr(order_col)
+         || ' AS ord, x._size::VARCHAR AS declared, d.__dsize::VARCHAR AS derived FROM ' || rel_sql
+         || ' x JOIN __d d ON d._root = x._root AND d._pre = x._pre WHERE x._size IS DISTINCT FROM d.__dsize' END,
+       CASE WHEN (shape).parent IS NOT NULL AND (shape).level IS NOT NULL THEN
+         'SELECT ''PARENT'' AS slot, x._root::VARCHAR AS k, x._pre AS pos, ' || tree_sql_o_ord_expr(order_col)
+         || ' AS ord, x._parent::VARCHAR AS declared, d.__dparent::VARCHAR AS derived FROM ' || rel_sql
+         || ' x JOIN __d d ON d._root = x._root AND d._pre = x._pre WHERE x._parent IS DISTINCT FROM d.__dparent' END,
+       CASE WHEN (shape).children IS NOT NULL THEN
+         'SELECT ''CHILDREN'' AS slot, x._root::VARCHAR AS k, x._pre AS pos, ' || tree_sql_o_ord_expr(order_col)
+         || ' AS ord, x._children::VARCHAR AS declared, d.__dchildren::VARCHAR AS derived FROM ' || rel_sql
+         || ' x JOIN __d d ON d._root = x._root AND d._pre = x._pre WHERE x._children IS DISTINCT FROM d.__dchildren' END,
+       CASE WHEN (shape).next IS NOT NULL THEN
+         'SELECT ''NEXT'' AS slot, x._root::VARCHAR AS k, x._pre AS pos, ' || tree_sql_o_ord_expr(order_col)
+         || ' AS ord, x._next::VARCHAR AS declared, d.__dnext::VARCHAR AS derived FROM ' || rel_sql
+         || ' x JOIN __d d ON d._root = x._root AND d._pre = x._pre WHERE x._next IS DISTINCT FROM d.__dnext' END
+     ], lambda q: q IS NOT NULL), 'string_agg', ' UNION ALL ')
+  || ') ';
+
+-- Refuse the FIRST disagreement, in (root, position) order. A conforming tree yields no row, so
+-- tree_err is never evaluated and nothing is raised -- the same shape as every other ingest
+-- check here. NULL when the shape declares no O override, so the caller's list_filter drops it.
+CREATE OR REPLACE MACRO tree_compile_o_conformance(shape, rel_sql, label, order_col) AS
+  CASE WHEN NOT tree_sql_declares_o(shape) THEN NULL ELSE
+    tree_sql_o_bad_cte(shape, rel_sql, order_col)
+    || 'SELECT tree_err(''O conformance violated in tree ' || replace(label, '''', '''''') || ': '' || slot'
+    || ' || '' disagrees with its derived default at root '' || COALESCE(k, ''<NULL>'')'
+    || ' || COALESCE('', ORDER '' || ord, '''') || '' (position '' || pos || ''): declared '' || COALESCE(declared, ''NULL'')'
+    || ' || '', derived '' || COALESCE(derived, ''NULL'') || '' (a corrupted encoding, not a fast path)'')'
+    || ' FROM (SELECT * FROM __bad ORDER BY k, pos LIMIT 1)'
+  END;
+
+-- One RECORDED O assertion -- the DELETE and the INSERT for a single slot, as a two-element list
+-- the caller flattens. tree_check reports, it never refuses (M3 §3.4), so this counts the same
+-- __bad rows tree_compile_o_conformance raises on and writes 'ok' or 'violated' instead.
+-- `cte` is NULL when the shape declares no O slot at all, which makes both statements NULL and
+-- the caller's list_filter drop them.
+CREATE OR REPLACE MACRO tree_sql_o_assert_stmts(db, sch, nm, slot, cte) AS
+  ['DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(db) || ' AND schema_name = ' || tree_sql_lit(sch)
+   || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_o_' || lower(slot) || '''',
+   'INSERT INTO tree_state.assertions ' || cte
+   || 'SELECT ' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm)
+   || ', ''assert_o_' || lower(slot) || ''', CASE WHEN count(*) = 0 THEN ''ok'' ELSE ''violated'' END, '
+   || '(SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(db)
+   || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), '
+   || 'count(*) || '' disagreeing rows'' || COALESCE('', first at root '' || (SELECT COALESCE(k, ''<NULL>'')'
+   || ' || '' position '' || pos || '': declared '' || COALESCE(declared, ''NULL'') || '', derived '' || COALESCE(derived, ''NULL'')'
+   || ' FROM __bad WHERE slot = ''' || slot || ''' ORDER BY k, pos LIMIT 1), '''') '
+   || 'FROM __bad WHERE slot = ''' || slot || ''''];
+
 -- helper: the tree row and its shape, or an error
 --
 -- The identity is COALESCEd into every message: a NULL schema or name makes the lookup empty,
@@ -154,17 +269,28 @@ CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
               -- an abstract tree records storage = materialized but owns no table, so without
               -- this the verb fails with a raw "table t_... does not exist" catalog error
               WHEN bool_or(is_abstract) THEN tree_err(verb || ': tree ' || sch || '.' || nm || ' is SHAPE ONLY (abstract); it has no storage')
-              WHEN max(storage) <> 'materialized' THEN tree_err(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; '
-                                                             || CASE WHEN verb = 'tree_check' THEN 'assertions need' ELSE 'DML needs' END || ' storage := materialized')
+              -- tree_check is the ONE verb M3 §3.4 lets a projection-mode tree reach: assertions
+              -- are exactly what a tree with no storage can still be asked for, and answering
+              -- them needs no table. Every other verb writes rows, so it still refuses here.
+              WHEN max(storage) <> 'materialized' AND verb <> 'tree_check'
+                THEN tree_err(verb || ': tree ' || sch || '.' || nm || ' is projection-mode; DML needs storage := materialized')
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
                     order_source: max(order_source),
                     -- storage and source are read by tree_compile_check alone, which is the one
-                    -- verb M3 §3.4 lets a projection-mode tree reach (Task 7 lifts the refusal
-                    -- above for it); every other verb here has already refused that storage mode.
+                    -- verb M3 §3.4 lets a projection-mode tree reach; every other verb here has
+                    -- already refused that storage mode.
                     storage: max(storage), source: max(source_sql),
                     attr: (SELECT expression FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ATTR'),
                     has_root: bool_or(EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ROOT')),
-                    tbl: 'tree_catalog.' || tree_sql_object_name('t', sch, nm)} END
+                    tbl: 'tree_catalog.' || tree_sql_object_name('t', sch, nm),
+                    -- The relation to READ for a check that writes no rows: the stored table for
+                    -- a materialized tree, the projection MACRO for a projection-mode one, which
+                    -- owns no table. `tbl` stays the WRITE target, read by the DML verbs alone --
+                    -- every one of which has already refused a projection-mode tree above -- so a
+                    -- read-only check reaching for `tbl` would name a table that does not exist.
+                    rel: CASE WHEN max(storage) = 'materialized'
+                              THEN 'tree_catalog.' || tree_sql_object_name('t', sch, nm)
+                              ELSE 'tree_catalog.' || tree_sql_object_name('proj', sch, nm) || '()' END} END
   FROM tree_catalog.trees WHERE database_name = current_database() AND schema_name = sch AND tree_name = nm);
 
 -- `frozen` means _pre is the source's scan order; taking it while preserve_insertion_order
@@ -193,6 +319,11 @@ CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
     tree_sql_shadow_check('__duckent_new', 'tree_insert'),
     'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || replace(sch || '.' || nm, '''', '''''') || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
+    -- O conformance over the NEW partition, and after P13 so a malformed level is reported as
+    -- that rather than as a disagreeing SIZE downstream of it. Ingest needs its own copy of this
+    -- check because create only ever saw the source it was GIVEN: without it the fast path is
+    -- corruptible by the back door, one unexamined partition at a time.
+    tree_compile_o_conformance(x.shape, '__duckent_new', sch || '.' || nm, tree_sql_o_order_col(x.shape, x.attr)),
     -- BY NAME: the projection's column order follows the source's select list, which need
     -- not match the stored table's, and a positional INSERT misfiles same-typed columns
     'INSERT INTO ' || x.tbl || ' BY NAME SELECT * FROM __duckent_new',
@@ -215,6 +346,9 @@ CREATE OR REPLACE MACRO tree_compile_replace(sch, nm, source) AS (
     tree_compile_reach_check(key_expr, (x.shape).root, source, '__duckent_new', sch || '.' || nm, x.attr),
     tree_sql_shadow_check('__duckent_new', 'tree_replace'),
     tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
+    -- and the same conformance check insert runs, for the same reason: replace rewrites whole
+    -- partitions from a source create never saw
+    tree_compile_o_conformance(x.shape, '__duckent_new', sch || '.' || nm, tree_sql_o_order_col(x.shape, x.attr)),
     'CREATE TEMP TABLE __duckent_epochs AS SELECT root_key, epoch FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT DISTINCT _root::VARCHAR FROM __duckent_new)',
     'DELETE FROM ' || x.tbl || ' WHERE _root::VARCHAR IN (SELECT root_key FROM __duckent_epochs)',
     'DELETE FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT root_key FROM __duckent_epochs)',
@@ -252,22 +386,44 @@ CREATE OR REPLACE MACRO tree_compile_delete(sch, nm, root_predicate) AS (
     'DROP TABLE __duckent_gone',
     'COMMIT'] END FROM c);
 
--- Run the assertions and record them. P13 only for now; O assertions arrive in M3.
+-- Run the assertions and record them: P13, the ORDER assertion for a projection-mode tree, and
+-- one per declared O slot. tree_check REPORTS and never refuses (M3 §3.4) -- that is the whole
+-- difference between it and the ingest checks it shares its comparisons with -- so every
+-- statement below writes a row and none of them calls tree_err.
+--
+-- It serves BOTH storage modes. A materialized tree is read through its table; a projection-mode
+-- tree, which owns no table, is read through its projection macro (x.rel). That is also why the
+-- ORDER assertion exists only for projection-mode trees: a materialized one had its ORDER checked
+-- at the ingest that stored it, and its source may since have moved on, while a projection-mode
+-- tree IS its source.
 CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS (
-  WITH c AS (SELECT tree_dml_context('tree_check', sch, nm) AS x)
+  WITH c AS (SELECT tree_dml_context('tree_check', sch, nm) AS x),
+  -- The comparison text, built ONCE and handed to every slot's assertion. It is the same
+  -- fragment tree_compile_o_conformance raises on, so what tree_check RECORDS and what ingest
+  -- REFUSES are one question asked twice rather than two questions that might disagree. NULL
+  -- when the shape declares no O slot, which makes every statement built from it NULL.
+  b AS (SELECT x, tree_sql_o_bad_cte(x.shape, x.rel, tree_sql_o_order_col(x.shape, x.attr)) AS cte FROM c)
   -- see tree_compile_delete on why the context is read in a predicate
   SELECT CASE WHEN x IS NULL THEN tree_err('tree_check: internal: no DML context') ELSE
-   list_filter(['BEGIN TRANSACTION',
+   list_filter(list_concat(list_concat(['BEGIN TRANSACTION',
     -- The ORDER assertion is recorded, never raised (M3 §3.4), and only for a projection-mode
     -- tree: a materialized one had its ORDER checked at the ingest that stored it, and its source
     -- may since have moved on, while a projection-mode tree IS its source. It reads the same
-    -- duplicate relation the ingest check raises on. Unreachable until Task 7 lets a
-    -- projection-mode tree past tree_dml_context's refusal, which is the only thing standing
-    -- between this statement and the caller.
+    -- duplicate relation the ingest check raises on. REACHABLE as of M3 Task 7, which let a
+    -- projection-mode tree past tree_dml_context's refusal for this one verb; 12_dml's
+    -- scripts_pm record is what holds it reachable, and until that record existed this was dead
+    -- scaffolding that no suite could run.
     CASE WHEN x.storage <> 'projection' OR (x.shape)."order" IS NULL THEN NULL ELSE
       'DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_order''' END,
     CASE WHEN x.storage <> 'projection' OR (x.shape)."order" IS NULL THEN NULL ELSE
       'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_order'', CASE WHEN count(*) FILTER (WHERE __o IS NULL OR __n > 1) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) FILTER (WHERE __o IS NULL OR __n > 1) || '' violating rows'' FROM ' || tree_sql_order_dup_rel((x.shape)."order", (x.shape).root, x.source) END,
     'DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_p13''',
-    'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_p13'', CASE WHEN count(*) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) || '' violating rows'' FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || x.tbl || ') WHERE ' || tree_sql_p13_pred(),
-    'COMMIT'], lambda s: s IS NOT NULL) END FROM c);
+    'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_p13'', CASE WHEN count(*) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) || '' violating rows'' FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || x.rel || ') WHERE ' || tree_sql_p13_pred()],
+    -- One pair of statements per DECLARED O slot. A shape declaring none contributes an empty
+    -- list, so a tree with no O group records P13 (and ORDER) exactly as it always did.
+    flatten(list_filter([
+      CASE WHEN (x.shape).size IS NULL THEN NULL ELSE tree_sql_o_assert_stmts(x.db, sch, nm, 'SIZE', cte) END,
+      CASE WHEN (x.shape).parent IS NULL OR (x.shape).level IS NULL THEN NULL ELSE tree_sql_o_assert_stmts(x.db, sch, nm, 'PARENT', cte) END,
+      CASE WHEN (x.shape).children IS NULL THEN NULL ELSE tree_sql_o_assert_stmts(x.db, sch, nm, 'CHILDREN', cte) END,
+      CASE WHEN (x.shape).next IS NULL THEN NULL ELSE tree_sql_o_assert_stmts(x.db, sch, nm, 'NEXT', cte) END
+    ], lambda l: l IS NOT NULL))), ['COMMIT']), lambda s: s IS NOT NULL) END FROM b);

@@ -49,8 +49,23 @@
 # tree_compile_projection, and that line was restructured into tree_sql_size_join(), so regen.py
 # could no longer find the text to plant. The id is NOT reused for the same claim: M3 Task 9
 # re-plants MN03 as a DIFFERENT mutant (a semantics-path function reading an O accessor, in
-# sql/07_match.sql), which is why the edit was dropped rather than re-pointed. The mutant count
-# is 17 until Task 9 restores it to 18.
+# sql/07_match.sql). Its CLAIM -- that a declared SIZE override must not silently disagree with
+# the derivation -- is carried by MN04 below as of M3 Task 7, against the restructured line.
+- id: MN04
+  file: MN04_size_override_plus_one.sql
+  what: a declared SIZE override returns size + 1; conformance must refuse it as corruption
+  expect_fail: [test/sql/11_ddl.test, test/sql/12_dml.test, test/sql/42_second_differential.test]
+  also_kills: measured by running the whole suite under the mutant -- every file that CREATES a
+    tree declaring SIZE also fails; 31_match, 32_traversal, 33_navigation, 34_groups,
+    37_css_parser, 38_css_lower, 40_corpus, 41_differential_sitting_duck, 41b_live_sitting_duck,
+    43_representation and 44_parsers. O conformance refuses the declared SIZE at CREATE, so the
+    tree never exists and every later record in those files fails behind it. That is the reverse
+    of MN03, which 40 and 41 could not see at all -- the kill moved from a subtree range one row
+    short, on a row no selector names, to the tree being refused outright.
+  # MN03's number was used for this claim in M2; corrected in M3 (spec §6).
+  # The suites that PASS under it declare no SIZE through tree_ddl_create: 10_projection reaches
+  # tree_compile_projection directly and never creates a tree, and 20_derivations' SIZE-free
+  # parent-basis trees record PARENT as an R slot, which is not an O override at all.
 - id: MN05
   file: MN05_has_child_only.sql
   what: a group's first inner step is joined as a CHILD whatever its op, so :has() is child-only
