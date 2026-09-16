@@ -4,12 +4,62 @@
 -- Returns a statement that raises when violated. MN15 mutates tree_sql_p13_pred.
 CREATE OR REPLACE MACRO tree_sql_p13_pred() AS 'd > 1 OR (rn = 1 AND _level <> 0)';
 
--- `label` lands inside a single-quoted literal of the generated statement, so its own quotes
--- are doubled; a tree named it's would otherwise compile to a syntax error.
-CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root) AS
-  'SELECT CASE WHEN count(*) > 0 THEN error(''P13 violated in tree ' || replace(label, '''', '''''') || ': '' || count(*) || '' rows descend more than one level or start above level 0'
-  || CASE WHEN has_root THEN '' ELSE '. If the relation holds more than one tree, declare ROOT' END
-  || ''') END FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ') WHERE ' || tree_sql_p13_pred();
+-- The source's (ROOT key, ORDER value) pairs with the size of each pair's group: the one relation
+-- both the raising ingest check and tree_check's recorded assertion read, so the two cannot come
+-- to disagree about what a tie is.
+CREATE OR REPLACE MACRO tree_sql_order_dup_rel(order_expr, root_csv, source_sql) AS
+  '(SELECT __k, __o, count(*) OVER (PARTITION BY __k, __o) AS __n FROM (SELECT '
+  || tree_sql_root(root_csv, '') || '::VARCHAR AS __k, ' || order_expr || ' AS __o FROM ' || source_sql || '))';
+
+-- ORDER on its own (M3 §3.2), whenever ORDER is declared, whatever else is. NULL when no ORDER
+-- was declared, so the caller's list_filter drops the statement.
+--
+-- It runs over the SOURCE, before the projection numbers anything, for two reasons. The first is
+-- that row_number() would otherwise number NULLs and ties arbitrarily and every later check --
+-- P13 included -- would see a well-formed tree and report nothing, or report a level jump for
+-- what is really a tie. The second is row-count correctness, which is newer and sharper: since
+-- M3 §2.2 a declared PARENT is a value in ORDER space translated by a LEFT JOIN on __order, so
+-- two rows of one root sharing an ORDER value make the projection return MORE rows than its
+-- source (measured: 3 source rows -> 5 projected). Every ingest site therefore emits this
+-- statement BEFORE any statement that evaluates the projection.
+--
+-- `label` lands inside a single-quoted literal of the generated statement, so its own quotes are
+-- doubled, as everywhere else here. The ROOT hint rides on the tie message rather than on P13:
+-- an unpartitioned ORDER column that restarts per tree shows up here, as a tie, and nowhere else.
+CREATE OR REPLACE MACRO tree_compile_order_check(order_expr, root_csv, source_sql, label) AS
+  CASE WHEN order_expr IS NULL THEN NULL ELSE
+    'SELECT CASE'
+    || ' WHEN count(*) FILTER (WHERE __o IS NULL) > 0 THEN tree_err(''ORDER is NULL in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(__k) FILTER (WHERE __o IS NULL), ''<NULL>''))'
+    || ' WHEN max(__n) > 1 THEN tree_err(''ORDER is not a traversal in tree ' || replace(label, '''', '''''') || ': root '' || COALESCE(arg_max(__k, __n), ''<NULL>'') || '' has '' || max(__n) || '' rows with ORDER value '' || COALESCE(arg_max(__o::VARCHAR, __n), ''<NULL>'')'
+    || CASE WHEN root_csv IS NULL THEN ' || ''; if the relation holds several trees whose ORDER restarts, declare ROOT''' ELSE '' END
+    || ') END FROM ' || tree_sql_order_dup_rel(order_expr, root_csv, source_sql)
+  END;
+
+-- P13 plus the level checks it never had (M3 §7.3). One statement, one message per failure class,
+-- the first failing class reported: a NULL level, a negative level, a partition starting above
+-- level 0, then the jump/start predicate itself.
+--
+-- The start-offset arm is gated on there being NO real jump anywhere (`rn > 1 AND d > 1`), and
+-- deliberately does not reuse tree_sql_p13_pred: lag(_level, 1, -1) makes row 1 of a 1-based
+-- partition look like a descent of 2, so counting the first row's own "jump" would fire the hint
+-- on relations that also have genuine jumps, and hide them. tree_sql_p13_pred stays the jump/start
+-- predicate, so MN15 still has exactly one thing to mutate.
+--
+-- `level_expr` is the LEVEL expression AS DECLARED, quoted into the hint so the message says what
+-- to write: a source whose levels are 1-based (duck_blocks' top-level blocks, §7.7) conforms with
+-- one declaration. `has_root` is no longer read -- the ROOT hint moved to tree_compile_order_check,
+-- where a resetting ORDER actually shows up -- and is kept for arity.
+CREATE OR REPLACE MACRO tree_compile_p13(rel_sql, label, has_root, level_expr) AS
+  'SELECT CASE'
+  || ' WHEN count(*) FILTER (WHERE _level IS NULL) > 0 THEN tree_err(''LEVEL is NULL in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(_root::VARCHAR) FILTER (WHERE _level IS NULL), ''<NULL>''))'
+  || ' WHEN count(*) FILTER (WHERE _level < 0) > 0 THEN tree_err(''LEVEL is negative in tree ' || replace(label, '''', '''''') || ' at root '' || COALESCE(min(_root::VARCHAR) FILTER (WHERE _level < 0), ''<NULL>''))'
+  || ' WHEN count(*) FILTER (WHERE rn = 1 AND _level > 0) > 0 AND count(*) FILTER (WHERE rn > 1 AND d > 1) = 0'
+  || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': rows start at level '' || min(_level) FILTER (WHERE rn = 1)'
+  || ' || ''; if the source''''s levels are '' || min(_level) FILTER (WHERE rn = 1)'
+  || ' || ''-based, declare LEVEL as ''''' || replace(COALESCE(level_expr, '0'), '''', '''''') || ' - '' || min(_level) FILTER (WHERE rn = 1) || '''''''')'
+  || ' WHEN count(*) FILTER (WHERE ' || tree_sql_p13_pred() || ') > 0'
+  || ' THEN tree_err(''P13 violated in tree ' || replace(label, '''', '''''') || ': '' || count(*) FILTER (WHERE ' || tree_sql_p13_pred() || ') || '' rows descend more than one level or start above level 0'')'
+  || ' END FROM (SELECT _root, _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || rel_sql || ')';
 
 -- helper: the tree row and its shape, or an error
 --
@@ -28,6 +78,10 @@ CREATE OR REPLACE MACRO tree_dml_context(verb, sch, nm) AS (
                                                              || CASE WHEN verb = 'tree_check' THEN 'assertions need' ELSE 'DML needs' END || ' storage := materialized')
               ELSE {db: current_database(), shape: tree_shape_from_catalog(current_database(), sch, nm),
                     order_source: max(order_source),
+                    -- storage and source are read by tree_compile_check alone, which is the one
+                    -- verb M3 §3.4 lets a projection-mode tree reach (Task 7 lifts the refusal
+                    -- above for it); every other verb here has already refused that storage mode.
+                    storage: max(storage), source: max(source_sql),
                     attr: (SELECT expression FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ATTR'),
                     has_root: bool_or(EXISTS (SELECT 1 FROM tree_catalog.slots s WHERE s.database_name = current_database() AND s.schema_name = sch AND s.tree_name = nm AND slot = 'ROOT')),
                     tbl: 'tree_catalog.' || tree_sql_object_name('t', sch, nm)} END
@@ -44,10 +98,13 @@ CREATE OR REPLACE MACRO tree_compile_insert(sch, nm, source) AS (
   p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
   SELECT list_filter(['BEGIN TRANSACTION',
     tree_sql_frozen_guard(x.order_source, 'tree_insert'),
+    -- before the projection is evaluated, not after: a tie would otherwise be numbered first,
+    -- and under a declared PARENT it multiplies rows rather than merely reordering them
+    tree_compile_order_check((x.shape)."order", (x.shape).root, source, sch || '.' || nm),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
     tree_sql_shadow_check('__duckent_new', 'tree_insert'),
     'SELECT CASE WHEN count(*) > 0 THEN error(''tree_insert: ROOT values already present in ' || replace(sch || '.' || nm, '''', '''''') || ': '' || string_agg(DISTINCT n._root::VARCHAR, '', '')) END FROM __duckent_new n JOIN tree_state.partitions p ON p.root_key = n._root::VARCHAR AND p.database_name = ' || tree_sql_lit(x.db) || ' AND p.schema_name = ' || tree_sql_lit(sch) || ' AND p.tree_name = ' || tree_sql_lit(nm),
-    tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root),
+    tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
     -- BY NAME: the projection's column order follows the source's select list, which need
     -- not match the stored table's, and a positional INSERT misfiles same-typed columns
     'INSERT INTO ' || x.tbl || ' BY NAME SELECT * FROM __duckent_new',
@@ -60,9 +117,10 @@ CREATE OR REPLACE MACRO tree_compile_replace(sch, nm, source) AS (
   p AS (SELECT x, tree_compile_projection(x.shape, source, x.attr) AS proj FROM c)
   SELECT list_filter(['BEGIN TRANSACTION',
     tree_sql_frozen_guard(x.order_source, 'tree_replace'),
+    tree_compile_order_check((x.shape)."order", (x.shape).root, source, sch || '.' || nm),
     'CREATE TEMP TABLE __duckent_new AS ' || proj,
     tree_sql_shadow_check('__duckent_new', 'tree_replace'),
-    tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root),
+    tree_compile_p13('__duckent_new', sch || '.' || nm, x.has_root, (x.shape).level),
     'CREATE TEMP TABLE __duckent_epochs AS SELECT root_key, epoch FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT DISTINCT _root::VARCHAR FROM __duckent_new)',
     'DELETE FROM ' || x.tbl || ' WHERE _root::VARCHAR IN (SELECT root_key FROM __duckent_epochs)',
     'DELETE FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND root_key IN (SELECT root_key FROM __duckent_epochs)',
@@ -105,7 +163,17 @@ CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS (
   WITH c AS (SELECT tree_dml_context('tree_check', sch, nm) AS x)
   -- see tree_compile_delete on why the context is read in a predicate
   SELECT CASE WHEN x IS NULL THEN tree_err('tree_check: internal: no DML context') ELSE
-   ['BEGIN TRANSACTION',
+   list_filter(['BEGIN TRANSACTION',
+    -- The ORDER assertion is recorded, never raised (M3 §3.4), and only for a projection-mode
+    -- tree: a materialized one had its ORDER checked at the ingest that stored it, and its source
+    -- may since have moved on, while a projection-mode tree IS its source. It reads the same
+    -- duplicate relation the ingest check raises on. Unreachable until Task 7 lets a
+    -- projection-mode tree past tree_dml_context's refusal, which is the only thing standing
+    -- between this statement and the caller.
+    CASE WHEN x.storage <> 'projection' OR (x.shape)."order" IS NULL THEN NULL ELSE
+      'DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_order''' END,
+    CASE WHEN x.storage <> 'projection' OR (x.shape)."order" IS NULL THEN NULL ELSE
+      'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_order'', CASE WHEN count(*) FILTER (WHERE __o IS NULL OR __n > 1) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) FILTER (WHERE __o IS NULL OR __n > 1) || '' violating rows'' FROM ' || tree_sql_order_dup_rel((x.shape)."order", (x.shape).root, x.source) END,
     'DELETE FROM tree_state.assertions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || ' AND artifact = ''assert_p13''',
     'INSERT INTO tree_state.assertions SELECT ' || tree_sql_lit(x.db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ''assert_p13'', CASE WHEN count(*) = 0 THEN ''ok'' ELSE ''violated'' END, (SELECT max(epoch) FROM tree_state.partitions WHERE database_name = ' || tree_sql_lit(x.db) || ' AND schema_name = ' || tree_sql_lit(sch) || ' AND tree_name = ' || tree_sql_lit(nm) || '), count(*) || '' violating rows'' FROM (SELECT _level, _level - lag(_level, 1, -1) OVER (PARTITION BY _root ORDER BY _pre) AS d, row_number() OVER (PARTITION BY _root ORDER BY _pre) AS rn FROM ' || x.tbl || ') WHERE ' || tree_sql_p13_pred(),
-    'COMMIT'] END FROM c);
+    'COMMIT'], lambda s: s IS NOT NULL) END FROM c);

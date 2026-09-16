@@ -94,3 +94,59 @@ SELECT list(_pre ORDER BY _pre), max(_level), max(_size),
 FROM tree_project('main', 'plain_tree');
 ----
 [0, 1, 2]	0	0	[b]
+
+# Well-formedness at ingest (M3 §7.3): ORDER must be present and unique within a root, LEVEL
+# must be non-NULL and non-negative, and a partition that starts above level 0 says how to fix it.
+statement ok
+CREATE TABLE wf AS SELECT * FROM (VALUES
+  ('nulllevel', 0, 0), ('nulllevel', 1, NULL),
+  ('neglevel', 0, 0), ('neglevel', 1, -1),
+  ('nullorder', 0, 0), ('nullorder', NULL, 1),
+  ('tie', 0, 0), ('tie', 1, 1), ('tie', 1, 1),
+  ('onebased', 0, 1), ('onebased', 1, 2)) v(name, ord, lvl);
+
+statement error
+CALL tree_ddl_create('main', 'wf1', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''nulllevel'')'));
+----
+LEVEL is NULL in tree main.wf1
+
+statement error
+CALL tree_ddl_create('main', 'wf2', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''neglevel'')'));
+----
+LEVEL is negative in tree main.wf2
+
+statement error
+CALL tree_ddl_create('main', 'wf3', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''nullorder'')'));
+----
+ORDER is NULL in tree main.wf3
+
+statement error
+CALL tree_ddl_create('main', 'wf4', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''tie'')'));
+----
+has 2 rows with ORDER value 1; if the relation holds several trees whose ORDER restarts, declare ROOT
+
+# a tie makes _pre change between queries, so a projection-mode tree is checked at create too
+statement error
+CALL tree_ddl_create('main', 'wf4p', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''tie'')', storage := 'projection'));
+----
+ORDER is not a traversal in tree main.wf4p
+
+statement error
+CALL tree_ddl_create('main', 'wf5', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''onebased'')'));
+----
+rows start at level 1; if the source's levels are 1-based, declare LEVEL as 'lvl - 1'
+
+statement ok
+CALL tree_ddl_create('main', 'wf5ok', tree_spec(tree_shape("order" := 'ord', level := 'lvl - 1'), source := '(SELECT * FROM wf WHERE name = ''onebased'')'));
+
+# A tie under a declared PARENT is not only a _pre that changes between queries: PARENT is a
+# value in ORDER space translated by a LEFT JOIN on __order (M3 §2.2), so two rows sharing an
+# ORDER value make the projection return MORE rows than its source -- here 5 from 3. The ORDER
+# check refuses before any statement evaluates the projection.
+statement ok
+CREATE TABLE tiepar AS SELECT * FROM (VALUES (0, 0, NULL), (1, 1, 1), (1, 1, 1)) v(ord, lvl, par);
+
+statement error
+CALL tree_ddl_create('main', 'wf6', tree_spec(tree_shape("order" := 'ord', level := 'lvl', parent := 'par'), source := 'tiepar'));
+----
+ORDER is not a traversal in tree main.wf6

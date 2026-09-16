@@ -85,7 +85,10 @@ CALL tree_insert('main', 'scripts', 'bad_levels');
 ----
 P13 violated
 
-# P13 with no ROOT declared names the hint
+# Two trees in one relation with no ROOT declared: their ORDER restarts, which is a TIE within
+# the single default root, so the ORDER check refuses first and names the hint (M3 §3.2). This
+# record used to be refused by P13, whose message carried the ROOT hint; the hint moved here,
+# where the restart actually shows up, and P13 no longer mentions ROOT.
 statement ok
 CREATE TABLE two_trees(node_id INT, depth INT);
 
@@ -95,7 +98,7 @@ INSERT INTO two_trees VALUES (0, 0), (1, 1), (0, 0), (1, 1), (2, 2), (5, 5);
 statement error
 CALL tree_ddl_create('main', 'unrooted', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'two_trees'));
 ----
-declare ROOT
+ORDER is not a traversal in tree main.unrooted: root {'r0': 0} has 2 rows with ORDER value 0; if the relation holds several trees whose ORDER restarts, declare ROOT
 
 # the failed create left nothing behind
 query I
@@ -239,3 +242,12 @@ statement error
 CALL tree_check('main', NULL);
 ----
 tree_check: tree main.<NULL> not found
+
+# A tied ORDER is refused at ingest, before any statement evaluates the projection (M3 §3.2).
+# This is load-bearing for row counts, not only for _pre stability: a declared PARENT is
+# translated by a LEFT JOIN on __order, so two rows sharing an ORDER value under a declared
+# PARENT make the projection return MORE rows than its source.
+statement error
+CALL tree_insert('main', 'scripts', '(SELECT * REPLACE (0 AS node_id, ''tie.py'' AS file_path) FROM other_files LIMIT 2)');
+----
+ORDER is not a traversal in tree main.scripts
