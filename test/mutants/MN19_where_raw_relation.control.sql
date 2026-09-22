@@ -7,9 +7,9 @@
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
 -- would rewrite any user text that happened to contain it. Attribute and pseudo filters are
--- NULL-definite. p is the projection relation text and elem the tree's ELEMENT flag, both only
--- for the positional built-ins. MN19 mutates the where branch.
-CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, has_map, p, elem) AS
+-- NULL-definite. elem is the tree's ELEMENT flag, only for the positional built-ins.
+-- MN19 mutates the where branch.
+CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, has_map, elem) AS
   CASE kind
     WHEN 'type'   THEN alias || '._type = ' || tree_sql_lit(value)
     WHEN 'id'     THEN alias || '._id = ' || tree_sql_lit(value)
@@ -17,7 +17,7 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     -- The built-ins are compiled by tree_sql_builtin_pseudo, which returns NULL for every other
     -- name -- so this branch consults the one list rather than repeating it. A declared
     -- pseudo-class is a lookup in the projection's _pseudo map.
-    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, p, elem),
+    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, elem),
                                 'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)')
     -- An attribute resolves to a projected column first, then to ATTR MAP. The map is
     -- MAP(VARCHAR, VARCHAR), so a comparison against a number or a boolean has to cast the

@@ -3,9 +3,11 @@ CREATE OR REPLACE MACRO tree_canonical_columns() AS
   ['_root', '_pre', '_level', '_parent', '_size', '_children', '_next', '_type', '_id', '_classes', '_attr_map', '_element', '_pseudo'];
 
 -- One fragment per relation, each the single definition shared by combinators, groups and traversal.
--- a and b are step aliases; p is the projection relation text (needed where a third row is scanned);
--- elem says whether the tree declares ELEMENT, in which case the sibling and positional relations
--- must scan for the nearest *element* neighbour instead of using the O(1) pre/size arithmetic.
+-- a and b are step aliases; elem says whether the tree declares ELEMENT, in which case the sibling
+-- and positional relations must find the nearest *element* neighbour instead of using the O(1)
+-- pre/size arithmetic. No fragment takes the projection relation text any more: every query opens
+-- with the __proj and __sib CTEs (tree_sql_nav_ctes below), so a fragment that needs a third row
+-- names __proj or __sib rather than splicing another copy of the projection into itself.
 -- Every fragment is a pure expression with no SELECT of its own: sql/08_traversal.sql splices the
 -- text into query(), which in DuckDB 1.5.5 only accepts text from macros whose body has no
 -- SELECT or subquery.
@@ -34,13 +36,53 @@ CREATE OR REPLACE MACRO tree_sql_after(a, b) AS
   tree_sql_siblings(a, b) || ' AND ' || b || '._pre > ' || a || '._pre AND ' || b || '._element';
 CREATE OR REPLACE MACRO tree_sql_before(a, b) AS
   tree_sql_siblings(a, b) || ' AND ' || b || '._pre < ' || a || '._pre AND ' || b || '._element';
-CREATE OR REPLACE MACRO tree_sql_next_sibling(a, b, p, elem) AS
-  CASE WHEN elem THEN tree_sql_after(a, b) || ' AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c')
-                        || ' AND __c._pre > ' || a || '._pre AND __c._pre < ' || b || '._pre AND __c._element)'
+-- The two CTEs every compiled query opens with, and the only place the projection relation text is
+-- spelled: __proj is the projection, read once however many step aliases range over it, and __sib
+-- carries each row's nearest element neighbour on either side.
+--
+-- __sib is what makes the sibling and positional relations linear. The element-aware forms used to
+-- ask "is there a nearer element sibling than b?" as a NOT EXISTS correlated to each candidate
+-- PAIR, which is worse than quadratic in the number of children of one parent: measured at
+-- 0.03 s / 0.23 s / 3.5 s / 87.6 s on 300 / 600 / 1200 / 2400 flat children, and at 3000 it does
+-- not finish at all -- it exhausts 6 GB of memory and 24 GB of spill. One pass of two window
+-- functions answers it for every row at once, in 0.19 s at 3000. FINDINGS.md "M3 sibling
+-- relations" has the table and how it was taken.
+--
+-- Only the PAIR relations were ever the problem. The positional forms (first-child, last-child)
+-- asked the same question of ONE row, which DuckDB plans as an anti-join, and they were never
+-- quadratic: the window form wins them by single digits, not by orders of magnitude.
+--
+-- first_value/last_value with IGNORE NULLS over a frame that EXCLUDES the current row: the frame
+-- `1 FOLLOWING .. UNBOUNDED FOLLOWING` holds exactly the later siblings, and the CASE maps a
+-- non-element to NULL, so IGNORE NULLS skips it and the first surviving value is the nearest later
+-- ELEMENT sibling's _pre (NULL when there is none). __prev_el is the same thing backwards.
+--
+-- The CASE is why _element must be NULL-FREE, and sql/02_projection.sql guarantees it: every
+-- projection emits `COALESCE(<element expr, or true when none declared>, false) AS _element`. A
+-- nullable _element would make `CASE WHEN _element THEN _pre END` NULL for "not an element" and
+-- for "unknown" alike, and IGNORE NULLS would silently skip the second as though it were the first.
+--
+-- PARTITION BY _root, _parent is the sibling relation itself, and it groups the level-0 rows of a
+-- partition together through their shared NULL _parent -- the same reading tree_sql_siblings gets
+-- from IS NOT DISTINCT FROM, so a partition's first root is a first child here too.
+CREATE OR REPLACE MACRO tree_sql_nav_ctes(proj_rel) AS
+  'WITH __proj AS (SELECT * FROM ' || proj_rel || '), '
+  || '__sib AS (SELECT _root, _pre, '
+  || 'first_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS __next_el, '
+  || 'last_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS __prev_el '
+  || 'FROM __proj) ';
+
+-- The nearest element sibling, in either direction, looked up in __sib instead of scanned for.
+-- The element branch needs only tree_sql_siblings as its base, not tree_sql_after/before: b is
+-- pinned to the _pre __sib already computed, which is by construction a LATER (earlier) row and an
+-- ELEMENT one, so the ordering and _element conjuncts those add would be restating the lookup.
+CREATE OR REPLACE MACRO tree_sql_next_sibling(a, b, elem) AS
+  CASE WHEN elem
+       THEN tree_sql_siblings(a, b) || ' AND ' || b || '._pre = (SELECT __s.__next_el FROM __sib __s WHERE __s._root = ' || a || '._root AND __s._pre = ' || a || '._pre)'
        ELSE tree_sql_siblings(a, b) || ' AND ' || b || '._pre = ' || a || '._pre + ' || a || '._size + 1' END;
-CREATE OR REPLACE MACRO tree_sql_prev_sibling(a, b, p, elem) AS
-  CASE WHEN elem THEN tree_sql_before(a, b) || ' AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c')
-                        || ' AND __c._pre < ' || a || '._pre AND __c._pre > ' || b || '._pre AND __c._element)'
+CREATE OR REPLACE MACRO tree_sql_prev_sibling(a, b, elem) AS
+  CASE WHEN elem
+       THEN tree_sql_siblings(a, b) || ' AND ' || b || '._pre = (SELECT __s.__prev_el FROM __sib __s WHERE __s._root = ' || a || '._root AND __s._pre = ' || a || '._pre)'
        ELSE tree_sql_siblings(a, b) || ' AND ' || a || '._pre = ' || b || '._pre + ' || b || '._size + 1' END;
 -- Positional fragments constrain the row a alone: combine with tree_sql_children to anchor it.
 --
@@ -54,12 +96,17 @@ CREATE OR REPLACE MACRO tree_sql_prev_sibling(a, b, p, elem) AS
 -- because _pre is the partition's preorder index. last_child needs nothing: its O(1) form is the
 -- scan with the element conjunct dropped, so it already answers the same on roots. 33_navigation
 -- pins both, as row sets and as totals, against a tree that declares `element := 'true'`.
-CREATE OR REPLACE MACRO tree_sql_first_child(a, p, elem) AS
-  CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre < ' || a || '._pre AND __c._element)'
+CREATE OR REPLACE MACRO tree_sql_first_child(a, elem) AS
+  CASE WHEN elem
+       THEN a || '._element AND (SELECT __s.__prev_el FROM __sib __s WHERE __s._root = ' || a || '._root AND __s._pre = ' || a || '._pre) IS NULL'
        ELSE 'COALESCE(' || a || '._pre = ' || a || '._parent + 1, ' || a || '._pre = 0)' END;
-CREATE OR REPLACE MACRO tree_sql_last_child(a, p, elem) AS
-  CASE WHEN elem THEN a || '._element AND NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre AND __c._element)'
-       ELSE 'NOT EXISTS (SELECT 1 FROM ' || p || ' __c WHERE ' || tree_sql_siblings(a, '__c') || ' AND __c._pre > ' || a || '._pre)' END;
+CREATE OR REPLACE MACRO tree_sql_last_child(a, elem) AS
+  CASE WHEN elem
+       THEN a || '._element AND (SELECT __s.__next_el FROM __sib __s WHERE __s._root = ' || a || '._root AND __s._pre = ' || a || '._pre) IS NULL'
+       -- the row after a's subtree, if any, is a's next sibling exactly when it shares a's parent,
+       -- so "no later sibling" is one keyed lookup rather than a scan of every later row
+       ELSE 'NOT EXISTS (SELECT 1 FROM __proj __x WHERE __x._root = ' || a || '._root AND __x._pre = ' || a || '._pre + ' || a || '._size + 1'
+            || ' AND __x._parent IS NOT DISTINCT FROM ' || a || '._parent)' END;
 -- The root test. Named tree_sql_is_root, not tree_sql_root as the M2 design table has it:
 -- sql/02_projection.sql already owns tree_sql_root(root_csv, qual) (the ROOT key expression),
 -- and CREATE OR REPLACE MACRO on a different arity drops the existing overload rather than
@@ -70,12 +117,12 @@ CREATE OR REPLACE MACRO tree_sql_is_root(a) AS a || '._level = 0';
 -- tree_sql_subtree/tree_sql_children to drop the root equality.
 -- 'self' only ever arrives here as a group's first inner step, which sql/06_selector.sql
 -- enforces when the IR is built; nothing else in the compiler treats it specially.
-CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
+CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, elem) AS
   CASE op
     WHEN 'desc'  THEN tree_sql_subtree(a, b)
     WHEN 'child' THEN tree_sql_children(a, b)
     WHEN 'self'  THEN tree_sql_self(a, b)
-    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
+    WHEN 'next'  THEN tree_sql_next_sibling(a, b, elem)
     WHEN 'after' THEN tree_sql_after(a, b)
     -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain
     -- defaults that one before it gets here, so a NULL arriving is hand-built IR -- which is
@@ -95,10 +142,10 @@ CREATE OR REPLACE MACRO tree_builtin_pseudos() AS ['first-child', 'last-child'];
 -- reverse). The built-ins go through the navigation fragments rather than being spelled out
 -- again, so a tree that declares ELEMENT gets the first *element* child instead of the row at
 -- _parent + 1.
-CREATE OR REPLACE MACRO tree_sql_builtin_pseudo(name, alias, p, elem) AS
+CREATE OR REPLACE MACRO tree_sql_builtin_pseudo(name, alias, elem) AS
   CASE WHEN NOT list_contains(tree_builtin_pseudos(), name) THEN NULL
-       WHEN name = 'first-child' THEN tree_sql_first_child(alias, p, elem)
-       WHEN name = 'last-child'  THEN tree_sql_last_child(alias, p, elem) END;
+       WHEN name = 'first-child' THEN tree_sql_first_child(alias, elem)
+       WHEN name = 'last-child'  THEN tree_sql_last_child(alias, elem) END;
 
 -- Whether a DESCRIBE column_type names a number. Spelled out rather than pattern-matched: the
 -- alternation a regex would need (U?, INT vs INTEGER, the INT1..INT8 aliases) is longer than the
@@ -134,9 +181,9 @@ CREATE OR REPLACE MACRO tree_sql_attr_col_cmp(alias, col, ctype, op, arg) AS
 
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
 -- would rewrite any user text that happened to contain it. Attribute and pseudo filters are
--- NULL-definite. p is the projection relation text and elem the tree's ELEMENT flag, both only
--- for the positional built-ins. MN19 mutates the where branch.
-CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, has_map, p, elem) AS
+-- NULL-definite. elem is the tree's ELEMENT flag, only for the positional built-ins.
+-- MN19 mutates the where branch.
+CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, has_map, elem) AS
   CASE kind
     WHEN 'type'   THEN alias || '._type = ' || tree_sql_lit(value)
     WHEN 'id'     THEN alias || '._id = ' || tree_sql_lit(value)
@@ -144,7 +191,7 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
     -- The built-ins are compiled by tree_sql_builtin_pseudo, which returns NULL for every other
     -- name -- so this branch consults the one list rather than repeating it. A declared
     -- pseudo-class is a lookup in the projection's _pseudo map.
-    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, p, elem),
+    WHEN 'pseudo' THEN COALESCE(tree_sql_builtin_pseudo(value, alias, elem),
                                 'COALESCE(' || alias || '._pseudo[' || tree_sql_lit(value) || '], false)')
     -- An attribute resolves to a projected column first, then to ATTR MAP. The map is
     -- MAP(VARCHAR, VARCHAR), so a comparison against a number or a boolean has to cast the
@@ -191,7 +238,9 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
 -- One step chain as FROM text. `steps` is STRUCT(node_id, alias, op, pred)[] in chain order and
 -- `anchor` is the alias of the enclosing step when the chain is a group's, NULL when it is the
 -- selector's own. Produces
---   <P> a1 JOIN <P> a2 ON <comb(a1, a2)> AND (<pred2>) ... WHERE <comb(anchor, a1) AND> <pred1>
+--   __proj a1 JOIN __proj a2 ON <comb(a1, a2)> AND (<pred2>) ... WHERE <comb(anchor, a1) AND> <pred1>
+-- Every alias ranges over __proj, the single projection CTE the query opens with, so a selector of
+-- n steps reads the projection once rather than splicing n copies of its text.
 -- The first step has nothing before it to join against, so its predicate becomes the WHERE. At
 -- the top level that predicate is the whole WHERE and needs no parentheses; inside a group it is
 -- ANDed with the relation to the anchor, so there it is parenthesized like every joined step's.
@@ -199,11 +248,11 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
 -- The empty-step refusal is the fragment's own guard, not the compiler's: a group with no inner
 -- steps contributes no row to the fold's group pass, so nothing would call this for it. That case
 -- is refused in chk. This branch is what stops a direct caller emitting a FROM with no relation.
-CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
+CREATE OR REPLACE MACRO tree_sql_chain(steps, anchor, elem) AS
   CASE WHEN steps IS NULL OR len(steps) = 0 THEN tree_err('tree_match: empty group') ELSE
     list_aggregate(list_transform(steps, lambda s, i:
-        CASE WHEN i = 1 THEN p || ' ' || (s).alias
-             ELSE 'JOIN ' || p || ' ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, p, elem)
+        CASE WHEN i = 1 THEN '__proj ' || (s).alias
+             ELSE 'JOIN __proj ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, elem)
                   || ' AND (' || (s).pred || ')' END), 'string_agg', ' ')
     || ' WHERE '
     -- COALESCE, although tree_steps already defaults a group's first inner step to desc: only the
@@ -211,15 +260,15 @@ CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
     -- combinator is asked for. A hand-built IR that breaks that invariant would otherwise reach
     -- tree_sql_comb with a NULL op, whose refusal message concatenates to NULL and raises nothing.
     || CASE WHEN anchor IS NULL THEN (steps[1]).pred
-            ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem) || ' AND (' || (steps[1]).pred || ')' END
+            ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, elem) || ' AND (' || (steps[1]).pred || ')' END
   END;
 
 -- A HAS/NOT group as a predicate on the step it hangs off: the group's own chain, anchored on
 -- that step, under an (NOT) EXISTS. One definition, called once per unrolled pass of the fold --
 -- which is also what filters `kind` down to 'has' or 'not' before it gets here.
-CREATE OR REPLACE MACRO tree_sql_group(kind, p, steps, anchor, elem) AS
+CREATE OR REPLACE MACRO tree_sql_group(kind, steps, anchor, elem) AS
   CASE WHEN kind = 'not' THEN 'NOT ' ELSE '' END
-  || 'EXISTS (SELECT 1 FROM ' || tree_sql_chain(p, steps, anchor, elem) || ')';
+  || 'EXISTS (SELECT 1 FROM ' || tree_sql_chain(steps, anchor, elem) || ')';
 
 -- The compiler is a fold over the IR: every node's text is built from its children's, so the
 -- chain and the HAS/NOT groups hanging off its steps are compiled by the same two rules applied
@@ -443,7 +492,7 @@ n AS (
 -- leaves chk to say what is actually wrong, and it says it whatever the selector asks for.
 clause AS (
   SELECT c.parent_id AS step, c.node_id AS id,
-         tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias, cfg.attr_cols, cfg.has_map, cfg.p, cfg.elem) AS txt
+         tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias, cfg.attr_cols, cfg.has_map, cfg.elem) AS txt
   FROM n c JOIN n s ON s.node_id = c.parent_id AND s.kind = 'step' CROSS JOIN cfg
   WHERE c.kind NOT IN ('has', 'not', 'step') AND cfg.known),
 -- Each pass is two CTEs: the first gathers a group's inner chain into one list column, the second
@@ -459,7 +508,7 @@ grpA0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepA x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpA AS (
-  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpA0 g CROSS JOIN cfg),
 partB AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpA g),
 stepB AS (
@@ -472,7 +521,7 @@ grpB0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepB x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpB AS (
-  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpB0 g CROSS JOIN cfg),
 partC AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpB g),
 stepC AS (
@@ -490,11 +539,15 @@ out AS (
   -- list() over no rows is NULL, and a selector with no steps is chk's to refuse in its own
   -- words: chk and this CTE are not ordered against each other, so tree_sql_chain's empty-group
   -- refusal must not get there first. Aggregating without GROUP BY keeps the one row either way.
-  SELECT CASE WHEN g.steps IS NULL THEN NULL ELSE tree_sql_chain(cfg.p, g.steps, NULL, cfg.elem) END AS from_sql,
-         g.subject, g.captures, cfg.lang
+  SELECT CASE WHEN g.steps IS NULL THEN NULL ELSE tree_sql_chain(g.steps, NULL, cfg.elem) END AS from_sql,
+         g.subject, g.captures, cfg.lang, cfg.p AS proj_rel
   FROM top0 g CROSS JOIN cfg)
 SELECT CASE WHEN NOT (SELECT ok FROM chk) OR NOT (SELECT bool_and(ok) FROM n) THEN NULL ELSE
-  'SELECT ' || subject || '.* EXCLUDE (' || list_aggregate(tree_canonical_columns(), 'string_agg', ', ') || ')'
+  -- The query opens with __proj and __sib: the projection read once however many step aliases
+  -- range over it, and the window the sibling and positional relations read instead of scanning.
+  -- This is the ONE place the projection relation text still appears in a compiled query.
+  tree_sql_nav_ctes(proj_rel)
+  || 'SELECT ' || subject || '.* EXCLUDE (' || list_aggregate(tree_canonical_columns(), 'string_agg', ', ') || ')'
   || COALESCE(', ' || list_aggregate(list_transform(list_filter(captures, lambda a: a <> subject), lambda a: a || ' AS ' || a), 'string_agg', ', '), '')
   -- The language the selector was WRITTEN in: the caller's `language :=` if they named one, else
   -- the name the FRONT-END stamped on the IR's root row (tree_selector_language). Not read from

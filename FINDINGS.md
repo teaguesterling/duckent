@@ -204,6 +204,71 @@ So the change is a large win on the shapes real sources have and a regression on
 shape, with the known-bad shape unchanged. It is not a substitute for declaring SIZE when the
 source has one.
 
+## M3 sibling relations
+
+`test/spike_listspace.py --siblings` (2026-09-21, DuckDB 1.5.5, one machine, best of three after a
+warm-up; the scanning form in a child process bounded to 6 GB of memory and 24 GB of spill). M3
+Task 8 replaced the element-aware sibling and positional relations — which asked "is there a nearer
+element sibling?" as a `NOT EXISTS` correlated to each candidate — with a single window pass, the
+`__sib` CTE carrying each row's nearest element neighbour on either side.
+
+One flat root, every third row a non-element, so every relation is answered within one parent's
+child list and the width of that list is the variable. `independent` is a third implementation —
+plain `lead()` / `row_number()` over the element rows, written from the definitions and from
+neither form — and every completed cell has all three agreeing.
+
+| children | relation | scanning | window | speedup |
+|---|---|---|---|---|
+| 300 | `next` | 0.030 s | 0.006 s | 5× |
+| 600 | `next` | 0.231 s | 0.016 s | 14× |
+| 1,200 | `next` | 3.457 s | 0.045 s | 76× |
+| 2,400 | `next` | 87.630 s | 0.153 s | **574×** |
+| 3,000 | `next` | **does not finish** | 0.189 s | — |
+| 3,000 | `first-child` | 0.098 s | 0.020 s | 5× |
+| 3,000 | `last-child` | 0.109 s | 0.016 s | 7× |
+
+**The pair relations were the problem and the positional ones never were.** `next` grows worse than
+quadratically — doubling the width from 1,200 to 2,400 costs 25× — and at 3,000 it does not finish
+at all: it exhausts 6 GB of memory and 24 GB of spill, and unbounded it was OOM-killed at 19.5 GB
+resident. The window form is linear across the same range. But `first-child` and `last-child` asked
+their question of ONE row, which DuckDB plans as an anti-join, and they were never quadratic: the
+window wins them by 5–7×, and at 300–600 rows the two forms are within noise of each other (both
+under 20 ms). The rewrite is a large win on one relation and a tidy-up on the other two.
+
+**A claim was corrected rather than carried.** The task's own comments said the 3,000-child record
+"took 3m24s" on the scanning form. That number is not reproducible and the evidence contradicts it:
+at 3,000 the scanning form does not complete under any budget tried, in either join shape (the
+comma-join the probe hand-writes and the `JOIN … ON` the compiler emitted were measured separately
+and both exhaust the same 22.3 GiB). The comments in `sql/07_match.sql` and
+`test/sql/33_navigation.test` now quote the measured curve instead, and the 2,400 row is there
+because it is the widest one that yields a time at all.
+
+**Two defects in the probe harness, found by running it.** Both are fixed in this task:
+
+- **A child that dies without posting hung the parent forever.** `sib_old_timed` joined with a
+  timeout, then called `q.get()` — and an OOM-killed child posts nothing, so `pr.is_alive()` was
+  already false and the timeout branch never fired. The first attempt at this table sat on that
+  `get` for two hours. `derived_cost` (from Task 6) had the identical bug and had simply never had
+  a child die early; both now go through one `run_child` helper that distinguishes *still running*
+  from *exited without a result* from *posted*. The M3 derivation cost table above was taken before
+  this fix, and is unaffected — every cell there either timed out while alive or completed.
+- **The probe built its tree from a generating subquery, not a table.** The scanning form names the
+  projection relation three times, so with a `range(n)` subquery as the source every correlated
+  probe re-ran the generator through the projection — a cost the compiled form never had. Measured
+  that way the 3,000-row cell was OOM-killed, which would have been recorded as a fact about the
+  scanning form when it was a fact about the harness. `sib_setup` now materializes its source, as
+  the `33_navigation` record and every real source do.
+
+**"One projection per query" was checked in the plan, not assumed.** A three-step selector plans as
+three `CTE_SCAN`s of one CTE index rather than three scans of the source. The `__sib` window costs
+nothing when unused: a selector with no sibling relation plans with zero `WINDOW` operators even on
+a tree that declares ELEMENT, and exactly one when `next` is asked for. So the CTEs are not a tax
+paid by every query for a feature few use.
+
+A C++ port keeps the shape of this: `__sib` is one ordered pass over a partition, which is what a
+node cursor does anyway. What it removes is the compiler's need to spell the projection into every
+fragment — the fragments name a relation, and binding decides what that relation is.
+
 ## M2 differential adjudications
 
 The corpus import (`test/import_astcss_eval.py`) runs all 108 accepted astcss-eval pairs against
@@ -427,7 +492,7 @@ Where the prototype knowingly differs from `docs/superpowers/specs/2026-09-13-du
 - ~~The match compiler is a linear chain over `lag(alias)`, not the `WITH RECURSIVE … USING KEY` bottom-up fold of §6.1.~~ Closed in M2: it is a bottom-up fold over the IR, but unrolled to `tree_group_depth_limit()` group levels rather than run as a `USING KEY` recursion — the readiness test that shape needs is a `recurring.<cte>` reference inside a correlated `NOT EXISTS`, which 1.5.5 refuses (see the design-phase findings). The number of levels is fixed by the IR's own ceiling, so the unrolling is total, and `sql/06_selector.sql`'s printer is unrolled the same way for the same reason.
 - `tree_ddl_alter` refuses outright when a materialized tree holds partitions ingested after create (C1 below), which §4 does not mention.
 - ~~An unknown attribute name in a match refuses through DuckDB's binder, not through a compile-time check against `_attr_map`.~~ Closed in M2: `tree_sql_clause` resolves an attribute against the `attribute_columns` artifact first, then against `ATTR MAP` with a cast implied by the comparison literal, and refuses at compile time naming the attribute when neither serves it. Note the limit of "neither serves the name": a map's keys are data, so on a tree that declares `ATTR MAP` every name is servable and an absent key reads as no match. §6.1's compile-time refusal can only ever mean "no projected column and no map".
-- Coverage note (M2 task 11, `test/sql/42_second_differential.test`): a wrong SIZE or CHILDREN is all but invisible through selectors. `_children` is read by no fragment in `sql/07_match.sql` or `sql/08_traversal.sql` (it appears only in `tree_canonical_columns()`), and `_size` is read by `tree_sql_subtree` plus the O(1) sibling/positional forms — which a tree that declares ELEMENT never uses, because those fragments then scan for the nearest *element* neighbour instead. On `app.parquet` that leaves exactly one selector whose answer moves when SIZE is perturbed by one (`attribute identifier`: app.py:50 is the last descendant of its `attribute`). 42 therefore compares the declared and derived *projections* column for column as well as running the corpus selectors; a suite that only ran selectors would not have caught a broken derivation of either column.
+- Coverage note (M2 task 11, `test/sql/42_second_differential.test`): a wrong SIZE or CHILDREN is all but invisible through selectors. `_children` is read by no fragment in `sql/07_match.sql` or `sql/08_traversal.sql` (it appears only in `tree_canonical_columns()`), and `_size` is read by `tree_sql_subtree` plus the O(1) sibling/positional forms — which a tree that declares ELEMENT never uses, because those fragments then scan for the nearest *element* neighbour instead. On `app.parquet` that leaves exactly one selector whose answer moves when SIZE is perturbed by one (`attribute identifier`: app.py:50 is the last descendant of its `attribute`). 42 therefore compares the declared and derived *projections* column for column as well as running the corpus selectors; a suite that only ran selectors would not have caught a broken derivation of either column. **Updated by M3 Task 8:** `tree_sql_last_child`'s non-ELEMENT branch used to scan for a later sibling and read no `_size`; it now asks whether the row at `_pre + _size + 1` is a sibling, so `:last-child` on a tree that declares no ELEMENT is size-sensitive where it was not before. That widens selector visibility of a wrong SIZE slightly — the count of app.parquet selectors whose answer moves under a one-off perturbation was measured before this change and is no longer known to be one. It does not weaken the reason 42 compares projections column for column.
 - Mutant coverage: the derived parent join's `a._root = b._root` scoping is now covered by a test in `test/sql/10_projection.test` over `scripts.parquet`, but no mutant id is reserved for it (MN22–MN25 are already assigned by the handover). It is recorded as `also_kills` under MN02 in `test/mutants/manifest.yaml`; if the convention later allows a new id, that is the mutant to plant.
 
 ## 2026-09-14 review of PR #1

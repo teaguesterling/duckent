@@ -25,7 +25,7 @@ CREATE OR REPLACE MACRO tree_proj_sql(sch, nm) AS 'tree_catalog.' || tree_sql_ob
 -- value the caller gave -- `'6'` still equals 6, `5.7` equals nothing, since a tree's _pre values
 -- are integers -- and still refuses text that is not a number at all.
 CREATE OR REPLACE MACRO tree_nav(sch, nm, root_key, pre, rel) AS TABLE
-  FROM query('SELECT b.* FROM ' || tree_proj_sql(sch, nm) || ' a, ' || tree_proj_sql(sch, nm) || ' b WHERE a._root::VARCHAR = '
+  FROM query(tree_sql_nav_ctes(tree_proj_sql(sch, nm)) || 'SELECT b.* FROM __proj a, __proj b WHERE a._root::VARCHAR = '
              || COALESCE(tree_sql_lit(root_key), 'NULL') || ' AND a._pre = ' || COALESCE(CAST(CAST(pre AS DOUBLE) AS VARCHAR), 'NULL') || ' AND ' || rel);
 
 -- The element flag passed to the fragments is always true here. Deciding it properly needs a
@@ -50,11 +50,11 @@ CREATE OR REPLACE MACRO tree_parent(sch, nm, root_key, pre) AS TABLE
 CREATE OR REPLACE MACRO tree_siblings(sch, nm, root_key, pre) AS TABLE
   FROM tree_nav(sch, nm, root_key, pre, tree_sql_siblings('a', 'b'));
 CREATE OR REPLACE MACRO tree_next_sibling(sch, nm, root_key, pre) AS TABLE
-  FROM tree_nav(sch, nm, root_key, pre, tree_sql_next_sibling('a', 'b', tree_proj_sql(sch, nm), true));
+  FROM tree_nav(sch, nm, root_key, pre, tree_sql_next_sibling('a', 'b', true));
 CREATE OR REPLACE MACRO tree_prev_sibling(sch, nm, root_key, pre) AS TABLE
-  FROM tree_nav(sch, nm, root_key, pre, tree_sql_prev_sibling('a', 'b', tree_proj_sql(sch, nm), true));
+  FROM tree_nav(sch, nm, root_key, pre, tree_sql_prev_sibling('a', 'b', true));
 -- The positional fragments constrain b alone; tree_sql_children anchors it under a.
 CREATE OR REPLACE MACRO tree_first_child(sch, nm, root_key, pre) AS TABLE
-  FROM tree_nav(sch, nm, root_key, pre, tree_sql_children('a', 'b') || ' AND ' || tree_sql_first_child('b', tree_proj_sql(sch, nm), true));
+  FROM tree_nav(sch, nm, root_key, pre, tree_sql_children('a', 'b') || ' AND ' || tree_sql_first_child('b', true));
 CREATE OR REPLACE MACRO tree_last_child(sch, nm, root_key, pre) AS TABLE
-  FROM tree_nav(sch, nm, root_key, pre, tree_sql_children('a', 'b') || ' AND ' || tree_sql_last_child('b', tree_proj_sql(sch, nm), true));
+  FROM tree_nav(sch, nm, root_key, pre, tree_sql_children('a', 'b') || ' AND ' || tree_sql_last_child('b', true));

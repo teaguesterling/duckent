@@ -8,7 +8,9 @@
 -- One step chain as FROM text. `steps` is STRUCT(node_id, alias, op, pred)[] in chain order and
 -- `anchor` is the alias of the enclosing step when the chain is a group's, NULL when it is the
 -- selector's own. Produces
---   <P> a1 JOIN <P> a2 ON <comb(a1, a2)> AND (<pred2>) ... WHERE <comb(anchor, a1) AND> <pred1>
+--   __proj a1 JOIN __proj a2 ON <comb(a1, a2)> AND (<pred2>) ... WHERE <comb(anchor, a1) AND> <pred1>
+-- Every alias ranges over __proj, the single projection CTE the query opens with, so a selector of
+-- n steps reads the projection once rather than splicing n copies of its text.
 -- The first step has nothing before it to join against, so its predicate becomes the WHERE. At
 -- the top level that predicate is the whole WHERE and needs no parentheses; inside a group it is
 -- ANDed with the relation to the anchor, so there it is parenthesized like every joined step's.
@@ -16,11 +18,11 @@
 -- The empty-step refusal is the fragment's own guard, not the compiler's: a group with no inner
 -- steps contributes no row to the fold's group pass, so nothing would call this for it. That case
 -- is refused in chk. This branch is what stops a direct caller emitting a FROM with no relation.
-CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
+CREATE OR REPLACE MACRO tree_sql_chain(steps, anchor, elem) AS
   CASE WHEN steps IS NULL OR len(steps) = 0 THEN tree_err('tree_match: empty group') ELSE
     list_aggregate(list_transform(steps, lambda s, i:
-        CASE WHEN i = 1 THEN p || ' ' || (s).alias
-             ELSE 'JOIN ' || p || ' ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, p, elem)
+        CASE WHEN i = 1 THEN '__proj ' || (s).alias
+             ELSE 'JOIN __proj ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, elem)
                   || ' AND (' || (s).pred || ')' END), 'string_agg', ' ')
     || ' WHERE '
     -- COALESCE, although tree_steps already defaults a group's first inner step to desc: only the
@@ -28,5 +30,5 @@ CREATE OR REPLACE MACRO tree_sql_chain(p, steps, anchor, elem) AS
     -- combinator is asked for. A hand-built IR that breaks that invariant would otherwise reach
     -- tree_sql_comb with a NULL op, whose refusal message concatenates to NULL and raises nothing.
     || CASE WHEN anchor IS NULL THEN (steps[1]).pred
-            ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem) || ' AND (' || (steps[1]).pred || ')' END
+            ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, elem) || ' AND (' || (steps[1]).pred || ')' END
   END;

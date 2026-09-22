@@ -33,7 +33,7 @@ implementation pays for that grouping, so the timing includes it.
 
 Run: python3 test/spike_listspace.py [--reps N] [--derived-timeout SECONDS]
 """
-import argparse, multiprocessing, os, statistics, sys, time
+import argparse, multiprocessing, os, queue, statistics, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import css_parser
@@ -187,11 +187,11 @@ def materialize(con, tree, p):
     return sub, st, time.perf_counter() - t0
 
 
-def _derived_child(source, attr, q):
+def _derived_child(source, attr, mem, spill, q):
     """Time the derived-size projection in a child process, so the parent can give up on it."""
     try:
         s = runner.Session()
-        s.con.execute("SET enable_progress_bar = false")
+        child_guard(s.con, mem, spill)
         shape_nosize = SHAPE.replace(" size := 'descendant_count',", "")
         sql = s.con.execute("SELECT tree_compile_projection(%s, ?, ?)" % shape_nosize,
                             [source, attr]).fetchone()[0]
@@ -202,23 +202,74 @@ def _derived_child(source, attr, q):
         q.put(("err", str(e), None))
 
 
-def derived_cost(con, source, timeout):
+# Both probes below run a form that may not finish in a child process, so the parent can give up
+# on it. Collecting that child's answer is where they used to go wrong, and identically, so it is
+# written once here.
+#
+# THREE outcomes, not two. A child that is still running at `timeout` is terminated and reported;
+# a child that FINISHED and posted is read; and a child that exited WITHOUT posting -- which is
+# what the kernel's OOM killer leaves behind -- is reported as dead with its exit code. That third
+# case is why this helper exists: `q.get()` on a queue nothing was ever put on blocks forever, and
+# the --siblings probe sat on exactly that get for two hours after its 3000-row scanning cell was
+# OOM-killed at 19.5 GB RSS. `pr.is_alive()` was already false, so the timeout branch did not fire.
+#
+# The children bound their own memory (see child_guard) so this path stays rare, but a bound the
+# kernel enforces instead of DuckDB is always possible and must not hang the probe.
+def run_child(target, args, timeout):
+    """Run `target(*args, q)` in a child process; return its ('ok'|'err', value, extra) tuple.
+
+    ('over', timeout, None) when it was still running at `timeout`, and ('died', exitcode, None)
+    when it exited without posting."""
+    q = multiprocessing.Queue()
+    pr = multiprocessing.Process(target=target, args=tuple(args) + (q,))
+    pr.start()
+    pr.join(timeout)
+    if pr.is_alive():
+        pr.terminate(); pr.join()
+        return ("over", timeout, None)
+    try:
+        return q.get(timeout=10)
+    # Empty is the clean case: the child exited and wrote nothing. A child killed or broken
+    # mid-write -- or one that died before its interpreter finished starting -- tears the pipe
+    # down instead, and that surfaces as EOFError or ConnectionResetError from the same get.
+    # All three mean the same thing here, and none of them may be allowed to propagate: the
+    # whole point of this helper is that a dead child is a reported cell, not a failed probe.
+    except (queue.Empty, EOFError, ConnectionResetError, OSError):
+        return ("died", pr.exitcode, None)
+
+
+# A child inherits none of the parent's limits, and an unbounded DuckDB in a child is how the
+# machine gets an OOM kill instead of an error. Bounding memory turns "the kernel killed it" into
+# "DuckDB raised Out of Memory", which the probe can catch, report, and carry on from -- and
+# bounding the spill keeps a runaway form from filling the disk with .tmp as one already did.
+# The two budgets are separate on purpose. `mem` is RAM, and a form that exceeds it SPILLS rather
+# than failing -- that is DuckDB working as intended, and the scanning form is meant to be allowed
+# to do it, since spilling is how it finished at all when 33_navigation measured it. `spill` caps
+# the .tmp directory so a runaway form cannot fill the disk, which one already did to 16 GB.
+# Setting the two equal (an earlier version of this guard did) turns every spill into a failure and
+# reports "out of memory" for a form that would have finished.
+def child_guard(con, mem, spill):
+    con.execute("SET enable_progress_bar = false")
+    if mem:
+        con.execute("SET memory_limit = '%s'" % mem)
+    if spill:
+        con.execute("SET max_temp_directory_size = '%s'" % spill)
+
+
+def derived_cost(con, source, timeout, mem=None, spill=None):
     """(declared seconds, derived seconds or None, rows) for one source."""
     sql = con.execute("SELECT tree_compile_projection(%s, ?, ?)" % SHAPE, [source, "*"]).fetchone()[0]
     t0 = time.perf_counter()
     declared = con.execute("SELECT count(*), sum(_size) FROM (%s)" % sql).fetchone()
     dt = time.perf_counter() - t0
 
-    q = multiprocessing.Queue()
-    p = multiprocessing.Process(target=_derived_child, args=(source, "*", q))
-    p.start()
-    p.join(timeout)
-    if p.is_alive():
-        p.terminate(); p.join()
+    status, value, rows = run_child(_derived_child, (source, "*", mem, spill), timeout)
+    if status == "over":
         return dt, None, declared, None
-    status, value, rows = q.get()
+    if status == "died":
+        return dt, None, declared, "child exited without a result (exit code %s)" % value
     if status != "ok":
-        return dt, None, declared, "failed: " + value
+        return dt, None, declared, "failed: " + str(value)
     return dt, value, declared, ("derived sums match" if rows == declared else
                                  "DIVERGED: declared %s, derived %s" % (declared, rows))
 
@@ -248,6 +299,165 @@ def run_sizes(con, reps):
                  "yes" if bad == 0 else "NO -- %d rows differ" % bad))
 
 
+# --- the M3 sibling-relation probe (--siblings) -------------------------------------------
+# Before M3 Task 8 the element-aware sibling and positional relations asked "is there a nearer
+# element sibling?" as a NOT EXISTS correlated to each candidate PAIR, which is quadratic in the
+# width of ONE parent. Task 8 replaced that with a single window pass (the __sib CTE) carrying
+# each row's nearest element neighbour on either side. This probe is the two forms on the shape
+# that makes the difference visible: one flat root, every third row a non-element.
+#
+# The scanning form is spelled out here rather than reached through the macros -- the macros no
+# longer emit it -- and runs in a CHILD PROCESS under a timeout, because on the larger inputs it
+# does not finish in any useful time. A cell that does not finish is reported as such rather than
+# quietly dropped.
+#
+# `independent` is NEITHER form: a plain lead()/row_number() over the element rows, which answers
+# what the DEFINITIONS say and is linear at every size. It is what says the window form is right
+# at the sizes where the scanning form cannot be asked at all.
+SIB_SHAPE = ("tree_shape(root := 'file_path', \"order\" := 'node_id', level := 'depth',"
+             " size := 'descendant_count',"
+             " semantic := tree_semantic(type := 'type', element := 'type <> ''punct'''))")
+SIB_RELS = ("next", "first-child", "last-child")
+SIB_SEL = {
+    "next": "tree_steps([{type: 'item'}, {comb: 'next', type: 'item'}])",
+    "first-child": "tree_steps([{type: 'item', pseudo: 'first-child'}])",
+    "last-child": "tree_steps([{type: 'item', pseudo: 'last-child'}])",
+}
+# the sibling relation itself, as tree_sql_siblings spells it (IS NOT DISTINCT FROM, so the
+# level-0 rows of a partition are siblings of each other through their shared NULL _parent)
+SIB_SIBS = ("{c}._root = a._root AND {c}._parent IS NOT DISTINCT FROM a._parent"
+            " AND {c}._pre <> a._pre")
+
+
+def sib_source(n):
+    """One root and n-1 children, every third child a non-element ('punct')."""
+    return ("(SELECT 'w' AS file_path, i AS node_id, (i > 0)::INT AS depth,"
+            " CASE WHEN i = 0 THEN %d ELSE 0 END AS descendant_count,"
+            " CASE WHEN i %% 3 = 1 THEN 'punct' ELSE 'item' END AS type"
+            " FROM range(%d) t(i))" % (n - 1, n))
+
+
+def sib_setup(con, n):
+    """Create the flat element tree of n rows; returns (tree name, projection relation text).
+
+    The rows are MATERIALIZED into a table first, and the tree is built on that table rather than
+    on the generating subquery. This is fidelity, not convenience: the scanning form names the
+    projection relation THREE times (two step aliases and the correlated `__c`), so with a
+    generating subquery as the source every correlated probe re-runs `range(n)` through the
+    projection, which is a cost the compiled form never had. The 33_navigation record builds its
+    `wide` tree on a table, and so does every real source. Against the subquery form the scanning
+    cell did not merely run slower -- it was OOM-killed at 19.5 GB on 3000 rows, which would have
+    been reported as a fact about the scanning form when it was really a fact about the harness.
+    (The scanning form does not finish at 3000 rows on a table source either, but it finishes at
+    2400, and that is the difference between a measurable curve and no curve at all.)"""
+    tree = "sib%d" % n
+    con.execute("CREATE OR REPLACE TABLE %s_src AS SELECT * FROM %s" % (tree, sib_source(n)))
+    for stmt in con.execute("SELECT tree_compile_create('main', ?, tree_spec(%s, source := ?))"
+                            % SIB_SHAPE, [tree, tree + "_src"]).fetchone()[0]:
+        con.execute(stmt)
+    return tree, proj(con, tree)
+
+
+def _nearer(p, cond):
+    """The scanning form's inner question: is there a nearer ELEMENT sibling of a?"""
+    return ("NOT EXISTS (SELECT 1 FROM %s __c WHERE %s AND %s AND __c._element)"
+            % (p, SIB_SIBS.format(c="__c"), cond))
+
+
+def sib_old_sql(p, rel):
+    """The pre-Task-8 scanning form, written out as the fragments used to emit it."""
+    if rel == "next":
+        return ("SELECT count(*) FROM %s a, %s b WHERE %s AND b._pre > a._pre AND b._element"
+                " AND a._type = 'item' AND b._type = 'item' AND %s"
+                % (p, p, SIB_SIBS.format(c="b"),
+                   _nearer(p, "__c._pre > a._pre AND __c._pre < b._pre")))
+    cond = "__c._pre < a._pre" if rel == "first-child" else "__c._pre > a._pre"
+    return ("SELECT count(*) FROM %s a WHERE a._type = 'item' AND a._element AND %s"
+            % (p, _nearer(p, cond)))
+
+
+def sib_new_sql(con, tree, rel):
+    """What the compiler emits today: the __proj / __sib CTEs and a lookup in the window."""
+    body = con.execute("SELECT tree_compile_match('main', ?, %s)" % SIB_SEL[rel],
+                       [tree]).fetchone()[0]
+    return "SELECT count(*) FROM (%s)" % body
+
+
+def sib_ref_sql(p, rel):
+    """The definitions in plain window SQL -- independent of both implementations."""
+    e = "(SELECT _root, _pre, _parent FROM %s WHERE _element AND _type = 'item')" % p
+    if rel == "next":
+        return ("SELECT count(*) FROM (SELECT lead(_pre) OVER (PARTITION BY _root, _parent"
+                " ORDER BY _pre) AS nx FROM %s) WHERE nx IS NOT NULL" % e)
+    order = "_pre" if rel == "first-child" else "_pre DESC"
+    return ("SELECT count(*) FROM (SELECT row_number() OVER (PARTITION BY _root, _parent"
+            " ORDER BY %s) AS rn FROM %s) WHERE rn = 1" % (order, e))
+
+
+def _sib_child(n, rel, mem, spill, q):
+    """Time the scanning form in a child process, so the parent can give up on it."""
+    try:
+        s = runner.Session()
+        child_guard(s.con, mem, spill)
+        _, p = sib_setup(s.con, n)
+        sql = sib_old_sql(p, rel)
+        t0 = time.perf_counter()
+        rows = s.con.execute(sql).fetchall()
+        q.put(("ok", time.perf_counter() - t0, rows[0][0]))
+    except Exception as e:  # pragma: no cover - diagnostic path
+        q.put(("err", str(e), None))
+
+
+def sib_old_timed(n, rel, timeout, mem, spill):
+    """(seconds, count, note) for the scanning form.
+
+    Only the first outcome carries a time. The other three say WHY there is none, each
+    distinguishable from the others, because "the scanning form ran out of memory at 3000 rows"
+    and "the scanning form was still going at 180 s" are different findings and the table should
+    not print one when the other happened."""
+    status, value, count = run_child(_sib_child, (n, rel, mem, spill), timeout)
+    if status == "ok":
+        return value, count, None
+    if status == "over":
+        return None, None, "over %gs" % value
+    if status == "died":
+        return None, None, "killed (%s)" % value
+    return None, None, "out of memory" if "Out of Memory" in str(value) else "failed"
+
+
+def run_siblings(con, reps, timeout, sizes, mem, spill):
+    """--siblings: the scanning sibling/positional forms against the __sib window."""
+    print("M3 sibling relations -- the scanning forms against the __sib window"
+          " (DuckDB 1.5.5, best of %d after a warm-up).\n" % reps)
+    print("One flat root, every third row a non-element. `next` matches item+item; the positional")
+    print("relations match item rows. The last column checks the window form against `independent`")
+    print("-- a plain lead()/row_number() over the element rows, computed from the definitions and")
+    print("from neither implementation -- and against the scanning form wherever it finished.\n")
+    print("%8s %-12s %12s %11s %9s  %s"
+          % ("rows", "relation", "scanning s", "window s", "speedup", "counts"))
+    for n in sizes:
+        tree, p = sib_setup(con, n)
+        for rel in SIB_RELS:
+            w_best, _, w_rows = timeit(con, sib_new_sql(con, tree, rel), reps)
+            w_count = w_rows[0][0]
+            ref = con.execute(sib_ref_sql(p, rel)).fetchone()[0]
+            o_secs, o_count, why = sib_old_timed(n, rel, timeout, mem, spill)
+            agree = (w_count == ref) and (o_count is None or o_count == w_count)
+            if o_secs is None:
+                scan, speed = why, "--"
+            else:
+                scan = "%.3f" % o_secs
+                speed = ("%.0fx" % (o_secs / w_best)) if w_best else "--"
+            if not agree:
+                note = ("DISAGREE -- window %s, scanning %s, independent %s"
+                        % (w_count, o_count, ref))
+            elif o_secs is None:
+                note = "window = independent (%d); scanning gave no answer" % w_count
+            else:
+                note = "all three agree (%d)" % w_count
+            print("%8d %-12s %12s %11.4f %9s  %s" % (n, rel, scan, w_best, speed, note))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=3)
@@ -258,6 +468,19 @@ def main():
     ap.add_argument("--sizes", action="store_true",
                     help="instead of the D-N17 list-space comparison, measure the DERIVED SIZE"
                          " against a declared one on the spec 2.3 shapes (the M3 cost table)")
+    ap.add_argument("--siblings", action="store_true",
+                    help="instead of the D-N17 list-space comparison, measure the sibling and"
+                         " positional relations: the pre-Task-8 scanning forms against the"
+                         " __sib window, on one flat root")
+    ap.add_argument("--sib-timeout", type=float, default=180.0,
+                    help="seconds to allow each scanning-form cell before giving up on it")
+    ap.add_argument("--sib-sizes", default="3000,10000,40000",
+                    help="comma-separated row counts for --siblings")
+    ap.add_argument("--sib-mem", default="4GB",
+                    help="memory and spill budget for the scanning form's child process; it is"
+                         " bounded so a runaway form spills instead of being killed by the kernel")
+    ap.add_argument("--sib-spill", default="24GB",
+                    help="cap on the child's .tmp spill, so a runaway form cannot fill the disk")
     args = ap.parse_args()
 
     s = runner.Session()
@@ -265,6 +488,10 @@ def main():
     con.execute("SET enable_progress_bar = false")
     if args.sizes:
         run_sizes(con, args.reps)
+        return
+    if args.siblings:
+        run_siblings(con, args.reps, args.sib_timeout,
+                     [int(x) for x in args.sib_sizes.split(",")], args.sib_mem, args.sib_spill)
         return
     for tree, src in SRC.items():
         for stmt in con.execute("SELECT tree_compile_create('main', ?, tree_spec(%s, source := ?))"

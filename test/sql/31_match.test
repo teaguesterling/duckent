@@ -528,10 +528,17 @@ cannot add attribute columns
 # bottom-up fold over the IR; this record is the pin that says the rewrite changed how the chain
 # is built and not what it builds. Captured from the pre-fold compiler at c7ec9d6, so a diff here
 # is a change in the output contract, not a formatting detail.
+#
+# It moved once more in M3 Task 8, and the diff is exactly two things: the query now OPENS with
+# the __proj and __sib CTEs, and the two step aliases range over `__proj` instead of carrying a
+# copy of the projection relation text each. The projection is named once, inside __proj. The rest
+# of the line -- the EXCLUDE list, the capture, the provenance columns, the ON and WHERE text --
+# is byte-for-byte what it was, which is what says this was a change in how the relation is READ
+# and not in what the selector means.
 query I
 SELECT (tree_explain('main', 'app', tree_steps([{type: 'function_definition', "as": 'f'}, {comb: 'child', type: 'block'}]))).sql;
 ----
-SELECT s3.* EXCLUDE (_root, _pre, _level, _parent, _size, _children, _next, _type, _id, _classes, _attr_map, _element, _pseudo), f AS f, 'main.app' AS _match_tree, 'treeql' AS _match_language, 0 AS _match_unknown_pseudos FROM tree_catalog."proj_4_main_app"() f JOIN tree_catalog."proj_4_main_app"() s3 ON s3._root = f._root AND s3._parent = f._pre AND (s3._type = 'block') WHERE f._type = 'function_definition'
+WITH __proj AS (SELECT * FROM tree_catalog."proj_4_main_app"()), __sib AS (SELECT _root, _pre, first_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS __next_el, last_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS __prev_el FROM __proj) SELECT s3.* EXCLUDE (_root, _pre, _level, _parent, _size, _children, _next, _type, _id, _classes, _attr_map, _element, _pseudo), f AS f, 'main.app' AS _match_tree, 'treeql' AS _match_language, 0 AS _match_unknown_pseudos FROM __proj f JOIN __proj s3 ON s3._root = f._root AND s3._parent = f._pre AND (s3._type = 'block') WHERE f._type = 'function_definition'
 
 # Provenance: _match_language records the language the selector was WRITTEN in, which only the
 # caller knows. It is not read from tree_catalog.settings -- that row governs how the runner
@@ -583,17 +590,17 @@ css
 # names what was wrong instead of falling back to the internal one.
 
 statement error
-SELECT tree_sql_comb(NULL, 'a', 'b', 'P', false);
+SELECT tree_sql_comb(NULL, 'a', 'b', false);
 ----
 unknown combinator <NULL>
 
 statement error
-SELECT tree_sql_clause(NULL, 'v', NULL, NULL, 's1', [], false, 'P', false);
+SELECT tree_sql_clause(NULL, 'v', NULL, NULL, 's1', [], false, false);
 ----
 unknown clause kind <NULL>
 
 statement error
-SELECT tree_sql_clause('attr', NULL, '=', '1', 's1', [], false, 'P', false);
+SELECT tree_sql_clause('attr', NULL, '=', '1', 's1', [], false, false);
 ----
 attribute <NULL> is neither a projected column nor served by ATTR MAP
 

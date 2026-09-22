@@ -46,13 +46,13 @@ SPEC = {
          "CAST(a.__size_raw AS BIGINT) + 1 AS _size", 1)]),
 
     "MN05": ("sql/07_match.sql", ["tree_sql_chain"], [
-        ("ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem)"
+        ("ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, elem)"
          " || ' AND (' || (steps[1]).pred || ')' END",
          "ELSE tree_sql_children(anchor, (steps[1]).alias)"
          " || ' AND (' || (steps[1]).pred || ')' END", 1)]),
 
     "MN06": ("sql/07_match.sql", ["tree_sql_comb", "tree_compile_match"], [
-        ("    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)\n"
+        ("    WHEN 'next'  THEN tree_sql_next_sibling(a, b, elem)\n"
          "    WHEN 'after' THEN tree_sql_after(a, b)\n",
          "    -- the mutation, half one: 'next' and 'after' fall through to the ELSE below\n", 1),
         ("    -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain\n"
