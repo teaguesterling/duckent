@@ -1,72 +1,10 @@
--- sql/02_projection.sql
--- Fragment macros. Each returns SQL text. Mutants override exactly one of these.
-
--- ROOT struct literal: fields named after the columns when they are identifiers, r<i> otherwise; {r0: 0} when absent.
-CREATE OR REPLACE MACRO tree_sql_root(root_csv, qual) AS
-  CASE WHEN root_csv IS NULL THEN '{r0: 0}'
-       ELSE '{' || list_aggregate(list_transform(tree_sql_list(root_csv),
-              lambda x, i: (CASE WHEN tree_sql_is_ident(x) THEN x ELSE 'r' || i END) || ': ' || qual || x), 'string_agg', ', ') || '}' END;
-
--- MAP(VARCHAR, BOOLEAN) of expression-bodied pseudo-classes.
--- 1.5.5 note: every struct dot-access (the "sem" parameter and the lambda-bound "p")
--- must be parenthesized -- (sem).pseudo, (p).name -- when this macro is ultimately
--- inlined into a table function argument (query(tree_compile_projection(...))). Left
--- unparenthesized, DuckDB's binder in that context silently misparses "p.name" as a
--- table.column reference instead of a struct field access (it does not merely error;
--- it can produce a wrong literal), so this is not just a style preference.
-CREATE OR REPLACE MACRO tree_sql_pseudo_map(sem) AS
-  CASE WHEN sem IS NULL OR (sem).pseudo IS NULL OR len(list_filter((sem).pseudo, lambda p: (p).name IS NOT NULL)) = 0
-       THEN 'MAP([]::VARCHAR[], []::BOOLEAN[])'
-       ELSE 'MAP([' || list_aggregate(list_transform(list_filter((sem).pseudo, lambda p: (p).name IS NOT NULL), lambda p: tree_sql_lit((p).name)), 'string_agg', ', ')
-            || '], [' || list_aggregate(list_transform(list_filter((sem).pseudo, lambda p: (p).name IS NOT NULL), lambda p: '(' || (p).body || ')'), 'string_agg', ', ')
-            || '])::MAP(VARCHAR, BOOLEAN)' END;
-
--- The S columns of the projection, one definition for both bases, so the two branches of
--- tree_compile_projection cannot drift apart. ATTR MAP is cast to the canonical map type
--- (an undeclared one is a typed NULL of that type, not VARCHAR) and ELEMENT is a per-row
--- predicate defaulting to true, NULL-definite like every other filter in the language.
--- MN21 mutates the TYPE default here.
-CREATE OR REPLACE MACRO tree_sql_sem_cols(sem) AS
-  COALESCE((sem).type, '''node''') || ' AS _type, ' || COALESCE((sem).id, 'NULL::VARCHAR') || ' AS _id, '
-  || COALESCE((sem).classes, 'NULL::VARCHAR[]') || ' AS _classes, '
-  || CASE WHEN (sem).attr_map IS NULL THEN 'NULL::MAP(VARCHAR, VARCHAR)' ELSE 'CAST(' || (sem).attr_map || ' AS MAP(VARCHAR, VARCHAR))' END || ' AS _attr_map, '
-  || 'COALESCE(' || COALESCE((sem).element, 'true') || ', false) AS _element, '
-  || tree_sql_pseudo_map(sem) || ' AS _pseudo';
-
--- Derived parent for level basis: nearest prior row at level - 1 within the root (ASOF join). MN2 mutates this.
--- It reads __rn, the stage that carries _pre: M3 §2.1 makes _pre the rank of ORDER within ROOT,
--- computed one CTE after __r, so __r itself has no _pre to join on. tree_derive_parent (sql/05)
--- names its own stage __rn for the same reason -- this fragment is spliced there verbatim.
-CREATE OR REPLACE MACRO tree_sql_parent_join() AS
-  '__p AS (SELECT a.*, b._pre AS _parent FROM __rn a ASOF LEFT JOIN __rn b ON a._root = b._root AND b._level = a._level - 1 AND b._pre < a._pre), ';
-
--- Derived size: the first later row at the same or a shallower level ends a row's subtree. Each
--- row is a candidate boundary for every level from its own down to the deepest level of its
--- root, so one ASOF join per row finds the nearest later candidate at the row's own level.
--- Cost is SUM(max level of the root - level + 1) candidate rows: ~8x on the fixtures, n^2/2 on a
--- pure chain, worst for a deep spine beside many shallow rows (spec 2.3); declare SIZE there.
---
--- The level bound is what makes a ROOT holding SEVERAL documents work -- a YAML file with `---`
--- separators is one root whose rows return to level 0 repeatedly, which P13 allows (its predicate
--- refuses a DESCENT of more than one, not a return). Document one's subtree must stop at document
--- two's first row, and it does: that row is a candidate at every level from 0 up, so it is the
--- nearest boundary for every open row. A derivation that ran to max(_pre) of the partition would
--- swallow the later documents; 10_projection.test pins the vector.
-CREATE OR REPLACE MACRO tree_sql_size_join() AS
-  '__mx AS (SELECT _root, max(_level) AS __ml, max(_pre) AS __mp FROM __p GROUP BY _root), '
-  || '__cand AS (SELECT p._root, p._pre, unnest(range(p._level, m.__ml + 1)) AS __lvl FROM __p p JOIN __mx m USING (_root)), '
-  || '__end AS (SELECT a._root, a._pre, c._pre AS __nx FROM __p a ASOF JOIN __cand c ON c._root = a._root AND c.__lvl = a._level AND c._pre > a._pre), '
-  || '__s AS (SELECT a.*, CAST(COALESCE(e.__nx, m.__mp + 1) - a._pre - 1 AS BIGINT) AS _size FROM __p a JOIN __mx m USING (_root) LEFT JOIN __end e USING (_root, _pre)), ';
-
--- Derived children: one grouped count over __s, joined back in __c. Rows whose _parent is NULL
--- are the roots of their document and contribute no group; a row that is nobody's parent has no
--- group either, which is why the join in __c defaults to 0 rather than NULL.
-CREATE OR REPLACE MACRO tree_sql_children_join() AS
-  '__ch AS (SELECT _root, _parent AS __cp, count(*) AS __cn FROM __s WHERE _parent IS NOT NULL GROUP BY _root, _parent), ';
-
--- Encoder tiebreak after the sibling key: source order of the key. MN1 mutates this to DESC.
-CREATE OR REPLACE MACRO tree_sql_encoder_tiebreak() AS 'ASC';
-
+-- test/mutants/MN04_size_override_plus_one.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
+-- vvv GENERATED BELOW by test/mutants/regen.py from sql/02_projection.sql -- do not edit by hand vvv
+-- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- 1.5.5 notes:
 -- (a) tree_compile_projection must be a pure scalar expression (no WITH/SELECT in its
 --     own macro body). A macro whose body is a subquery -- even one with no FROM, over

@@ -9,12 +9,12 @@
 -- tree_sql_subtree/tree_sql_children to drop the root equality.
 -- 'self' only ever arrives here as a group's first inner step, which sql/06_selector.sql
 -- enforces when the IR is built; nothing else in the compiler treats it specially.
-CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, p, elem) AS
+CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, elem) AS
   CASE op
     WHEN 'desc'  THEN tree_sql_subtree(a, b)
     WHEN 'child' THEN tree_sql_children(a, b)
     WHEN 'self'  THEN tree_sql_self(a, b)
-    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)
+    WHEN 'next'  THEN tree_sql_next_sibling(a, b, elem)
     WHEN 'after' THEN tree_sql_after(a, b)
     -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain
     -- defaults that one before it gets here, so a NULL arriving is hand-built IR -- which is
@@ -243,7 +243,7 @@ n AS (
 -- leaves chk to say what is actually wrong, and it says it whatever the selector asks for.
 clause AS (
   SELECT c.parent_id AS step, c.node_id AS id,
-         tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias, cfg.attr_cols, cfg.has_map, cfg.p, cfg.elem) AS txt
+         tree_sql_clause(c.kind, c.value, c.op, c.arg, s.alias, cfg.attr_cols, cfg.has_map, cfg.elem) AS txt
   FROM n c JOIN n s ON s.node_id = c.parent_id AND s.kind = 'step' CROSS JOIN cfg
   WHERE c.kind NOT IN ('has', 'not', 'step') AND cfg.known),
 -- Each pass is two CTEs: the first gathers a group's inner chain into one list column, the second
@@ -259,7 +259,7 @@ grpA0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepA x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpA AS (
-  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpA0 g CROSS JOIN cfg),
 partB AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpA g),
 stepB AS (
@@ -272,7 +272,7 @@ grpB0 AS (
   FROM n g JOIN n a ON a.node_id = g.parent_id JOIN stepB x ON x.parent_id = g.node_id
   WHERE g.kind IN ('has', 'not') GROUP BY g.node_id, g.parent_id, g.kind, a.alias),
 grpB AS (
-  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, cfg.p, g.steps, g.anchor, cfg.elem) AS txt
+  SELECT g.node_id, g.parent_id, tree_sql_group(g.kind, g.steps, g.anchor, cfg.elem) AS txt
   FROM grpB0 g CROSS JOIN cfg),
 partC AS (SELECT step, id, txt FROM clause UNION ALL SELECT g.parent_id, g.node_id, g.txt FROM grpB g),
 stepC AS (
@@ -290,11 +290,15 @@ out AS (
   -- list() over no rows is NULL, and a selector with no steps is chk's to refuse in its own
   -- words: chk and this CTE are not ordered against each other, so tree_sql_chain's empty-group
   -- refusal must not get there first. Aggregating without GROUP BY keeps the one row either way.
-  SELECT CASE WHEN g.steps IS NULL THEN NULL ELSE tree_sql_chain(cfg.p, g.steps, NULL, cfg.elem) END AS from_sql,
-         g.subject, g.captures, cfg.lang
+  SELECT CASE WHEN g.steps IS NULL THEN NULL ELSE tree_sql_chain(g.steps, NULL, cfg.elem) END AS from_sql,
+         g.subject, g.captures, cfg.lang, cfg.p AS proj_rel
   FROM top0 g CROSS JOIN cfg)
 SELECT CASE WHEN NOT (SELECT ok FROM chk) OR NOT (SELECT bool_and(ok) FROM n) THEN NULL ELSE
-  'SELECT ' || subject || '.* EXCLUDE (' || list_aggregate(tree_canonical_columns(), 'string_agg', ', ') || ')'
+  -- The query opens with __proj and __sib: the projection read once however many step aliases
+  -- range over it, and the window the sibling and positional relations read instead of scanning.
+  -- This is the ONE place the projection relation text still appears in a compiled query.
+  tree_sql_nav_ctes(proj_rel)
+  || 'SELECT ' || subject || '.* EXCLUDE (' || list_aggregate(tree_canonical_columns(), 'string_agg', ', ') || ')'
   || COALESCE(', ' || list_aggregate(list_transform(list_filter(captures, lambda a: a <> subject), lambda a: a || ' AS ' || a), 'string_agg', ', '), '')
   -- The language the selector was WRITTEN in: the caller's `language :=` if they named one, else
   -- the name the FRONT-END stamped on the IR's root row (tree_selector_language). Not read from

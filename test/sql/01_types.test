@@ -34,7 +34,7 @@ ast
 statement error
 SELECT tree_shape(levl := 'depth');
 ----
-levl
+does not support the supplied arguments
 
 query I
 SELECT tree_sql_lit('it''s');

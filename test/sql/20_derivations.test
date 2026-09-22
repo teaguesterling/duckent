@@ -79,3 +79,246 @@ query I
 SELECT list(_size ORDER BY _pre) FROM tree_project('main', 'ok_flat');
 ----
 [0, 0, 0]
+
+# ROOT defaults to one forest, and several level-0 rows are anonymous trees whose top-level rows
+# are ordered siblings: a table with no R0/R1/R2 declared at all is every row a one-node tree.
+statement ok
+CREATE TABLE plain AS SELECT * FROM (VALUES ('a', 1), ('b', 2), ('c', 3)) v(name, n);
+
+statement ok
+CALL tree_ddl_create('main', 'plain_tree', tree_spec(tree_shape(semantic := tree_semantic(type := 'name')), source := 'plain'));
+
+query IIII
+SELECT list(_pre ORDER BY _pre), max(_level), max(_size),
+       (SELECT list(name ORDER BY name) FROM tree_match('main', 'plain_tree', tree_steps([{type: 'a'}, {comb: 'next', type: 'b'}])))
+FROM tree_project('main', 'plain_tree');
+----
+[0, 1, 2]	0	0	[b]
+
+# Well-formedness at ingest (M3 §7.3): ORDER must be present and unique within a root, LEVEL
+# must be non-NULL and non-negative, and a partition that starts above level 0 says how to fix it.
+statement ok
+CREATE TABLE wf AS SELECT * FROM (VALUES
+  ('nulllevel', 0, 0), ('nulllevel', 1, NULL),
+  ('neglevel', 0, 0), ('neglevel', 1, -1),
+  ('nullorder', 0, 0), ('nullorder', NULL, 1),
+  ('tie', 0, 0), ('tie', 1, 1), ('tie', 1, 1),
+  ('onebased', 0, 1), ('onebased', 1, 2)) v(name, ord, lvl);
+
+statement error
+CALL tree_ddl_create('main', 'wf1', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''nulllevel'')'));
+----
+LEVEL is NULL in tree main.wf1
+
+statement error
+CALL tree_ddl_create('main', 'wf2', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''neglevel'')'));
+----
+LEVEL is negative in tree main.wf2
+
+statement error
+CALL tree_ddl_create('main', 'wf3', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''nullorder'')'));
+----
+ORDER is NULL in tree main.wf3
+
+statement error
+CALL tree_ddl_create('main', 'wf4', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''tie'')'));
+----
+has 2 rows with ORDER value 1; if the relation holds several trees whose ORDER restarts, declare ROOT
+
+# a tie makes _pre change between queries, so a projection-mode tree is checked at create too
+statement error
+CALL tree_ddl_create('main', 'wf4p', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''tie'')', storage := 'projection'));
+----
+ORDER is not a traversal in tree main.wf4p
+
+statement error
+CALL tree_ddl_create('main', 'wf5', tree_spec(tree_shape("order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wf WHERE name = ''onebased'')'));
+----
+rows start at level 1; if the source's levels are 1-based, declare LEVEL as 'lvl - 1'
+
+statement ok
+CALL tree_ddl_create('main', 'wf5ok', tree_spec(tree_shape("order" := 'ord', level := 'lvl - 1'), source := '(SELECT * FROM wf WHERE name = ''onebased'')'));
+
+# A tie under a declared PARENT is not only a _pre that changes between queries: PARENT is a
+# value in ORDER space translated by a LEFT JOIN on __order (M3 §2.2), so two rows sharing an
+# ORDER value make the projection return MORE rows than its source -- here 5 from 3. The ORDER
+# check refuses before any statement evaluates the projection.
+statement ok
+CREATE TABLE tiepar AS SELECT * FROM (VALUES (0, 0, NULL), (1, 1, 1), (1, 1, 1)) v(ord, lvl, par);
+
+statement error
+CALL tree_ddl_create('main', 'wf6', tree_spec(tree_shape("order" := 'ord', level := 'lvl', parent := 'par'), source := 'tiepar'));
+----
+ORDER is not a traversal in tree main.wf6
+
+# The offset hint is about the OFFENDING partitions, not every partition (M3 §7.3: "a partition
+# whose first row starts above level 0"). With one root at 0 and one at 1 the hint must name 1 and
+# the '- 1' remedy; aggregating over every first row named 0 and advised 'lvl - 0', a no-op that
+# left the tree refused.
+statement ok
+CREATE TABLE wfm AS SELECT * FROM (VALUES
+  ('w7', 'a', 0, 0), ('w7', 'a', 1, 1), ('w7', 'b', 0, 1), ('w7', 'b', 1, 2),
+  ('w8', 'c', 0, 1), ('w8', 'c', 1, 2), ('w8', 'd', 0, 2), ('w8', 'd', 1, 3)) v(g, r, ord, lvl);
+
+statement error
+CALL tree_ddl_create('main', 'wf7', tree_spec(tree_shape(root := 'r', "order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wfm WHERE g = ''w7'')'));
+----
+rows start at level 1; if the source's levels are 1-based, declare LEVEL as 'lvl - 1'
+
+# and when the offending partitions disagree about where they start, no single offset fixes the
+# source: the hint would be wrong whichever level it named, so it falls through to the jump arm
+statement error
+CALL tree_ddl_create('main', 'wf8', tree_spec(tree_shape(root := 'r', "order" := 'ord', level := 'lvl'), source := '(SELECT * FROM wfm WHERE g = ''w8'')'));
+----
+P13 violated in tree main.wf8: 2 rows descend more than one level or start above level 0
+
+# A forest whose keys repeat per ROOT is valid: the walk must join child to parent WITHIN a root.
+statement ok
+CREATE TABLE cats2 AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'cats2', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'cats2'));
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'cats2')), (SELECT count(*) FROM cats2);
+----
+10	10
+
+statement ok
+CREATE TABLE orphan AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 99, 'lost', 77;
+
+statement error
+CALL tree_ddl_create('main', 'orphan', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'orphan'));
+----
+1 rows of tree main.orphan are not reachable from a root
+
+statement ok
+CREATE TABLE dupkey AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 2, 'again', 1;
+
+statement error
+CALL tree_ddl_create('main', 'dupkey', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'dupkey'));
+----
+KEY 2 appears 2 times
+
+statement ok
+CREATE TABLE cyc AS SELECT * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 90, 'x', 91 UNION ALL SELECT 91, 'y', 90;
+
+statement error
+CALL tree_ddl_create('main', 'cyc', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'cyc'));
+----
+2 rows of tree main.cyc are not reachable from a root
+
+# Both refusals name a ROOT the author declared, and say nothing about partitions when there are
+# none. tree_sql_root(NULL, ...) is the literal '{r0: 0}' rather than NULL -- which is what makes
+# both checks fail closed on a rootless tree instead of compiling to NULL and being filtered out
+# of the statement list -- but printing that synthetic constant would point the reader at a
+# partition they never wrote. Asserted through the END of each message, so an ' in root {r0: 0}'
+# clause creeping back in fails these records (the two above stop short of the clause and cannot).
+statement error
+CALL tree_ddl_create('main', 'dupkey2', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'dupkey'));
+----
+KEY 2 appears 2 times in tree main.dupkey2
+
+statement error
+CALL tree_ddl_create('main', 'orphan2', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id'), source := 'orphan'));
+----
+1 rows of tree main.orphan2 are not reachable from a root: orphans or a cycle, e.g. key 99
+
+# and with ROOT declared the clause is there, naming the partition that actually offends
+statement ok
+CREATE TABLE duproot AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', 2, 'again', 1;
+
+statement error
+CALL tree_ddl_create('main', 'duproot', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'duproot'));
+----
+KEY 2 appears 2 times in root {'forest': b} of tree main.duproot
+
+statement ok
+CREATE TABLE orphanroot AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', 99, 'lost', 77;
+
+statement error
+CALL tree_ddl_create('main', 'orphanroot', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'orphanroot'));
+----
+1 rows of tree main.orphanroot are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+# A closed ATTR does not carry the KEY column into the projection, so the reach check compares row
+# counts per root instead of anti-joining on the key, and names the count alone.
+statement error
+CALL tree_ddl_create('main', 'orphan3', tree_spec(tree_shape(key := 'cat_id', parent := 'parent_id', semantic := tree_semantic(attr := 'name')), source := 'orphan'));
+----
+1 rows of tree main.orphan3 are not reachable from a root: orphans or a cycle
+
+# The walk is refused, not silently truncated, at every ingest site -- not only create. tree_insert
+# compiles its checks over the NEW source alone: it refuses a ROOT already present, so a key shared
+# with a stored row is not a collision, and unioning the stored table in would make replace refuse
+# every unchanged tree.
+statement ok
+CALL tree_ddl_create('main', 'ing', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := '(SELECT ''a'' AS forest, * FROM read_csv(''test/data/categories.csv''))'));
+
+statement error
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv'') UNION ALL SELECT ''b'', 99, ''lost'', 77)');
+----
+1 rows of tree main.ing are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+statement error
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv'') UNION ALL SELECT ''b'', 2, ''again'', 1)');
+----
+KEY 2 appears 2 times in root {'forest': b} of tree main.ing
+
+# the same key in ANOTHER root is not a collision, and the insert lands
+statement ok
+CALL tree_insert('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv''))');
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'ing')), (SELECT count(DISTINCT _root) FROM tree_project('main', 'ing'));
+----
+10	2
+
+# and replacing a root with itself is not a key collision either: the rows it is about to delete
+# are still in the table while the check runs, so the check must read the new source alone
+statement ok
+CALL tree_replace('main', 'ing', '(SELECT ''b'' AS forest, * FROM read_csv(''test/data/categories.csv''))');
+
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'ing')), (SELECT count(DISTINCT _root) FROM tree_project('main', 'ing'));
+----
+10	2
+
+# ALTER never re-derives the shape, but it still evaluates the source through proj_sql (comment
+# above 03_ddl.sql's key and reach checks in the ALTER statement list), so a parent-basis source
+# that has drifted into an orphan or a repeated key since CREATE must be refused by ALTER too --
+# not just reported later as a row-count drift. Both trees are created clean, then their sources
+# are mutated in place before the ALTER that is expected to catch it.
+statement ok
+CREATE TABLE altorphansrc AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'altorphan', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'altorphansrc'));
+
+statement ok
+INSERT INTO altorphansrc VALUES ('b', 99, 'lost', 77);
+
+statement error
+CALL tree_ddl_alter('main', 'altorphan', tree_semantic(type := 'name'));
+----
+1 rows of tree main.altorphan are not reachable from a root in root {'forest': b}: orphans or a cycle, e.g. key 99
+
+statement ok
+CREATE TABLE altdupsrc AS SELECT 'a' AS forest, * FROM read_csv('test/data/categories.csv') UNION ALL SELECT 'b', * FROM read_csv('test/data/categories.csv');
+
+statement ok
+CALL tree_ddl_create('main', 'altdup', tree_spec(tree_shape(root := 'forest', key := 'cat_id', parent := 'parent_id'), source := 'altdupsrc'));
+
+# The duplicate takes a leaf's key (3, a childless row) and the deleted row is another leaf (5),
+# so root b's row count is unchanged at 5 -- the key check must catch this, not the row-count
+# drift check a few statements later, which a same-count mutation can't trip.
+statement ok
+DELETE FROM altdupsrc WHERE forest = 'b' AND cat_id = 5;
+
+statement ok
+INSERT INTO altdupsrc VALUES ('b', 3, 'again', 2);
+
+statement error
+CALL tree_ddl_alter('main', 'altdup', tree_semantic(type := 'name'));
+----
+KEY 3 appears 2 times in root {'forest': b} of tree main.altdup

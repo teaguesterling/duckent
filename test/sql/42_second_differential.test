@@ -44,6 +44,22 @@ SELECT (SELECT count(*) FROM tree_project('main', 'app_declared'))
 ----
 true	true	0
 
+# derived SIZE, PARENT and CHILDREN equal the parquet's own columns on scripts
+query I
+WITH d AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/scripts.parquet'')', '*')))
+SELECT count(*) FROM d WHERE _size IS DISTINCT FROM descendant_count OR _parent IS DISTINCT FROM parent_id
+   OR _children IS DISTINCT FROM children_count;
+----
+0
+
+# derived SIZE, PARENT and CHILDREN equal the parquet's own columns on py_variety
+query I
+WITH d AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), 'read_parquet(''test/data/py_variety.parquet'')', '*')))
+SELECT count(*) FROM d WHERE _size IS DISTINCT FROM descendant_count OR _parent IS DISTINCT FROM parent_id
+   OR _children IS DISTINCT FROM children_count;
+----
+0
+
 # attribute identifier -- the one selector on this fixture whose answer reads SIZE: app.py:50 is the last
 # descendant of its `attribute`, so a subtree range one short of the declared size drops
 # it. Written here rather than in the corpus, which has no selector of that shape.

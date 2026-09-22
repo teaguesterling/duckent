@@ -19,6 +19,8 @@ jobs:
     name: suites, css parser, mutant copies
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DUCKENT_NO_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,13 +49,12 @@ jobs:
           mkdir -p ~/Projects/astcss-eval/fixtures/py-variety ~/Projects/astcss-eval/fixtures/repo-small-py
           cp .ci/sd-py-variety/test/data/python/*.py ~/Projects/astcss-eval/fixtures/py-variety/
           cp .ci/sd-repo-small-py/scripts/*.py ~/Projects/astcss-eval/fixtures/repo-small-py/
-      - name: Suites (a skipped suite fails the job)
-        shell: bash
-        run: |
-          python test/run.py test/sql 2>&1 | tee suites.log
-          if grep -q '^SKIP' suites.log; then echo "::error::a suite was skipped"; exit 1; fi
+      - name: Suites (DUCKENT_NO_SKIP=1 turns a skip into a failure)
+        run: python test/run.py test/sql
       - name: css parser unit tests
         run: python test/test_css_parser.py
+      - name: Runner and mutant harness unit tests
+        run: python test/test_harness.py
       - name: Copy-and-edit mutants match the macros they copy
         run: python test/mutants/regen.py --check
 
@@ -61,6 +62,8 @@ jobs:
     name: mutant harness
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      DUCKENT_NO_SKIP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

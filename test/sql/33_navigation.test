@@ -194,3 +194,44 @@ SELECT (SELECT count(*) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'firs
        (SELECT count(*) FROM tree_match('main', 'el', tree_steps([{pseudo: 'first-child', "where": 'node_id = 0'}])));
 ----
 1	1
+
+# ---------------------------------------------------------------------------------------
+# The sibling and positional relations are LINEAR in the number of children of one parent
+# ---------------------------------------------------------------------------------------
+#
+# One root and 2999 children, every third one a non-element. The element-aware forms used to ask
+# "is there a nearer element sibling?" as a NOT EXISTS correlated to each candidate PAIR, which is
+# worse than quadratic in the width of a single parent: 0.23 s at 600 children, 3.5 s at 1200,
+# 87.6 s at 2400, and at the 3000 this record uses it does not finish at all -- it exhausts 6 GB of
+# memory and 24 GB of spill (test/spike_listspace.py --siblings). The __sib window
+# answers it for every row in one pass and it runs in seconds. The SIZE is what makes the
+# difference visible, so this is the record that would notice a scan coming back -- but it pins
+# ANSWERS, not a time, and the answers are the same ones the scanning form gave.
+#
+# All three are computed from the definitions rather than read off the implementation:
+#
+#   next  -- every element child but the last has exactly one next element sibling, and here every
+#            element IS an `item` (element is `type <> 'punct'`), so the count is the number of
+#            items at level 1 minus one:
+#            `SELECT count(*) - 1 FROM range(1, 3000) t(i) WHERE i % 3 <> 1` = 1998.
+#   first -- min is 0, NOT the first item child at 2. Node 0 is the partition's only level-0 row,
+#            so it has no earlier element sibling and IS a first child -- the same rule the `ne`/`el`
+#            records above pin, and the reason tree_sql_siblings relates level-0 rows through
+#            IS NOT DISTINCT FROM. It is also an item (0 % 3 = 0), so it is in this match set and
+#            it is the smallest node_id in it. __sib gets the same answer by the same road: it
+#            partitions by (_root, _parent), which groups the level-0 rows through their NULL.
+#   last  -- node 2999 is an item (2999 % 3 = 2) and the partition's last row.
+statement ok
+CREATE TABLE wide AS SELECT 'w' AS file_path, i AS node_id, (i > 0)::INT AS depth, CASE WHEN i = 0 THEN 2999 ELSE 0 END AS descendant_count,
+  CASE WHEN i % 3 = 1 THEN 'punct' ELSE 'item' END AS type FROM range(3000) t(i);
+
+statement ok
+CALL tree_ddl_create('main', 'wide', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type', element := 'type <> ''punct''')), source := 'wide'));
+
+query III
+SELECT (SELECT count(*) FROM tree_match('main', 'wide', tree_steps([{type: 'item'}, {comb: 'next', type: 'item'}]))),
+       (SELECT min(node_id) FROM tree_match('main', 'wide', tree_steps([{type: 'item', pseudo: 'first-child'}]))),
+       (SELECT max(node_id) FROM tree_match('main', 'wide', tree_steps([{type: 'item', pseudo: 'last-child'}])));
+----
+1998	0	2999

@@ -6,9 +6,11 @@
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/07_match.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- One fragment per relation, each the single definition shared by combinators, groups and traversal.
--- a and b are step aliases; p is the projection relation text (needed where a third row is scanned);
--- elem says whether the tree declares ELEMENT, in which case the sibling and positional relations
--- must scan for the nearest *element* neighbour instead of using the O(1) pre/size arithmetic.
+-- a and b are step aliases; elem says whether the tree declares ELEMENT, in which case the sibling
+-- and positional relations must find the nearest *element* neighbour instead of using the O(1)
+-- pre/size arithmetic. No fragment takes the projection relation text any more: every query opens
+-- with the __proj and __sib CTEs (tree_sql_nav_ctes below), so a fragment that needs a third row
+-- names __proj or __sib rather than splicing another copy of the projection into itself.
 -- Every fragment is a pure expression with no SELECT of its own: sql/08_traversal.sql splices the
 -- text into query(), which in DuckDB 1.5.5 only accepts text from macros whose body has no
 -- SELECT or subquery.

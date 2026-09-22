@@ -24,30 +24,48 @@
 #      comes from the difference between mutant and control. `--no-verify` skips this half;
 #      an explicit `control:` key overrides the file name.
 #
+# A kill needs EVERY suite in expect_fail to fail with a FAIL record; a suite that sees the
+# mutant only sometimes belongs in also_kills.
+#
 # MN08 has no control, because its mutation is not a macro override at all -- there is nothing to
-# leave out. Verify it by hand: unset DUCKENT_MUTANT and run the two suites in its expect_fail
-# list; they must PASS. That is the same procedure as the automated one, run by a person.
+# leave out. Its manifest row carries `control: manual`: run_mutants.py reports it as a manual
+# verification rather than counting it as verified against a control. Verify it by hand: unset
+# DUCKENT_MUTANT and run the two suites in its expect_fail list; they must PASS. That is the same
+# procedure as the automated one, run by a person.
 - id: MN01
   file: MN01_encoder_tiebreak_desc.sql
   what: reverse the source-order tiebreak in DFS derivation
-  expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+  expect_fail: [test/sql/20_derivations.test]
+  also_kills: 10_projection.test does NOT fail under this mutant -- checked under the
+    every-suite-must-fail rule (test/run.py test/sql/10_projection.test --mutant
+    MN01_encoder_tiebreak_desc.sql PASSes) -- its records happen not to distinguish the
+    reversed source-order tiebreak on this fixture, so it moved out of expect_fail here.
 - id: MN02
   file: MN02_parent_same_level.sql
   what: derive parent as nearest prior row at the same level, not level - 1
   expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
   also_kills: parent join without root equality (no id reserved; see FINDINGS)
-- id: MN03
-  file: MN03_size_status.sql
-  what: a DECLARED SIZE column compiles to a subtree range one short of a derived one
-  expect_fail: [test/sql/42_second_differential.test]
-  also_kills: nothing. 42 is the ONLY suite that sees this mutant -- checked, not assumed
-    (40_corpus and 41 both PASS under it, although their trees do declare SIZE). 40 compares
-    two SPELLINGS of one selector on ONE tree, so a shortened _size moves both sides equally
-    and cancels, exactly as it cancels for MN22/MN24 below; 41's frozen references never turn
-    on a subtree's LAST descendant, which is the only row a range one short drops, and on
-    these fixtures that row is almost always an anonymous token no selector can name (the
-    same fact that made 42 write SIZE_WITNESS by hand). 42 fails twice -- on the record
-    comparing the two projections column for column, and on SIZE_WITNESS.
+# MN03 was RETIRED by M3 Task 6. Its edit was a textual one on the `__s` line of
+# tree_compile_projection, and that line was restructured into tree_sql_size_join(), so regen.py
+# could no longer find the text to plant. The id is NOT reused for the same claim: M3 Task 9
+# re-plants MN03 as a DIFFERENT mutant (a semantics-path function reading an O accessor, in
+# sql/07_match.sql). Its CLAIM -- that a declared SIZE override must not silently disagree with
+# the derivation -- is carried by MN04 below as of M3 Task 7, against the restructured line.
+- id: MN04
+  file: MN04_size_override_plus_one.sql
+  what: a declared SIZE override returns size + 1; conformance must refuse it as corruption
+  expect_fail: [test/sql/11_ddl.test, test/sql/12_dml.test, test/sql/42_second_differential.test]
+  also_kills: measured by running the whole suite under the mutant -- every file that CREATES a
+    tree declaring SIZE also fails; 31_match, 32_traversal, 33_navigation, 34_groups,
+    37_css_parser, 38_css_lower, 40_corpus, 41_differential_sitting_duck, 41b_live_sitting_duck,
+    43_representation and 44_parsers. O conformance refuses the declared SIZE at CREATE, so the
+    tree never exists and every later record in those files fails behind it. That is the reverse
+    of MN03, which 40 and 41 could not see at all -- the kill moved from a subtree range one row
+    short, on a row no selector names, to the tree being refused outright.
+  # MN03's number was used for this claim in M2; corrected in M3 (spec §6).
+  # The suites that PASS under it declare no SIZE through tree_ddl_create: 10_projection reaches
+  # tree_compile_projection directly and never creates a tree, and 20_derivations' SIZE-free
+  # parent-basis trees record PARENT as an R slot, which is not an O override at all.
 - id: MN05
   file: MN05_has_child_only.sql
   what: a group's first inner step is joined as a CHILD whatever its op, so :has() is child-only
@@ -70,6 +88,7 @@
   what: the runner parser records a child combinator as a descendant, so `a > b c` is grouped
     the way `a b c` is
   env: {DUCKENT_MUTANT: MN08}
+  control: manual
   # Python-side: the SQL file is comment-only and the mutation is the DUCKENT_MUTANT hook in
   # test/css_parser.py. 44 catches it on the live-parser side of every row with a `>`.
   expect_fail: [test/sql/44_parsers.test, test/sql/37_css_parser.test]
@@ -118,7 +137,7 @@
   expect_fail: [test/sql/44_parsers.test]
   # 44 carries the bait: one partition row, p13_ok = false, for a tree name nothing declares.
   # The kill is total by construction, not incidental: every record in 44 calls tree_parse_css
-  # and the bait row is inserted before the first of them, so all 250 fail while it is there.
+  # and the bait row is inserted before the first of them, so all 252 fail while it is there.
   # Deleting the bait would leave this mutant alive, which is why the insert is commented in
   # the generated file and templated in test/import_astcss_eval.py's write_44_parsers.
   also_kills: nothing else -- 40_corpus was checked and PASSES under this mutant. Its

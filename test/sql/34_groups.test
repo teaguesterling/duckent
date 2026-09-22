@@ -470,6 +470,6 @@ SIBLING_ORDER
 # group before the compiler can see one, but the fragment refuses on its own account rather than
 # emitting a FROM with no relation in it.
 statement error
-SELECT tree_sql_chain('P', []::STRUCT(node_id INTEGER, alias VARCHAR, op VARCHAR, pred VARCHAR)[], 'a', false);
+SELECT tree_sql_chain([]::STRUCT(node_id INTEGER, alias VARCHAR, op VARCHAR, pred VARCHAR)[], 'a', false);
 ----
 tree_match: empty group

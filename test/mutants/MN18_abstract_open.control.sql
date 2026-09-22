@@ -11,6 +11,14 @@ WITH base AS (
          tree_shape_merge(CASE WHEN (spec)."like" IS NULL THEN NULL ELSE tree_shape_from_catalog(current_database(), sch, (spec)."like") END, (spec).shape) AS merged,
          (spec)."like" IS NOT NULL AND tree_shape_from_catalog(current_database(), sch, (spec)."like") IS NULL AS like_missing,
          EXISTS (SELECT 1 FROM tree_catalog.trees t WHERE t.database_name = current_database() AND t.schema_name = sch AND t.tree_name = nm) AS exists_already,
+         -- DuckDB identifiers are case-insensitive, so two trees whose names differ only by case
+         -- would share every generated table and macro name (tree_sql_object_name does not fold
+         -- case). min() picks a deterministic collision partner to name in the refusal; the
+         -- exact-name case is excluded here so a re-create of the same tree keeps the
+         -- "already exists" refusal above instead of this one.
+         (SELECT min(t.schema_name || '.' || t.tree_name) FROM tree_catalog.trees t
+           WHERE t.database_name = current_database() AND lower(t.schema_name) = lower(sch) AND lower(t.tree_name) = lower(nm)
+             AND NOT (t.schema_name = sch AND t.tree_name = nm)) AS collides_with,
          (spec).abstract AS abstract, (spec).source AS source, (spec).storage AS storage
 ),
 -- Macro-, map- and prefix-bound pseudo-classes become expression bodies here, before validation
@@ -35,10 +43,20 @@ expanded AS (
 ),
 derived AS (
   SELECT *,
-    (shape).level IS NOT NULL AS level_basis,
-    CASE WHEN (shape).level IS NOT NULL THEN 'level' ELSE 'parent' END AS basis,
-    CASE WHEN (shape).level IS NULL AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
-    CASE WHEN (shape).level IS NULL OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
+    -- R2 defaults to LEVEL 0 (M3 §2.6): the level basis is taken whenever LEVEL is declared and
+    -- whenever NEITHER LEVEL NOR PARENT is, so a table declaring no structure at all registers as
+    -- a forest of one-node trees instead of being refused. Everything downstream that asks which
+    -- basis this is reads THIS name -- profile, order_source and the refusal ladder included -- so
+    -- the basis cannot end up spelled two ways that disagree on the shape that declares neither.
+    ((shape).level IS NOT NULL OR (shape).parent IS NULL) AS level_basis,
+    CASE WHEN level_basis THEN 'level' ELSE 'parent' END AS basis,
+    CASE WHEN NOT level_basis AND (shape).sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END AS profile,
+    CASE WHEN NOT level_basis OR (shape)."order" IS NOT NULL THEN 'declared' ELSE 'frozen' END AS order_source,
+    -- The KEY the walk is driven by, or NULL when there is no walk: the two parent-basis ingest
+    -- checks are NULL-gated on it, so the level basis passes NULL here rather than each call site
+    -- re-deciding which basis this is. A level-basis tree may still DECLARE a KEY, so this asks
+    -- the basis, not whether a KEY exists.
+    CASE WHEN level_basis THEN NULL ELSE (shape).key END AS key_expr,
     COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,
     -- Whether the tree has an S GROUP, which is what tree_match reads to decide whether an S
     -- clause (TYPE, ID, CLASS, ATTR, PSEUDO) may be asked for at all. The question -- does this
@@ -64,13 +82,14 @@ checked AS (
       WHEN sch IS NULL OR nm IS NULL THEN tree_err('tree_ddl_create: schema and name are required')
       WHEN abstract IS NULL THEN tree_err('tree_ddl_create: abstract must be true or false')
       WHEN exists_already THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' already exists')
+      WHEN collides_with IS NOT NULL
+        THEN tree_err('tree_ddl_create: tree ' || sch || '.' || nm || ' collides with existing tree ' || collides_with || ' (names are case-insensitive)')
       WHEN like_missing THEN tree_err('tree_ddl_create: LIKE target ' || sch || '.' || (spec)."like" || ' not found')
       WHEN abstract AND source IS NOT NULL THEN tree_err('tree_ddl_create: a SHAPE ONLY (abstract) tree cannot have a source')
       WHEN NOT abstract AND source IS NULL THEN tree_err('tree_ddl_create: no source given; declare abstract := true (SHAPE ONLY) or pass source')
       WHEN storage IS NULL OR storage NOT IN ('materialized', 'projection') THEN tree_err('tree_ddl_create: storage must be materialized or projection')
-      WHEN (shape).level IS NULL AND (shape).parent IS NULL THEN tree_err('tree_ddl_create: declare LEVEL or PARENT (R2)')
-      WHEN (shape).level IS NULL AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
-      WHEN (shape).level IS NULL AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
+      WHEN NOT level_basis AND (shape).key IS NULL THEN tree_err('tree_ddl_create: PARENT basis requires KEY (the column PARENT refers to)')
+      WHEN NOT level_basis AND NOT (tree_sql_is_ident((shape).key) AND tree_sql_is_ident((shape).parent)) THEN tree_err('tree_ddl_create: PARENT basis needs KEY and PARENT to be plain column names')
       WHEN NOT abstract AND storage = 'projection' AND level_basis AND (shape)."order" IS NULL THEN tree_err('tree_ddl_create: ORDER is required for projection-mode trees (the source is not frozen)')
       WHEN NOT abstract AND order_source = 'frozen' AND NOT current_setting('preserve_insertion_order') THEN tree_err('tree_ddl_create: ORDER is required because preserve_insertion_order is off')
       -- both halves of the S ladder: the prefix check reads the group as written (a prefix that
@@ -102,8 +121,25 @@ built AS (
    'INSERT INTO tree_catalog.slots VALUES ' || list_aggregate(list_transform(rows, lambda x:
        '(' || tree_sql_lit(db) || ', ' || tree_sql_lit(sch) || ', ' || tree_sql_lit(nm) || ', ' || tree_sql_lit((x).b) || ', ' || tree_sql_lit((x).s) || ', ' || tree_sql_lit((x).e) || ')'), 'string_agg', ', ') AS s_slots,
    tree_sql_pseudo_insert(db, sch, nm, (shape).semantic.pseudo, explicit_sel_prefix) AS s_pseudo,
+   -- ORDER first, and over the SOURCE rather than the projection: it must precede every statement
+   -- that evaluates proj_sql, because a tie is numbered away by row_number() and, under a declared
+   -- PARENT, multiplies rows through the __order join (M3 §3.2). Emitted for projection-mode trees
+   -- too -- a tie there makes _pre change between queries.
+   CASE WHEN abstract THEN NULL ELSE tree_compile_order_check((shape)."order", (shape).root, source, sch || '.' || nm) END AS s_order,
+   -- The parent basis's two, in this order and both ahead of everything that evaluates proj_sql:
+   -- a repeated KEY multiplies or collapses the walk, so the reach check run first would report
+   -- that as unreachable rows and name the wrong defect.
+   CASE WHEN abstract THEN NULL ELSE tree_compile_key_check(key_expr, (shape).root, source, sch || '.' || nm) END AS s_key,
+   CASE WHEN abstract THEN NULL ELSE tree_compile_reach_check(key_expr, (shape).root, source, '(' || proj_sql || ')', sch || '.' || nm, attr_text) END AS s_reach,
    CASE WHEN abstract THEN NULL ELSE tree_sql_shadow_check('(' || proj_sql || ')', 'tree_ddl_create') END AS s_shadow,
-   CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL) END AS s_p13,
+   CASE WHEN abstract THEN NULL ELSE tree_compile_p13('(' || proj_sql || ')', sch || '.' || nm, (shape).root IS NOT NULL, (shape).level) END AS s_p13,
+   -- O conformance (M3 §3.1), after P13 so a malformed level is reported as that rather than as
+   -- the disagreeing SIZE it goes on to produce. MATERIALIZED ONLY: this statement pins what is
+   -- about to be STORED, and a projection-mode tree stores nothing -- its source can change
+   -- under it between any two queries, so a create-time refusal would be a promise the storage
+   -- mode cannot keep. tree_check RECORDS the same comparison for those trees instead (§3.4).
+   CASE WHEN abstract OR storage <> 'materialized' THEN NULL
+        ELSE tree_compile_o_conformance(shape, '(' || proj_sql || ')', sch || '.' || nm, tree_sql_o_order_col(shape, attr_text)) END AS s_conform,
    CASE WHEN abstract OR storage <> 'materialized' THEN NULL ELSE 'CREATE TABLE ' || tbl_name || ' AS ' || proj_sql END AS s_table,
    CASE WHEN abstract THEN NULL WHEN storage = 'materialized' THEN 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE SELECT * FROM ' || tbl_name
         ELSE 'CREATE OR REPLACE MACRO ' || proj_name || '() AS TABLE ' || proj_sql END AS s_macro,
@@ -118,5 +154,5 @@ SELECT CASE WHEN s_begin IS NULL OR s_trees IS NULL OR s_slots IS NULL OR s_comm
             -- plain tree_err(), not (SELECT tree_err(...)): an uncorrelated scalar subquery is
             -- evaluated once, eagerly, and would refuse every valid create
             THEN tree_err('tree_ddl_create: internal: a required statement compiled to NULL')
-            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_shadow, s_p13, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
+            ELSE list_filter([s_begin, s_trees, s_slots, s_pseudo, s_order, s_key, s_reach, s_shadow, s_p13, s_conform, s_table, s_macro, s_partitions, s_compiled, s_attr_cols, s_commit], lambda x: x IS NOT NULL) END
 FROM built);

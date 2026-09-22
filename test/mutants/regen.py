@@ -27,7 +27,7 @@ because "the listed suites pass with the original macro" is worth proving for th
 Usage:  python3 test/mutants/regen.py [--check]
         --check writes nothing and exits non-zero if any file is out of date.
 """
-import argparse, os, re, sys
+import argparse, glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.join(ROOT, "test/mutants")
@@ -41,17 +41,18 @@ SPEC = {
     "MN14": ("sql/07_match.sql", ["tree_sql_subtree", "tree_sql_children", "tree_sql_siblings"], []),
     "MN15": ("sql/04_dml.sql", ["tree_sql_p13_pred"], []),
 
-    "MN03": ("sql/02_projection.sql", ["tree_compile_projection"], [
-        ("THEN 'CAST(a.__size_raw AS BIGINT)' END", "THEN 'CAST(a.__size_raw AS BIGINT) - 1' END", 1)]),
+    "MN04": ("sql/02_projection.sql", ["tree_compile_projection"], [
+        ("CAST(a.__size_raw AS BIGINT) AS _size",
+         "CAST(a.__size_raw AS BIGINT) + 1 AS _size", 1)]),
 
     "MN05": ("sql/07_match.sql", ["tree_sql_chain"], [
-        ("ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, p, elem)"
+        ("ELSE tree_sql_comb(COALESCE((steps[1]).op, 'desc'), anchor, (steps[1]).alias, elem)"
          " || ' AND (' || (steps[1]).pred || ')' END",
          "ELSE tree_sql_children(anchor, (steps[1]).alias)"
          " || ' AND (' || (steps[1]).pred || ')' END", 1)]),
 
     "MN06": ("sql/07_match.sql", ["tree_sql_comb", "tree_compile_match"], [
-        ("    WHEN 'next'  THEN tree_sql_next_sibling(a, b, p, elem)\n"
+        ("    WHEN 'next'  THEN tree_sql_next_sibling(a, b, elem)\n"
          "    WHEN 'after' THEN tree_sql_after(a, b)\n",
          "    -- the mutation, half one: 'next' and 'after' fall through to the ELSE below\n", 1),
         ("    -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain\n"
@@ -240,6 +241,19 @@ def build(mid, spec, path, edits_on):
     return header + (MARKER % src) + "\n" + body.rstrip("\n") + "\n"
 
 
+MACRO_RE = re.compile(r"^CREATE OR REPLACE MACRO\s+([A-Za-z_][A-Za-z0-9_]*)", re.I | re.M)
+
+
+def overridden_macros_missing_from_sql(mutant_text):
+    """The macros a hand-written mutant overrides that no sql/*.sql file defines any more: a
+    mutant overriding a removed macro mutates nothing the suites still call."""
+    defined = set()
+    for f in sorted(glob.glob(os.path.join(ROOT, "sql", "*.sql"))):
+        with open(f) as fh:
+            defined |= {n.lower() for n in MACRO_RE.findall(fh.read())}
+    return [n for n in MACRO_RE.findall(mutant_text) if n.lower() not in defined]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="write nothing; exit 1 if out of date")
@@ -250,9 +264,25 @@ def main():
     for m in manifest:
         mid = m["id"]
         if mid not in SPEC:
+            # A hand-written mutant (no `edits` table entry at all): still checked for staleness
+            # against the macros it overrides, the only check that applies to it -- it names macros
+            # that must still exist in sql/, or the mutant mutates nothing the suites still call.
+            mutant = os.path.join(HERE, m["file"])
+            if os.path.exists(mutant):
+                missing = overridden_macros_missing_from_sql(open(mutant).read())
+                if missing:
+                    stale.append(f"{os.path.relpath(mutant, ROOT)} overrides {', '.join(missing)},"
+                                 f" which sql/ no longer defines")
             continue
         spec = SPEC[mid]
         mutant = os.path.join(HERE, m["file"])
+        if not spec[2]:
+            # A hand-written override with a SPEC entry but no edits (MN01, MN02, MN14, MN15):
+            # same staleness check as above, plus its control is still generated below.
+            missing = overridden_macros_missing_from_sql(open(mutant).read())
+            if missing:
+                stale.append(f"{os.path.relpath(mutant, ROOT)} overrides {', '.join(missing)},"
+                             f" which sql/ no longer defines")
         control = mutant[:-len(".sql")] + ".control.sql"
         targets = [(control, False)] + ([(mutant, True)] if spec[2] else [])
         for path, edits_on in targets:

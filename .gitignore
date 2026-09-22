@@ -1,2 +1,3 @@
 .kibitzer/
 __pycache__/
+.tmp/

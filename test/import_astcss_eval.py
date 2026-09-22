@@ -291,12 +291,16 @@ def write_42_second_differential(hand):
     lets the projection derive all three from (ROOT, ORDER, LEVEL). The S group, the source rows
     and the selector are identical, so no selector may be able to tell the two trees apart.
 
-    app.parquet only (54 rows): the derived side is quadratic in the tree (tree_sql_size_expr is a
-    correlated min over the projection), so running the corpus over scripts would cost minutes for
-    no new coverage. Every one of astcss-eval's 108 rows targets `scripts` or `py_variety`, so the
-    rows templated here are the hand corpus's own `app` rows -- which already cover a sibling
-    combinator (c08) and nested :has/:not (c06, c07, c13), the two shapes that read the O columns
-    hardest.
+    The SELECTOR records are app.parquet only (54 rows). Every one of astcss-eval's 108 rows
+    targets `scripts` or `py_variety`, so the rows templated here are the hand corpus's own `app`
+    rows -- which already cover a sibling combinator (c08) and nested :has/:not (c06, c07, c13),
+    the two shapes that read the O columns hardest.
+
+    The DERIVED COLUMNS themselves are checked on those two larger fixtures directly, by the two
+    records that follow the projection record. Since M3 the derivation is a level-expanded ASOF
+    join rather than a correlated min over the projection, so the larger fixtures cost a moment
+    instead of the minutes the quadratic form would have -- which is why those records can exist
+    at all.
 
     Those rows are not on their own discriminating, which is why the file opens with a record
     comparing the two projections directly and follows it with SIZE_WITNESS: perturbing the
@@ -329,6 +333,19 @@ def write_42_second_differential(hand):
            "          JOIN tree_project('main', 'app_derived') v ON d._root = v._root AND d._pre = v._pre\n"
            "         WHERE d._size IS DISTINCT FROM v._size OR d._parent IS DISTINCT FROM v._parent\n"
            "            OR d._children IS DISTINCT FROM v._children);\n----\ntrue\ttrue\t0\n\n"]
+    # The same claim on the two LARGER fixtures, against the parquet's own columns rather than
+    # against a second tree: 14,265 and 9,486 rows over 15 and 17 roots, which is where a
+    # derivation that ran past a root's boundary or miscounted a child would show up. These are
+    # affordable only because the derivation stopped being quadratic (M3 Task 6).
+    for fx in ("scripts", "py_variety"):
+        src = "read_parquet(''test/data/%s.parquet'')" % fx
+        out.append(
+            "# derived SIZE, PARENT and CHILDREN equal the parquet's own columns on %s\n"
+            "query I\nWITH d AS (FROM query(tree_compile_projection(tree_shape(root := 'file_path',"
+            " \"order\" := 'node_id', level := 'depth'), '%s', '*')))\n"
+            "SELECT count(*) FROM d WHERE _size IS DISTINCT FROM descendant_count"
+            " OR _parent IS DISTINCT FROM parent_id\n"
+            "   OR _children IS DISTINCT FROM children_count;\n----\n0\n\n" % (fx, src))
     out += _same_keys_record(
         "# %s -- the one selector on this fixture whose answer reads SIZE: app.py:50 is the last\n"
         "# descendant of its `attribute`, so a subtree range one short of the declared size drops\n"
