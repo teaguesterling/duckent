@@ -65,12 +65,27 @@ CREATE OR REPLACE MACRO tree_sql_before(a, b) AS
 -- PARTITION BY _root, _parent is the sibling relation itself, and it groups the level-0 rows of a
 -- partition together through their shared NULL _parent -- the same reading tree_sql_siblings gets
 -- from IS NOT DISTINCT FROM, so a partition's first root is a first child here too.
-CREATE OR REPLACE MACRO tree_sql_nav_ctes(proj_rel) AS
-  'WITH __proj AS (SELECT * FROM ' || proj_rel || '), '
-  || '__sib AS (SELECT _root, _pre, '
+-- The window itself, over whatever relation is named, spelled once and used by both callers below.
+CREATE OR REPLACE MACRO tree_sql_sib_body(rel) AS
+  '__sib AS (SELECT _root, _pre, '
   || 'first_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS __next_el, '
   || 'last_value(CASE WHEN _element THEN _pre END IGNORE NULLS) OVER (PARTITION BY _root, _parent ORDER BY _pre ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS __prev_el '
-  || 'FROM __proj) ';
+  || 'FROM ' || rel || ') ';
+
+-- What a compiled MATCH opens with: the projection as __proj, because several step aliases range
+-- over it, and the window read from __proj rather than from the projection a second time.
+CREATE OR REPLACE MACRO tree_sql_nav_ctes(proj_rel) AS
+  'WITH __proj AS (SELECT * FROM ' || proj_rel || '), ' || tree_sql_sib_body('__proj');
+
+-- What TRAVERSAL opens with: the window only, read straight from the projection. sql/08_traversal
+-- has exactly two aliases and, unlike a selector, an anchor predicate on ONE row
+-- (`a._root = <lit> AND a._pre = <n>`). Routing those aliases through a __proj CTE materializes the
+-- whole projection and stops that predicate reaching the base scan: on a 500k-row materialized
+-- tree, tree_parent returning one row measured 1.9 ms with the aliases on the projection text,
+-- 16.0 ms through __proj, and 2.5 ms through __proj for the window alone -- so it is __proj that
+-- costs, not __sib. Naming __sib here is free even for the five traversal macros that never read
+-- it, because DuckDB prunes an unreferenced CTE.
+CREATE OR REPLACE MACRO tree_sql_sib_cte(proj_rel) AS 'WITH ' || tree_sql_sib_body(proj_rel);
 
 -- The nearest element sibling, in either direction, looked up in __sib instead of scanned for.
 -- The element branch needs only tree_sql_siblings as its base, not tree_sql_after/before: b is
@@ -352,6 +367,16 @@ bad_dup AS (SELECT count(*) <> count(DISTINCT node_id) AS bad FROM ir),
 -- convergence point, so IR that reached the compiler by any other road is refused here too.
 bad_alias AS (
   SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND regexp_matches(alias, '^s[0-9]+$')),
+-- `__` is the namespace the match compiler gives its OWN relations -- `__proj` (the projection,
+-- read once) and `__sib` (the sibling window) -- and the probe aliases `__s` and `__x` inside
+-- them. A user alias there does NOT collide loudly the way s<N> does. It shadows the probe, whose
+-- WHERE then compares the shadowing row to itself and is trivially true or unsatisfiable: `__x`
+-- on a non-ELEMENT `:last-child` answered EVERY row (2 rows became 4), and `__s` on an ELEMENT
+-- `:first-child` made the `__sib` lookup a scalar subquery over the whole CTE and raised a bare
+-- "More than one row returned by a subquery". M3 Task 8 introduced both names; css already
+-- reserved `:__cap_` for the same reason.
+bad_alias_gen AS (
+  SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND starts_with(alias, '__')),
 -- An alias also becomes a SQL relation alias and an output column name, so it has to be an
 -- identifier at all. `my-cap` passed every producer and died in DuckDB's binder on `... AS
 -- my-cap`, an error naming nothing the user wrote; all three front-ends refuse it now, and this
@@ -410,6 +435,8 @@ chk AS (SELECT CASE
   WHEN (SELECT bad FROM bad_dup) THEN tree_err('tree_match: selector node ids are not unique')
   WHEN (SELECT a FROM bad_alias) IS NOT NULL
     THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_alias_gen) IS NOT NULL
+    THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias_gen) || ' is reserved for the compiler''s own relations')
   WHEN (SELECT a FROM bad_alias_ident) IS NOT NULL
     THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias_ident) || ' is not an identifier')
   WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()

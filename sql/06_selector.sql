@@ -159,6 +159,16 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     SELECT min(a."as") AS a FROM allsteps a WHERE a.depth > 0 AND a."as" IS NOT NULL),
   bad_alias AS (
     SELECT min(a."as") AS a FROM allsteps a WHERE a."as" IS NOT NULL AND regexp_matches(a."as", '^s[0-9]+$')),
+  -- `__` is the namespace the match compiler gives its OWN relations -- `__proj` (the projection,
+  -- read once) and `__sib` (the sibling window) -- and the probe aliases `__s` and `__x` inside
+  -- them. A user alias there does NOT collide loudly the way s<N> does. It shadows the probe, whose
+  -- WHERE then compares the shadowing row to itself and is trivially true or unsatisfiable: `__x`
+  -- on a non-ELEMENT `:last-child` answered EVERY row (2 rows became 4), and `__s` on an ELEMENT
+  -- `:first-child` made the `__sib` lookup a scalar subquery over the whole CTE and raised a bare
+  -- "More than one row returned by a subquery". M3 Task 8 introduced both names; css already
+  -- reserved `:__cap_` for the same reason.
+  bad_alias_gen AS (
+    SELECT min(a."as") AS a FROM allsteps a WHERE a."as" IS NOT NULL AND starts_with(a."as", '__')),
   -- An alias becomes a SQL relation alias and an output column name, so it has to be an
   -- identifier. `my-cap` passed every producer -- this constructor, the printer, both css
   -- front-ends -- and then died in DuckDB's binder on `... AS my-cap`, an error naming nothing
@@ -219,6 +229,7 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     -- s<N> is what the match compiler names step N when the user names nothing; a user
     -- alias of that shape would collide with another step's generated alias
     WHEN (SELECT a FROM bad_alias) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_alias_gen) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias_gen) || ' is reserved for the compiler''s own relations')
     WHEN (SELECT a FROM bad_alias_ident) IS NOT NULL THEN tree_err('tree_steps: alias ' || (SELECT a FROM bad_alias_ident) || ' is not an identifier')
     ELSE list({node_id: node_id, parent_id: parent_id, kind: kind, value: value, op: op, arg: arg, alias: alias} ORDER BY node_id)::TREE_SELECTOR END
   FROM parented);

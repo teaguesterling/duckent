@@ -262,12 +262,104 @@ because it is the widest one that yields a time at all.
 **"One projection per query" was checked in the plan, not assumed.** A three-step selector plans as
 three `CTE_SCAN`s of one CTE index rather than three scans of the source. The `__sib` window costs
 nothing when unused: a selector with no sibling relation plans with zero `WINDOW` operators even on
-a tree that declares ELEMENT, and exactly one when `next` is asked for. So the CTEs are not a tax
-paid by every query for a feature few use.
+a tree that declares ELEMENT, and exactly one when `next` is asked for.
+
+**That was checked for SELECTORS only, and it was false for traversal** — see the review section
+below. `sql/08_traversal.sql`'s `tree_nav` put its two aliases on `__proj` as well, which cost it
+the pushdown of its own one-row anchor predicate. The sentence that used to stand here, "so the
+CTEs are not a tax paid by every query", was true of the compiler and untrue of the five traversal
+macros that never read `__sib`. Fixed below.
 
 A C++ port keeps the shape of this: `__sib` is one ordered pass over a partition, which is what a
 node cursor does anyway. What it removes is the compiler's need to spell the projection into every
 fragment — the fragments name a relation, and binding decides what that relation is.
+
+## M3 Task 8 review (2026-09-29)
+
+Task 8 was merged in PR #14 without the review round tasks 1–7 each had. The round was run
+afterwards. It found **three defects and one coverage hole, none of them a wrong answer on a
+well-formed selector**, and every one was reproduced independently before being accepted — the
+reviewer's Task 3 claim that proved false is why that is the standing rule here.
+
+### R1: a user alias in the `__` namespace shadows the compiler's own probes
+
+`__` is the namespace the compiler gives its own relations (`__proj`, `__sib`) and the probe
+aliases inside them (`__s`, `__x`). A user alias there did not collide loudly the way `s<N>` does —
+it shadowed the probe, whose `WHERE` then compared the shadowing row to itself. Measured on a
+4-row fixture, with a harmless alias as the control:
+
+| selector | alias `q` | the generated name |
+|---|---|---|
+| non-ELEMENT `:last-child` | 2 rows | **4 rows** (silently wrong) |
+| ELEMENT `:first-child` | 2 rows | `Invalid Input Error: More than one row returned by a subquery` |
+
+Both names are Task 8's. The `s<N>` refusal has three producers (`tree_steps`, the css front-end,
+and the compiler as the convergence point every front-end's IR arrives at), so the new guard has
+the same three, with its own message: `alias __x is reserved for the compiler's own relations`.
+Refusing the whole `__` prefix rather than enumerating four names is deliberate — it is the
+namespace, and `:__cap_` was already reserved in css on the same reasoning. Records in suites 30,
+31, 37 and 38, each confirmed to fail before the guard existed, with a positive control (`a__b` is
+a fine alias) so the guard cannot be passing by refusing everything.
+
+### R2: `tree_nav` paid for a CTE it did not need
+
+Putting `tree_nav`'s two aliases on `__proj` materializes the whole projection and stops its
+anchor predicate (`a._root = <lit> AND a._pre = <n>`, which selects ONE row) from reaching the base
+scan. Isolated on a 500k-row materialized tree with three hand-built variants of the same one-row
+query, so only the relation text differed:
+
+| variant | best |
+|---|---|
+| pre-Task-8: both aliases on the projection text, no CTEs | 1.9 ms |
+| as committed: both aliases on `__proj` | **16.0 ms** |
+| `__sib` over the projection, aliases on the projection text | 2.5 ms |
+
+So it is `__proj` that costs, not `__sib`. Through the real macros on the same tree:
+
+| macro | as committed | fixed |
+|---|---|---|
+| `tree_parent` | 19.4 ms | 14.7 ms |
+| `tree_children` | 17.7 ms | 13.6 ms |
+| `tree_next_sibling` | 112.8 ms | 66.3 ms |
+
+`tree_sql_nav_ctes` splits into `tree_sql_sib_body(rel)` (the window, spelled once) plus two
+callers: the compiler still opens with `__proj` and `__sib`, and traversal opens with
+`tree_sql_sib_cte`, the window alone read straight from the projection. The compiler's pinned SQL
+in suite 31 is byte-identical, which is what says this moved traversal and not matching. Safe
+because `tree_nav` always passes `elem := true`, so the one `__proj`-referencing branch
+(`tree_sql_last_child`'s ELSE) is never reached from there. Naming `__sib` for the five traversal
+macros that never read it is free: DuckDB prunes an unreferenced CTE.
+
+### R3: the rewritten `last_child` depends on an operator no test covered
+
+Task 8 changed the non-ELEMENT `last_child` from a scan to a keyed lookup, which introduced a
+parent comparison the scan never made. Level-0 rows carry a NULL `_parent`, so under plain `=` the
+comparison is NULL, the `NOT EXISTS` finds nothing, and **every root of a partition reads as a last
+child** — F7 of the 2026-09-14 review, reappearing in a new place.
+
+The rewrite is correct. What was missing is any record that says so: changing that one operator to
+`=` in a scratch copy left **all 24 suites passing**. By this project's third doctrine a suite no
+mutant can fail tests nothing, so the operator was load-bearing and unguarded.
+
+Equivalence was checked first, old form against new, on `app.parquet`, `scripts.parquet` (14,265
+rows), a 10-root partition and a deep chain — no disagreement — and the differential was shown to
+have power by perturbing the new form three ways (size off by one, dropped parent check, `=` for
+`IS NOT DISTINCT FROM`), each of which it caught. Suite 33 now carries a record: 10 roots in one
+partition, `:last-child` pinned to 11, counted from the definitions rather than read off the
+implementation. It FAILS on the mutated copy (`got ['20'], want ['11']`) and passes on clean.
+
+Reachability was checked rather than assumed: `CALL tree_ddl_create` is emulated by `test/run.py`
+over the same compile path the DDL uses, and a partition with several level-0 rows is *accepted* by
+it, so this is not an unreachable shape. No mutant id is claimed — ids are permanent and
+handover-assigned — so this is the `also_kills` candidate the MN02 note describes.
+
+### Carried, not fixed
+
+For **projection-storage** trees the source can change after create and O conformance is not
+re-checked per query, so a drifted `_size` now makes `:last-child` silently wrong where before it
+was right (the old form read no `_size`). Materialized trees are unaffected, and conformance
+refuses a bad `_size` at ingest for both. Recorded here rather than fixed: re-checking per query
+is a cost decision the O layer's design should make, not a review follow-up.
 
 ## M2 differential adjudications
 

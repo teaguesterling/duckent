@@ -632,3 +632,20 @@ SELECT tree_compile_match('main', 'app', [
   {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
 ----
 tree_match: alias my-cap is not an identifier
+
+# The compiler names its OWN relations with a `__` prefix: `__proj` (the projection, read once),
+# `__sib` (the sibling window), and the probe aliases `__s` and `__x` inside them. A user alias in
+# that namespace shadows one of those, and both ways it goes wrong silently or illegibly. Measured
+# on a 4-row fixture before this guard: `__x` on a non-ELEMENT `:last-child` made the probe's WHERE
+# `__x._root = __x._root AND __x._pre = __x._pre + __x._size + 1` -- trivially unsatisfiable, so
+# NOT EXISTS was always true and 2 matching rows became 4. `__s` on an ELEMENT `:first-child` turned
+# the `__sib` lookup into a scalar subquery with a trivially-true WHERE and died with "More than one
+# row returned by a subquery used as an expression", naming nothing the user wrote. M3 Task 8
+# introduced both names; `:__cap_` was already reserved in css for the same reason.
+statement error
+SELECT tree_compile_match('main', 'app', [
+  {node_id: 0, parent_id: NULL::INTEGER, kind: 'selector', value: NULL::VARCHAR, op: NULL::VARCHAR, arg: NULL::VARCHAR, alias: NULL::VARCHAR},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: '__x'},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'function_definition', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_match: alias __x is reserved for the compiler's own relations

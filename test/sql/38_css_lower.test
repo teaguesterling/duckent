@@ -783,3 +783,17 @@ statement error
 SELECT tree_css_lower([{node_id: 0, parent_id: NULL, type: 'stylesheet', name: ''}, {node_id: 1, parent_id: 0, type: 'ERROR', name: 'x'}, {node_id: 2, parent_id: 1, type: 'keyframe_block', name: 'x'}]);
 ----
 unexpected 'keyframe_block': the css grammar did not read this as a v0 selector
+
+# The compiler names its OWN relations with a `__` prefix: `__proj` (the projection, read once),
+# `__sib` (the sibling window), and the probe aliases `__s` and `__x` inside them. A user alias in
+# that namespace shadows one of those, and both ways it goes wrong silently or illegibly. Measured
+# on a 4-row fixture before this guard: `__x` on a non-ELEMENT `:last-child` made the probe's WHERE
+# `__x._root = __x._root AND __x._pre = __x._pre + __x._size + 1` -- trivially unsatisfiable, so
+# NOT EXISTS was always true and 2 matching rows became 4. `__s` on an ELEMENT `:first-child` turned
+# the `__sib` lookup into a scalar subquery with a trivially-true WHERE and died with "More than one
+# row returned by a subquery used as an expression", naming nothing the user wrote. M3 Task 8
+# introduced both names; `:__cap_` was already reserved in css for the same reason.
+statement error
+SELECT tree_parse_css('.fn@__x');
+----
+alias __x is reserved for the compiler's own relations

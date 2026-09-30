@@ -25,7 +25,7 @@ CREATE OR REPLACE MACRO tree_proj_sql(sch, nm) AS 'tree_catalog.' || tree_sql_ob
 -- value the caller gave -- `'6'` still equals 6, `5.7` equals nothing, since a tree's _pre values
 -- are integers -- and still refuses text that is not a number at all.
 CREATE OR REPLACE MACRO tree_nav(sch, nm, root_key, pre, rel) AS TABLE
-  FROM query(tree_sql_nav_ctes(tree_proj_sql(sch, nm)) || 'SELECT b.* FROM __proj a, __proj b WHERE a._root::VARCHAR = '
+  FROM query(tree_sql_sib_cte(tree_proj_sql(sch, nm)) || 'SELECT b.* FROM ' || tree_proj_sql(sch, nm) || ' a, ' || tree_proj_sql(sch, nm) || ' b WHERE a._root::VARCHAR = '
              || COALESCE(tree_sql_lit(root_key), 'NULL') || ' AND a._pre = ' || COALESCE(CAST(CAST(pre AS DOUBLE) AS VARCHAR), 'NULL') || ' AND ' || rel);
 
 -- The element flag passed to the fragments is always true here. Deciding it properly needs a
