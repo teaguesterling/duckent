@@ -235,3 +235,31 @@ SELECT (SELECT count(*) FROM tree_match('main', 'wide', tree_steps([{type: 'item
        (SELECT max(node_id) FROM tree_match('main', 'wide', tree_steps([{type: 'item', pseudo: 'last-child'}])));
 ----
 1998	0	2999
+
+# ---------------------------------------------------------------------------------------
+# Several level-0 rows in ONE partition, and a NON-ELEMENT tree
+# ---------------------------------------------------------------------------------------
+#
+# The keyed last-child form asks whether the row at `_pre + _size + 1` is a SIBLING, and it must
+# compare parents with IS NOT DISTINCT FROM. Level-0 rows carry a NULL _parent, so under plain `=`
+# the comparison is NULL, the NOT EXISTS finds nothing, and EVERY root of the partition reads as a
+# last child. That is F7's bug class (FINDINGS: "next/after compared b._parent = a._parent ... so
+# the root rows of a partition were never each other's siblings") reappearing in a form M3 Task 8
+# introduced -- the pre-Task-8 form scanned for a later sibling and never did this arithmetic.
+#
+# 10 roots at level 0 (node_id 0, 3, ... 27), each with two level-1 children. Counted from the
+# definitions: the last child of each root is its second child (10 rows), plus node 27, which is
+# the partition's last level-0 row and so has no later sibling of its own -- 11. Under `=` the
+# answer is 20, because the 10 roots wrongly join the set.
+statement ok
+CREATE TABLE forest AS SELECT 'f' AS file_path, i AS node_id, (i % 3 <> 0)::INT AS depth,
+  CASE WHEN i % 3 = 0 THEN 2 ELSE 0 END AS descendant_count, 'n' AS type FROM range(30) t(i);
+
+statement ok
+CALL tree_ddl_create('main', 'forest', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id',
+  level := 'depth', size := 'descendant_count', semantic := tree_semantic(type := 'type')), source := 'forest'));
+
+query I
+SELECT count(*) FROM tree_match('main', 'forest', tree_steps([{pseudo: 'last-child'}]));
+----
+11

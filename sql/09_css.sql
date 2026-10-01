@@ -421,6 +421,15 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
   -- raised a bare Binder Error. tree_steps has refused the shape since M1 1/2; both css
   -- front-ends refuse it here, and the compiler refuses it behind them (C1).
   bad_cap_reserved AS (SELECT min(a) AS a FROM alias WHERE regexp_matches(a, '^s[0-9]+$')),
+  -- `__` is the namespace the match compiler gives its OWN relations -- `__proj` (the projection,
+  -- read once) and `__sib` (the sibling window) -- and the probe aliases `__s` and `__x` inside
+  -- them. A user alias there does NOT collide loudly the way s<N> does. It shadows the probe, whose
+  -- WHERE then compares the shadowing row to itself and is trivially true or unsatisfiable: `__x`
+  -- on a non-ELEMENT `:last-child` answered EVERY row (2 rows became 4), and `__s` on an ELEMENT
+  -- `:first-child` made the `__sib` lookup a scalar subquery over the whole CTE and raised a bare
+  -- "More than one row returned by a subquery". M3 Task 8 introduced both names; css already
+  -- reserved `:__cap_` for the same reason.
+  bad_cap_gen AS (SELECT min(a) AS a FROM alias WHERE starts_with(a, '__')),
   -- An alias becomes a SQL relation alias and an output column name, so it has to be an
   -- identifier. css capture names took the css IDENT shape, which allows `-`, so `@my-cap`
   -- passed every producer -- this fold, the runner parser, the printer -- and then died in
@@ -485,6 +494,8 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
     WHEN (SELECT n FROM bad_cap_in_group) > 0 THEN tree_css_err('css: capture inside :has/:not has no row to bind')
     WHEN (SELECT a FROM bad_cap_reserved) IS NOT NULL
       THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_reserved) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_cap_gen) IS NOT NULL
+      THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_gen) || ' is reserved for the compiler''s own relations')
     WHEN (SELECT a FROM bad_cap_ident) IS NOT NULL
       THEN tree_css_err('css: alias ' || (SELECT a FROM bad_cap_ident) || ' is not an identifier')
     WHEN (SELECT t FROM bad_exp) IS NOT NULL

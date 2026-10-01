@@ -100,6 +100,16 @@ bad_dup AS (SELECT count(*) <> count(DISTINCT node_id) AS bad FROM ir),
 -- convergence point, so IR that reached the compiler by any other road is refused here too.
 bad_alias AS (
   SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND regexp_matches(alias, '^s[0-9]+$')),
+-- `__` is the namespace the match compiler gives its OWN relations -- `__proj` (the projection,
+-- read once) and `__sib` (the sibling window) -- and the probe aliases `__s` and `__x` inside
+-- them. A user alias there does NOT collide loudly the way s<N> does. It shadows the probe, whose
+-- WHERE then compares the shadowing row to itself and is trivially true or unsatisfiable: `__x`
+-- on a non-ELEMENT `:last-child` answered EVERY row (2 rows became 4), and `__s` on an ELEMENT
+-- `:first-child` made the `__sib` lookup a scalar subquery over the whole CTE and raised a bare
+-- "More than one row returned by a subquery". M3 Task 8 introduced both names; css already
+-- reserved `:__cap_` for the same reason.
+bad_alias_gen AS (
+  SELECT min(alias) AS a FROM ir WHERE kind = 'step' AND alias IS NOT NULL AND starts_with(alias, '__')),
 -- An alias also becomes a SQL relation alias and an output column name, so it has to be an
 -- identifier at all. `my-cap` passed every producer and died in DuckDB's binder on `... AS
 -- my-cap`, an error naming nothing the user wrote; all three front-ends refuse it now, and this
@@ -158,6 +168,8 @@ chk AS (SELECT CASE
   WHEN (SELECT bad FROM bad_dup) THEN tree_err('tree_match: selector node ids are not unique')
   WHEN (SELECT a FROM bad_alias) IS NOT NULL
     THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias) || ' is reserved for generated step aliases')
+    WHEN (SELECT a FROM bad_alias_gen) IS NOT NULL
+    THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias_gen) || ' is reserved for the compiler''s own relations')
   WHEN (SELECT a FROM bad_alias_ident) IS NOT NULL
     THEN tree_err('tree_match: alias ' || (SELECT a FROM bad_alias_ident) || ' is not an identifier')
   WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()

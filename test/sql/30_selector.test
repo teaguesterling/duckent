@@ -101,3 +101,28 @@ query I
 SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a', has: [{comb: 'child', type: 'b'}]}])), chr(10), ' | ');
 ----
 (TYPE 'a', HAS ( CHILD (TYPE 'b') ))
+
+# The compiler names its OWN relations with a `__` prefix: `__proj` (the projection, read once),
+# `__sib` (the sibling window), and the probe aliases `__s` and `__x` inside them. A user alias in
+# that namespace shadows one of those, and both ways it goes wrong silently or illegibly. Measured
+# on a 4-row fixture before this guard: `__x` on a non-ELEMENT `:last-child` made the probe's WHERE
+# `__x._root = __x._root AND __x._pre = __x._pre + __x._size + 1` -- trivially unsatisfiable, so
+# NOT EXISTS was always true and 2 matching rows became 4. `__s` on an ELEMENT `:first-child` turned
+# the `__sib` lookup into a scalar subquery with a trivially-true WHERE and died with "More than one
+# row returned by a subquery used as an expression", naming nothing the user wrote. M3 Task 8
+# introduced both names; `:__cap_` was already reserved in css for the same reason.
+statement error
+SELECT tree_steps([{type: 'x', "as": '__x'}]);
+----
+alias __x is reserved for the compiler's own relations
+
+statement error
+SELECT tree_steps([{type: 'x', "as": '__s'}]);
+----
+alias __s is reserved for the compiler's own relations
+
+# a name that merely CONTAINS __ , or starts with a single _, is not in that namespace
+query I
+SELECT len(tree_steps([{type: 'x', "as": 'a__b'}]));
+----
+3
