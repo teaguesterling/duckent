@@ -48,6 +48,33 @@ FROM tree_match('main', 'app', '.fn[name^="sh"]', language := 'css') SELECT name
 ----
 shout
 
+# An EMPTY affix value matches NOTHING, per CSS. It used to match everything: the value is
+# concatenated into the pattern, so `*=""` became LIKE '%%' and `^=""`/`$=""` became LIKE '%'.
+# Measured before the fix on a four-name tree: all three returned every row.
+query III
+SELECT (SELECT count(*) FROM tree_match('main', 'app', '[name*=""]', language := 'css')),
+       (SELECT count(*) FROM tree_match('main', 'app', '[name^=""]', language := 'css')),
+       (SELECT count(*) FROM tree_match('main', 'app', '[name$=""]', language := 'css'));
+----
+0	0	0
+
+# ... and the NEGATION of a never-matching clause matches everything, which is the half that goes
+# wrong if "matches nothing" is spelled as a NULL predicate instead of as false: NOT NULL is NULL,
+# so `:not([name*=""])` would match nothing either. Both attr branches wrap the comparison in
+# COALESCE(.., false), so the clause is false and its negation is true -- all 54 rows of app.parquet.
+query I
+SELECT count(*) FROM tree_match('main', 'app', ':not([name*=""])', language := 'css');
+----
+54
+
+# A non-empty affix still matches, so the guard above is not refusing affixes in general. Two rows,
+# not one: only `shout` contains "hou", but two rows carry that name (the definition and an
+# identifier), which is the kind of thing a DISTINCT in the expectation would have hidden.
+query I
+SELECT count(*) FROM tree_match('main', 'app', '[name*="hou"]', language := 'css');
+----
+2
+
 # a bare identifier value is quoted as text, a bare number is left unquoted
 query I
 FROM tree_match('main', 'app', '.fn[name=greet]', language := 'css') SELECT name;

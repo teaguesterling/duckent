@@ -171,6 +171,21 @@ CREATE OR REPLACE MACRO tree_sql_is_numeric_type(t) AS
                              'FLOAT', 'DOUBLE', 'REAL', 'INT', 'INT1', 'INT2', 'INT4', 'INT8')
   OR starts_with(upper(COALESCE(t, '')), 'DECIMAL') OR starts_with(upper(COALESCE(t, '')), 'NUMERIC');
 
+-- The type a STORED value is cast to before being compared against a literal of type `t` -- which
+-- is NOT `t` when `t` is a number. DuckDB's TRY_CAST to an integer ROUNDS, so casting the stored
+-- side to the literal's own BIGINT made `[n=2]` match a stored 1.5 and 2.4:
+--
+--   TRY_CAST('1.5' AS BIGINT) = 2   TRY_CAST('2.4' AS BIGINT) = 2
+--
+-- DECIMAL(38,10) compares numerically without rounding. DOUBLE would also reject 1.5 and 2.4, and
+-- was the obvious choice, but it trades a rounding false-match for a precision one -- measured,
+-- TRY_CAST('9007199254740993' AS DOUBLE) = 9007199254740992 is TRUE, where DECIMAL is false.
+--
+-- A value needing more than 10 decimal places or 28 integer digits casts to NULL and so does not
+-- match, which both attr branches already read as false through their COALESCE.
+CREATE OR REPLACE MACRO tree_sql_cmp_cast_type(t) AS
+  CASE WHEN tree_sql_is_numeric_type(t) THEN 'DECIMAL(38,10)' ELSE t END;
+
 -- How a comparison against a PROJECTED column is spelled, given the column's declared type from
 -- the attribute_columns artifact (NULL when the artifact predates types). The literal is spliced
 -- as written except where that would mean something other than what it says:
@@ -191,7 +206,8 @@ CREATE OR REPLACE MACRO tree_sql_attr_col_cmp(alias, col, ctype, op, arg) AS
          THEN alias || '.' || tree_sql_ident(col) || ' ' || op || ' ' || tree_sql_lit(trim(arg))
        WHEN tree_sql_is_numeric_type(ctype)
          THEN alias || '.' || tree_sql_ident(col) || ' ' || op || ' ' || arg
-       ELSE 'TRY_CAST(' || alias || '.' || tree_sql_ident(col) || ' AS ' || tree_sql_literal_type(arg) || ') '
+       ELSE 'TRY_CAST(' || alias || '.' || tree_sql_ident(col) || ' AS '
+            || tree_sql_cmp_cast_type(tree_sql_literal_type(arg)) || ') '
             || op || ' ' || arg END;
 
 -- Clause predicate on the step alias, which is passed in: a placeholder substituted afterwards
@@ -237,7 +253,7 @@ CREATE OR REPLACE MACRO tree_sql_clause(kind, value, op, arg, alias, attr_cols, 
         WHEN has_map
           THEN 'COALESCE(' || CASE WHEN tree_sql_literal_type(arg) IS NULL
                                    THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'
-                                   ELSE 'TRY_CAST(' || alias || '._attr_map[' || tree_sql_lit(value) || '] AS ' || tree_sql_literal_type(arg) || ')' END
+                                   ELSE 'TRY_CAST(' || alias || '._attr_map[' || tree_sql_lit(value) || '] AS ' || tree_sql_cmp_cast_type(tree_sql_literal_type(arg)) || ')' END
                || ' ' || op || ' ' || arg || ', false)'
         ELSE tree_err('tree_match: attribute ' || COALESCE(value, '<NULL>') || ' is neither a projected column nor served by ATTR MAP') END
     -- One level only: recursive := true flattens _root's struct into its component columns, so

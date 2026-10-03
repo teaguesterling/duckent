@@ -249,8 +249,19 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
     -- (`'<pattern>' ESCAPE '\'`) because a clause is spliced as `<op> <arg>`.
     UNION ALL SELECT p.anchor, p.id, 4, 'attr', an.nm,
         CASE WHEN o.op = '=' THEN '=' ELSE 'LIKE' END,
+        -- An EMPTY affix value matches NOTHING, per CSS -- `[a^=""]`, `[a$=""]`, `[a*=""]` are all
+        -- unsatisfiable. Concatenating it into the pattern said the opposite: `*=""` became
+        -- LIKE '%%' and the other two LIKE '%', i.e. every row. Measured, all three returned the
+        -- whole tree.
+        --
+        -- Spelled as a NULL argument rather than as a never-matching pattern, because no finite
+        -- LIKE pattern is unsatisfiable. `col LIKE NULL` is NULL, and BOTH attr branches in
+        -- sql/07_match.sql wrap the comparison in COALESCE(.., false) -- so the clause is FALSE,
+        -- not NULL, and `:not([a*=""])` correctly matches everything. That distinction is the whole
+        -- reason this is safe: a NULL-valued clause would make the negation match nothing too.
         CASE WHEN o.op = '=' AND v.ty IN ('integer_value', 'float_value') THEN raw.t
              WHEN o.op = '=' THEN tree_sql_lit(raw.t)
+             WHEN raw.t = '' THEN 'NULL'
              WHEN o.op = '^=' THEN tree_sql_like_arg(tree_sql_like_escape(raw.t) || '%')
              WHEN o.op = '$=' THEN tree_sql_like_arg('%' || tree_sql_like_escape(raw.t))
              ELSE tree_sql_like_arg('%' || tree_sql_like_escape(raw.t) || '%') END

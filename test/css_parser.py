@@ -365,8 +365,20 @@ class Parser:
             # for any character followed by `t`, and `[attr^="50%"]` meant rather more than it
             # said. Must stay identical to tree_sql_like_escape / tree_sql_like_arg (sql/00_types.sql).
             op = "LIKE"
-            esc = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            arg = sql_str({"^=": esc + "%", "$=": "%" + esc, "*=": "%" + esc + "%"}[aop]) + " ESCAPE '\\'"
+            if raw == "":
+                # An EMPTY affix value matches NOTHING, per CSS. Concatenating it said the
+                # opposite: `*=""` became LIKE '%%' and `^=""`/`$=""` LIKE '%', i.e. every row.
+                #
+                # NULL rather than a never-matching pattern, because no finite LIKE pattern is
+                # unsatisfiable. `col LIKE NULL` is NULL, and both attr branches in
+                # sql/07_match.sql wrap the comparison in COALESCE(.., false) -- so the clause is
+                # FALSE, not NULL, and `:not([a*=""])` correctly matches everything. Kept identical
+                # to the `raw.t = ''` branch in sql/09_css.sql: the row-level differential between
+                # the two front-ends compares these args, so they have to agree exactly.
+                arg = "NULL"
+            else:
+                esc = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                arg = sql_str({"^=": esc + "%", "$=": "%" + esc, "*=": "%" + esc + "%"}[aop]) + " ESCAPE '\\'"
         self.skip_ws()
         if not self.at("]"):
             self.error("unclosed [ in attribute selector")
