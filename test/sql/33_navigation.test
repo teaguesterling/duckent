@@ -195,6 +195,48 @@ SELECT (SELECT count(*) FROM tree_match('main', 'ne', tree_steps([{pseudo: 'firs
 ----
 1	1
 
+# ... and they agree on an ORDER that is NEITHER DENSE NOR ZERO-BASED, which is the property the
+# O(1) forms actually rest on.
+#
+# `:first-child` compiles to `COALESCE(_pre = _parent + 1, _pre = 0)` and `:last-child` to a lookup
+# at `_pre + _size + 1`. Both are arithmetic on _pre, and both are valid ONLY because _pre is the
+# RANK of ORDER within ROOT (M3 §2.1), not the ORDER value: a projection that cast ORDER straight
+# to _pre -- which is what this used to do, and is "only ever right for a source whose ORDER was
+# already dense and 0-based per root" (sql/02_projection.sql) -- would break them.
+#
+# Every test above uses app.parquet, whose node_id is already dense and 0-based, so none of them
+# can tell the two apart. Here x's ORDER is 0/10/20 and y's is 100/110/120: if _pre were the ORDER
+# value, `_pre = _parent + 1` would be false for x's first child (10 <> 0 + 1) and for y's
+# (110 <> 100 + 1), and y's root would fail `_pre = 0` as well.
+statement ok
+CREATE TABLE gapped AS SELECT * FROM (VALUES
+  ('x',   0, 0, 'r'), ('x',  10, 1, 'a'), ('x',  20, 1, 'b'),
+  ('y', 100, 0, 'r'), ('y', 110, 1, 'a'), ('y', 120, 1, 'b')) t(f, ord, lvl, nm);
+
+statement ok
+CALL tree_ddl_create('main', 'gne', tree_spec(tree_shape(root := 'f', "order" := 'ord', level := 'lvl',
+  semantic := tree_semantic(type := 'nm')), source := 'gapped'));
+
+statement ok
+CALL tree_ddl_create('main', 'gel', tree_spec(tree_shape(root := 'f', "order" := 'ord', level := 'lvl',
+  semantic := tree_semantic(type := 'nm', element := 'true')), source := 'gapped'));
+
+# each partition's root is its own first and last child, as app.py's module is above
+query II
+SELECT (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gne', tree_steps([{pseudo: 'first-child'}]))),
+       (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gne', tree_steps([{pseudo: 'last-child'}])));
+----
+[x.r, x.a, y.r, y.a]	[x.r, x.b, y.r, y.b]
+
+# and the two spellings still answer the same relation on this shape
+query II
+SELECT (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gne', tree_steps([{pseudo: 'first-child'}])))
+     = (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gel', tree_steps([{pseudo: 'first-child'}]))),
+       (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gne', tree_steps([{pseudo: 'last-child'}])))
+     = (SELECT list(f || '.' || nm ORDER BY f, ord) FROM tree_match('main', 'gel', tree_steps([{pseudo: 'last-child'}])));
+----
+true	true
+
 # ---------------------------------------------------------------------------------------
 # The sibling and positional relations are LINEAR in the number of children of one parent
 # ---------------------------------------------------------------------------------------

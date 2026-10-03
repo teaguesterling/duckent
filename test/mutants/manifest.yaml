@@ -160,3 +160,14 @@
   # and declares an empty CLASSES list, so `.def` must select nothing there. The two promotion
   # records before it cannot see the mutant -- on rep_class every def row has a non-empty
   # CLASSES list, so the fallback never fires.
+- id: MN26
+  file: MN26_pre_is_order_value.sql
+  what: the projection uses the ORDER value as _pre instead of its rank within ROOT, so every
+    O(1) positional form (_pre = _parent + 1, _pre = 0, _pre + _size + 1) is arithmetic on the
+    wrong number
+  expect_fail: [test/sql/33_navigation.test]
+  # 33's gapped-ORDER records are the discriminating ones: x's ORDER is 0/10/20 and y's is
+  # 100/110/120, so :first-child's `_pre = _parent + 1` is false for both first children and
+  # `_pre = 0` is false for y's root. Every other record in that file -- and every positional
+  # record elsewhere -- runs on app.parquet, whose node_id is already dense and 0-based, where
+  # the mutation is invisible. Measured before planting: 2 of 25 records fail, and they are these.
