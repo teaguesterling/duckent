@@ -191,8 +191,56 @@ SELECT count(*) FROM tree_match('main', 'legacy', tree_steps([{attr: 'Name = ''g
 ----
 4
 
+# DECIMAL(38,10), not BIGINT: this assertion pinned the cast, and the cast changed. A legacy
+# artifact records no column type, so the stored value is cast to the literal's -- and TRY_CAST to
+# an integer ROUNDS, which made `[n=2]` match a stored 1.5 and 2.4. The count was and stays 0; only
+# the spelling moved. See tree_sql_cmp_cast_type in sql/07_match.sql for why not DOUBLE.
 query II
 SELECT (SELECT count(*) FROM tree_match('main', 'legacy', tree_steps([{attr: 'name = 5'}]))),
-       (tree_explain('main', 'legacy', tree_steps([{attr: 'name = 5'}]))).sql LIKE '%TRY_CAST(s1."name" AS BIGINT) = 5%';
+       (tree_explain('main', 'legacy', tree_steps([{attr: 'name = 5'}]))).sql LIKE '%TRY_CAST(s1."name" AS DECIMAL(38,10)) = 5%';
 ----
 0	true
+
+# A numeric literal must not ROUND the stored value. The comparison casts the STORED text to the
+# literal's type, and DuckDB's TRY_CAST to an integer rounds: TRY_CAST('1.5' AS BIGINT) is 2, so
+# `[n=2]` matched 2, 1.5 AND 2.4. Measured before the fix: three rows where one was expected.
+#
+# DECIMAL(38,10) rather than DOUBLE, decided by measurement: DOUBLE also rejects 1.5 and 2.4, but
+# loses integer precision, making TRY_CAST('9007199254740993' AS DOUBLE) = 9007199254740992 TRUE
+# -- trading a rounding false-match for a precision one. DECIMAL returns false there.
+statement ok
+CREATE TABLE roundy AS SELECT * FROM (VALUES
+  (0, 0, 'r', 'root',  MAP{'n': '0'}),
+  (1, 1, 'a', 'two',   MAP{'n': '2'}),
+  (2, 1, 'a', 'onep5', MAP{'n': '1.5'}),
+  (3, 1, 'a', 'twop4', MAP{'n': '2.4'}),
+  (4, 1, 'a', 'big',   MAP{'n': '9007199254740993'}))
+  t(node_id, depth, type, name, extra);
+
+statement ok
+CALL tree_ddl_create('main', 'roundy', tree_spec(tree_shape("order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', attr := 'name', attr_map := 'extra')), source := 'roundy'));
+
+query I
+FROM tree_match('main', 'roundy', tree_steps([{attr: 'n = 2'}])) SELECT list(name ORDER BY name);
+----
+[two]
+
+# the quoted form was always exact, and still is -- the control that says the fix did not simply
+# break numeric comparison into text comparison
+query I
+FROM tree_match('main', 'roundy', tree_steps([{attr: 'n = ''2'''}])) SELECT list(name ORDER BY name);
+----
+[two]
+
+# a fractional literal still matches its own value
+query I
+FROM tree_match('main', 'roundy', tree_steps([{attr: 'n = 1.5'}])) SELECT list(name ORDER BY name);
+----
+[onep5]
+
+# and an integer beyond 2^53 is not confused with its neighbour
+query I
+FROM tree_match('main', 'roundy', tree_steps([{attr: 'n = 9007199254740992'}])) SELECT count(*);
+----
+0

@@ -101,7 +101,7 @@ SPEC = {
          "          THEN 'COALESCE(' || CASE WHEN tree_sql_literal_type(arg) IS NULL\n"
          "                                   THEN alias || '._attr_map[' || tree_sql_lit(value) || ']'\n"
          "                                   ELSE 'TRY_CAST(' || alias || '._attr_map[' || tree_sql_lit(value)"
-         " || '] AS ' || tree_sql_literal_type(arg) || ')' END\n"
+         " || '] AS ' || tree_sql_cmp_cast_type(tree_sql_literal_type(arg)) || ')' END\n"
          "               || ' ' || op || ' ' || arg || ', false)'\n",
          "        -- the mutation: no TRY_CAST on the map value; the literal is cast to VARCHAR instead\n"
          "        WHEN has_map\n"
