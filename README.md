@@ -34,7 +34,7 @@ CREATE TREE sitting_duck_ast (
 FROM 'code.parquet' USING TREE sitting_duck_ast MATCH .fn:not(:has(:docblock)) SELECT name;
 ```
 
-The same compiler, pointed at a Markdown document, answers `section h2 + table`; pointed at an org chart declared with `PARENT manager_id`, it answers `manager:has(> engineer)`.
+The same compiler, pointed at a Markdown document, answers `h2 + table`; pointed at an org chart declared with `PARENT manager_id`, it answers `manager:has(> engineer)`.
 
 ## Where it sits
 
