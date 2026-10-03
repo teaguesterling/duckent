@@ -24,5 +24,18 @@ CREATE OR REPLACE MACRO tree_encode(source, key, parent, sibling_order) AS TABLE
     -- bare, where it binds to the walk relation if that has a column of the same name
     || 'UNION ALL SELECT {r0: 0}, c.' || key || ', w._level + 1, w.__path || [row_number() OVER (PARTITION BY c.' || parent || ' ORDER BY '
     || COALESCE(list_aggregate(list_transform(tree_sql_list(sibling_order), lambda x: 'c.' || x), 'string_agg', ', ') || ', ', '')
-    || 'c.' || key || ' ' || tree_sql_encoder_tiebreak() || ')] FROM __src c JOIN __walk w ON c.' || parent || ' = w.__key) '
-    || 'SELECT s.*, w._root, CAST(row_number() OVER (ORDER BY w.__path) - 1 AS BIGINT) AS _pre, CAST(w._level AS BIGINT) AS _level FROM __src s JOIN __walk w ON s.' || key || ' = w.__key');
+    || 'c.' || key || ' ' || tree_sql_encoder_tiebreak() || ')] FROM __src c JOIN __walk w ON c.' || parent || ' = w.__key), '
+    -- An orphan (a parent key nowhere in the source) or a cycle leaves rows out of __walk, and
+    -- the final join is an INNER one, so those rows were simply absent from the result: measured,
+    -- 4 rows in and 3 out with no error. The DML path refuses exactly this, and says why --
+    -- "rather than silently left out of the tree" (tree_compile_reach_check, sql/04_dml.sql) --
+    -- and the lemma has to agree, or a malformed source comes back as a SMALLER tree that passes
+    -- every validity check there is. The wording and the example-key shape are kept in step with
+    -- that refusal so the two paths read the same way.
+    --
+    -- The guard is an uncorrelated scalar subquery in WHERE, which is the shape that types: the
+    -- CASE's other arm is TRUE, and DuckDB binds `CASE WHEN .. THEN error(..) ELSE TRUE END` as
+    -- the boolean -- verified before writing it, since error()'s own type is not boolean.
+    || '__orph AS (SELECT count(*) AS __n, min(s.' || key || '::VARCHAR) AS __v FROM __src s ANTI JOIN __walk w ON s.' || key || ' = w.__key) '
+    || 'SELECT s.*, w._root, CAST(row_number() OVER (ORDER BY w.__path) - 1 AS BIGINT) AS _pre, CAST(w._level AS BIGINT) AS _level FROM __src s JOIN __walk w ON s.' || key || ' = w.__key'
+    || ' WHERE (SELECT CASE WHEN __n > 0 THEN tree_err(__n || '' rows are not reachable from a root: orphans or a cycle, e.g. key '' || COALESCE(__v, ''<NULL>'')) ELSE TRUE END FROM __orph)');
