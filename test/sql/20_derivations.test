@@ -47,6 +47,33 @@ SELECT list(_pre ORDER BY cat_id), list(_level ORDER BY cat_id) FROM e;
 ----
 [0, 1, 2, 3, 4]	[0, 1, 2, 2, 1]
 
+# An ORPHAN -- a row whose parent key is nowhere in the source -- is refused, not dropped.
+#
+# The DML path already refuses unreachable rows, and says why: "rather than silently left out of
+# the tree" (tree_compile_reach_check, sql/04_dml.sql). The lemma has to agree, and did not: the
+# walk starts from the NULL-parent rows and the final join is an inner one, so a row that never
+# reaches a root was simply absent from the result. Measured on this fixture before the fix: 4
+# rows in, 3 rows out, no error -- a malformed source came back as a smaller tree that passes
+# every validity check there is, which is the worst way to be wrong.
+statement ok
+CREATE TABLE fam_orphan(k VARCHAR, p VARCHAR, o INTEGER);
+
+statement ok
+INSERT INTO fam_orphan VALUES ('root', NULL, 1), ('a', 'root', 2), ('b', 'a', 3), ('lost', 'ghost', 4);
+
+statement error
+SELECT count(*) FROM tree_encode('fam_orphan', 'k', 'p', 'o');
+----
+not reachable from a root
+
+# ... and a well-formed source of the same shape still encodes, so the guard is not refusing
+# everything. Dropping the orphan row is the only difference between this and the table above.
+query I
+WITH e AS (FROM tree_encode('(SELECT * FROM fam_orphan WHERE k <> ''lost'')', 'k', 'p', 'o'))
+SELECT list(k ORDER BY _pre) FROM e;
+----
+[root, a, b]
+
 # P13 property: every valid level walk passes, every invalid one is rejected
 statement ok
 CREATE TABLE walks(name VARCHAR, node_id INT, depth INT);
