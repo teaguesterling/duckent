@@ -282,14 +282,25 @@ def run_file(path, mutant=None):
             if seen_record:
                 failures.append((lineno, "require must come before the first record", header))
                 continue
+            if len(words) < 2:
+                # Checked BEFORE the probe. `words[1]` used to raise IndexError inside the try,
+                # and then again in the SKIP print that handled it, so a malformed line killed
+                # the runner with a traceback instead of naming the line that was wrong.
+                failures.append((lineno, "require needs an extension name", header))
+                continue
             probe = duckdb.connect()
             try:
                 probe.execute(f"LOAD {words[1]}")
             except Exception:
                 if os.environ.get("DUCKENT_NO_SKIP") == "1":
                     print(f"FAIL {path}: SKIP refused under DUCKENT_NO_SKIP (require {words[1]})")
-                    return [(lineno, "skipped under DUCKENT_NO_SKIP", header)]
-                print(f"SKIP {path} (require {words[1]})"); return []
+                    return [(lineno, "skipped under DUCKENT_NO_SKIP", header)], False, asserted
+                print(f"SKIP {path} (require {words[1]})")
+                # `failures`, not `[]`. It is provably empty here -- the seen_record guard above
+                # means this probe only runs before the first record, and the only other way to
+                # append is that guard -- but returning it keeps the skip path honest by
+                # construction rather than by that argument holding.
+                return failures, True, asserted
             continue
         seen_record = True
         if sess is None:
@@ -327,7 +338,7 @@ def run_file(path, mutant=None):
     for lineno, msg, body in failures:
         print(f"FAIL {path}:{lineno}: {msg}\n    sql: {body[:300]}")
     print(("PASS " if not failures else "FAIL ") + path)
-    return failures
+    return failures, False, asserted
 
 
 def main():
@@ -338,14 +349,36 @@ def main():
     files = []
     for p in args.paths:
         files += sorted(glob.glob(os.path.join(p, "*.test"))) if os.path.isdir(p) else [p]
-    total = 0
+    total = skipped = asserted = ran = 0
     try:
         for f in files:
-            total += len(run_file(f, args.mutant))
+            fails, was_skipped, n = run_file(f, args.mutant)
+            total += len(fails)
+            asserted += n
+            if was_skipped:
+                skipped += 1
+            else:
+                ran += 1
     except MutantLoadError as e:
         print(f"MUTANT DID NOT LOAD: {e}")
         sys.exit(3)
-    sys.exit(1 if total else 0)
+    # Always printed, pass or fail: a skip is otherwise one line among hundreds, and the exit
+    # code alone cannot tell "everything passed" from "nothing ran".
+    print(f"{len(files)} file(s): {ran} ran, {skipped} skipped, "
+          f"{asserted} assertion(s), {total} failure(s)")
+    if total:
+        sys.exit(1)
+    # Exit 4, not 0. A run that asserted nothing -- every file skipped, or no .test matched the
+    # paths given -- proves nothing, and exiting 0 made that indistinguishable from a clean pass.
+    # The per-file "asserts nothing" rule cannot cover this: a skip returns before reaching it.
+    #
+    # Not 1, for two reasons: it is not a test failure, and run_mutants.py reads exit 1 WITH a
+    # FAIL record as a kill. Anything else it buckets as "broken", which is the honest label for
+    # a result that says nothing.
+    if asserted == 0:
+        print("FAIL: the run asserted nothing (every file skipped, or no .test file matched)")
+        sys.exit(4)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

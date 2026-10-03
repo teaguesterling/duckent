@@ -61,6 +61,52 @@ class RunnerRules(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("error text mismatch", r.stdout)
 
+    def test_a_fully_skipped_suite_is_not_green(self):
+        # The per-file "asserts nothing" rule cannot fire here: a skip returns before reaching it,
+        # so a run where every file skipped asserted nothing and still exited 0 -- "all pass" and
+        # "nothing ran" were indistinguishable from the exit code alone.
+        # DUCKENT_NO_SKIP is pinned OFF here. The workflow sets it at JOB level, so it reaches
+        # every step; inheriting it would turn this skip into an ordinary failure (exit 1) and the
+        # test would pass locally while asserting the wrong thing in CI.
+        r = run_test_text("""
+            require no_such_extension_xyz
+
+            query I
+            SELECT 1;
+            ----
+            1
+            """, env={"DUCKENT_NO_SKIP": ""})
+        self.assertEqual(r.returncode, 4, r.stdout)
+        self.assertIn("asserted nothing", r.stdout)
+
+    def test_every_run_reports_what_ran(self):
+        # A count is what makes a skip visible without reading every line of output.
+        r = run_test_text("""
+            query I
+            SELECT 1;
+            ----
+            1
+            """)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("1 ran, 0 skipped", r.stdout)
+        self.assertIn("1 assertion", r.stdout)
+
+    def test_a_require_without_an_extension_name_is_a_clean_failure(self):
+        # It used to raise IndexError twice -- once probing `LOAD {words[1]}`, then again in the
+        # SKIP print that handled it -- so the runner died with a traceback instead of naming the
+        # malformed line.
+        r = run_test_text("""
+            require
+
+            query I
+            SELECT 1;
+            ----
+            1
+            """)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("require needs an extension name", r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+
     def test_a_mutant_that_does_not_load_exits_3(self):
         with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as m:
             m.write("CREATE OR REPLACE MACRO tree_sql_p13_pred() AS 'd > 1' OR;\n")
