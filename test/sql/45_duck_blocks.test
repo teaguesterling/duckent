@@ -1,0 +1,62 @@
+# A duck_blocks document declared AS A TREE.
+#
+# This is the claim duckent exists to make -- that a tree-shaped dataset from somewhere else
+# (duck_blocks here, ASTs in 41_differential_sitting_duck) answers the same selectors as any
+# other tree -- and nothing asserted it. readme_blocks.parquet was only COUNTED
+# (03_fixtures.test), never declared, so "duck_blocks works" rested on the README saying so.
+#
+# THE LEVEL-0 ROW IS THE WHOLE TRICK. duck_blocks puts top-level blocks at level 1 by design,
+# leaving 0 for an explicit root, so a duck_blocks relation conforms by PREPENDING one document
+# row at level 0 -- it does not conform as it stands, and it does not need its levels shifted.
+# Shifting them (level - 1) also happens to pass today, but only because P13 then sees every
+# top-level block as its own level-0 root; that is issue #9's territory, not a second valid
+# encoding, so this test pins the prepend.
+statement ok
+CALL tree_ddl_create('main', 'readme', tree_spec(
+  tree_shape("order" := 'element_order', level := 'level',
+             semantic := tree_semantic(type := 'CASE WHEN element_type = ''heading'' THEN ''h'' || attributes[''heading_level''] ELSE element_type END')),
+  source := '(SELECT ''block'' AS kind, ''document'' AS element_type, NULL::VARCHAR AS content, 0 AS level, ''text'' AS encoding, MAP{}::MAP(VARCHAR,VARCHAR) AS attributes, -1 AS element_order UNION ALL BY NAME SELECT * FROM ''test/data/readme_blocks.parquet'')'));
+
+# The fixture itself has no level-0 row: that is the convention this test documents, and if
+# duck_blocks ever starts emitting one, the prepend above becomes wrong rather than merely
+# redundant -- so assert the premise, not just the conclusion.
+query II
+SELECT min(level), count(*) FROM 'test/data/readme_blocks.parquet';
+----
+1	172
+
+# TYPE is mapped, not stored: heading + attributes['heading_level'] -> h1/h2/..., which is what
+# lets ordinary CSS reach a format that has no element called "h2" at all.
+query I
+FROM tree_match('main', 'readme', 'h2', language := 'css') SELECT list(element_order ORDER BY element_order);
+----
+[32, 58, 64, 70, 87, 131, 134, 149, 152]
+
+# The child combinator against the prepended root. All three tables in the README sit at
+# level 1, so they are children of the document -- which is only expressible BECAUSE the root
+# row exists; without it they have no parent and the selector has nothing to anchor to.
+query I
+FROM tree_match('main', 'readme', 'document > table', language := 'css') SELECT list(element_order ORDER BY element_order);
+----
+[69, 132, 150]
+
+# The adjacent-sibling combinator: the two tables that directly follow an h2. 69 is the third
+# table and drops out, which is what makes this a real test of `+` rather than of `table`.
+#
+# Computed independently in python from the parquet (nearest-preceding-lower-level parent, then
+# adjacent siblings) before running it here, and the two agreed. Issue #13 reports these as 70,
+# 133, 151 and 133, 151 -- the same rows, one higher, because it counted 1-based positions after
+# the prepend rather than the fixture's own element_order.
+query I
+FROM tree_match('main', 'readme', 'h2 + table', language := 'css') SELECT list(element_order ORDER BY element_order);
+----
+[132, 150]
+
+# `section h2 + table` is in the README, and it matches NOTHING here. duck_blocks has a section
+# element type, but the markdown reader emits flat headings, so no row is ever a section on this
+# fixture. Asserted as empty so the README's example cannot quietly start or stop working without
+# a test noticing.
+query I
+FROM tree_match('main', 'readme', 'section h2 + table', language := 'css') SELECT count(*);
+----
+0
