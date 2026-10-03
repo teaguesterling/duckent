@@ -123,6 +123,19 @@ SPEC = {
         ("COALESCE((shape).semantic.attr, CASE WHEN abstract THEN '' ELSE '*' END) AS attr_text,",
          "COALESCE((shape).semantic.attr, '*') AS attr_text,  -- the mutation", 1)]),
 
+    # _pre is the RANK of ORDER within ROOT, not the ORDER value. Every O(1) positional form the
+    # language compiles -- `_pre = _parent + 1`, `_pre = 0`, `_pre + _size + 1` -- is arithmetic on
+    # _pre, so all of them are valid only while that holds. Casting ORDER straight across is the
+    # old behaviour, and is "only ever right for a source whose ORDER was already dense and 0-based
+    # per root" -- which every AST fixture here happens to be, so this mutant lived until a test
+    # used a gapped, per-tree ORDER. Verified by hand before planting: under this edit exactly the
+    # two gapped-ORDER records of 33_navigation.test fail and every other record in that file,
+    # all of them on app.parquet, still passes.
+    "MN26": ("sql/02_projection.sql", ["tree_compile_projection"], [
+        ("CAST(row_number() OVER (PARTITION BY _root ORDER BY __order) - 1 AS BIGINT) AS _pre FROM __r",
+         "CAST(__order AS BIGINT) AS _pre FROM __r  -- the mutation: the ORDER value, not its rank",
+         1)]),
+
     "MN19": ("sql/07_match.sql", ["tree_sql_clause"], [
         ("WHEN 'where'  THEN 'EXISTS (SELECT 1 FROM (SELECT unnest(' || alias"
          " || ', recursive := false)) __w WHERE ' || value || ')'",
