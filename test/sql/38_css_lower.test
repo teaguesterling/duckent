@@ -124,6 +124,31 @@ SELECT tree_parse_css('.fn@f > block') = [{node_id: 0, parent_id: NULL, kind: 's
 ----
 true
 
+# A `"` inside a SINGLE-quoted value is ordinary text, so the `@x` after it is inside the string and
+# must not become a capture marker.
+#
+# tree_css_capture_markers used to split the text on `"` and then split each of those pieces on `'`
+# -- two independent passes, not one scan -- so the `"` in a's value flipped the parity and the rest
+# of the selector was mis-assigned. Measured before the fix: b lowered to '":__cap_x', while the
+# runner parser kept '"@x'. The two front-ends disagreed and this one silently matched nothing.
+#
+# The runner tokenises a string as one quote kind containing no SAME quote
+# (`(?P<str>"[^"]*"|'[^']*')`, test/css_parser.py), with no escapes, and an unpaired quote taking
+# the rest of the text; the SQL side now tokenises the same way, so both treat the other quote
+# character as ordinary text inside a string.
+query I
+SELECT tree_parse_css('[a=''"''][b=''"@x'']') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'attr', value: 'a', op: '=', arg: '''"''', alias: NULL}, {node_id: 3, parent_id: 1, kind: 'attr', value: 'b', op: '=', arg: '''"@x''', alias: NULL}]::TREE_SELECTOR;
+----
+true
+
+# a `@name` OUTSIDE any string is still rewritten, and one inside a DOUBLE-quoted value is still
+# left alone -- the two halves that say the fix narrowed nothing
+query II
+SELECT tree_parse_css('.fn@f')[2].alias,
+       tree_parse_css('[a="@x"]')[3].arg;
+----
+f	'@x'
+
 query I
 SELECT tree_parse_css('block > expression_statement:first-child') = [{node_id: 0, parent_id: NULL, kind: 'selector', value: 'css', op: NULL, arg: NULL, alias: NULL}, {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL}, {node_id: 2, parent_id: 1, kind: 'type', value: 'block', op: NULL, arg: NULL, alias: NULL}, {node_id: 3, parent_id: 0, kind: 'step', value: NULL, op: 'child', arg: NULL, alias: NULL}, {node_id: 4, parent_id: 3, kind: 'type', value: 'expression_statement', op: NULL, arg: NULL, alias: NULL}, {node_id: 5, parent_id: 3, kind: 'pseudo', value: 'first-child', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR;
 ----
