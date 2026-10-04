@@ -520,13 +520,27 @@ CREATE OR REPLACE MACRO tree_css_lower(rows) AS (
 -- `@name` is duckent's capture syntax and tree-sitter-css has never heard of it, so the text is
 -- rewritten before it is parsed: each `@name` becomes the marker pseudo-class `:__cap_name`,
 -- which the css grammar does accept and stage 7 reads back off the step as its alias. A `@` inside
--- a quoted value is left alone -- the text is split on the quote character and only the segments
--- OUTSIDE a string are rewritten.
+-- a quoted value is left alone.
+--
+-- ONE SCAN, NOT TWO SPLITS. This used to split the text on `"` and then split each of those pieces
+-- on `'` -- two independent passes, which is not what "inside a string" means. A `"` inside a
+-- SINGLE-quoted value flipped the first split's parity and mis-assigned everything after it, so
+-- `[a='"'][b='"@x']` rewrote the `@x` that is inside b's own value and lowered b to '":__cap_x'.
+-- The runner parser kept '"@x', so the two front-ends silently disagreed and this one matched
+-- nothing (#7).
+--
+-- The tokens mirror test/css_parser.py's scanner exactly, because the two front-ends are bound by a
+-- row-level differential and a difference here is a difference in what a selector MEANS: a string is
+-- ONE quote kind containing no same quote, with no escapes (`"[^"]*"` or `'[^']*'`); an unpaired
+-- quote takes the rest of the text (that scanner's `openstr`, left unrewritten so the parser reports
+-- the unclosed quote); everything else is a run of non-quote characters, and only that last kind is
+-- rewritten. The alternation is ordered as the scanner orders it, and every character lands in
+-- exactly one token, so concatenating them reproduces the input.
 CREATE OR REPLACE MACRO tree_css_capture_markers(t) AS
-  array_to_string(list_transform(str_split(t, '"'), (seg, i) -> CASE WHEN i % 2 = 1
-      THEN array_to_string(list_transform(str_split(seg, ''''), (sub, j) -> CASE WHEN j % 2 = 1
-             THEN regexp_replace(sub, '@([A-Za-z_][A-Za-z0-9_-]*)', ':__cap_\1', 'g') ELSE sub END), '''')
-      ELSE seg END), '"');
+  array_to_string(list_transform(
+      regexp_extract_all(t, '"[^"]*"|''[^'']*''|["''][\s\S]*|[^"'']+', 0),
+      lambda x: CASE WHEN starts_with(x, '"') OR starts_with(x, '''') THEN x
+                     ELSE regexp_replace(x, '@([A-Za-z_][A-Za-z0-9_-]*)', ':__cap_\1', 'g') END), '');
 
 -- Parse selector text with tree-sitter-css and lower it. This is the only macro here that needs
 -- sitting_duck; the table function is reached through query() so that THIS FILE still loads on a
