@@ -77,6 +77,28 @@ NOT_MIRRORED_TESTS = {
 MUTANTS_EXTENSION_ONLY = set()
 MUTANTS_NOT_MIRRORED = set()
 
+def require_plan_repo(plan_repo):
+    """Refuse legibly when --plan-repo is not the plan repo.
+
+    Measured need: pointing this script at THIS repo (the mistake a stale CI checkout would
+    make, now that `teaguesterling/duckent` names the extension rather than the reference)
+    produced `FileNotFoundError: [Errno 2] No such file or directory: './sql'` and a
+    traceback. It failed, which is the important half -- it did not pass vacuously -- but a
+    traceback does not tell anyone WHICH repository was wrong or what was expected there,
+    and in CI that reads as a broken script rather than a misconfigured checkout.
+    """
+    missing = [d for d in ("sql", os.path.join("test", "sql"), os.path.join("test", "mutants"))
+               if not os.path.isdir(os.path.join(plan_repo, d))]
+    if missing:
+        sys.stderr.write(
+            "macro identity check FAILED: --plan-repo %s does not look like the duckent plan "
+            "repo.\n  missing: %s\n  The plan repo is teaguesterling/duckent-plan, which holds "
+            "the reference sql/ and test/ this repo copies. Note that `teaguesterling/duckent` "
+            "is now THIS repository, so an old checkout of that name lands here instead.\n"
+            % (os.path.abspath(plan_repo), ", ".join(missing))
+        )
+        sys.exit(1)
+
 def digest(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
@@ -209,6 +231,7 @@ def main():
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    require_plan_repo(args.plan_repo)
     bad = []
 
     check_macros(root, args.plan_repo, bad)

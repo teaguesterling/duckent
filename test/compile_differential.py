@@ -38,6 +38,7 @@ Two distinct comparisons live here, and they test two different things:
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 
@@ -280,6 +281,23 @@ def main():
     ap.add_argument("--plan-repo", required=True)
     ap.add_argument("--duckdb", required=True, help="the built duckdb shell with duckent linked")
     args = ap.parse_args()
+
+    # Refuse legibly when --plan-repo is not the plan repo, instead of reporting every case
+    # as a divergence. Measured: pointing this at the extension itself -- the mistake a stale
+    # CI checkout would now make, since `teaguesterling/duckent` names the extension and the
+    # reference is `teaguesterling/duckent-plan` -- reported 29 DIVERGENCEs whose `plan` side
+    # was all the same `ModuleNotFoundError: No module named 'run'`. That exits non-zero, so
+    # it is not a vacuous pass, but "29 divergences" is a wrong diagnosis of "wrong
+    # directory", and a wrong diagnosis in a differential is expensive to chase.
+    runner = os.path.join(args.plan_repo, "test", "run.py")
+    if not os.path.isfile(runner):
+        sys.stderr.write(
+            "compile differential FAILED: --plan-repo %s is not the duckent plan repo "
+            "(no test/run.py).\n  The plan repo is teaguesterling/duckent-plan; "
+            "`teaguesterling/duckent` is now this extension.\n"
+            % os.path.abspath(args.plan_repo)
+        )
+        sys.exit(1)
 
     bad_macros = check_macro_cases(args.plan_repo, args.duckdb)
     bad_verbs = check_verb_cases(args.plan_repo, args.duckdb)
