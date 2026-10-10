@@ -98,3 +98,35 @@ query I
 SELECT x FROM committed;
 ----
 7
+
+# ---- a NULL element in the statement list is refused, not skipped -----------------------
+# run.py's Session.execute iterates the list unfiltered, so a NULL element raises there.
+# Dropping it here would make the two executors disagree about the same compiled list, and
+# would let a verb report success having silently skipped a statement. Unreachable from the
+# shipped macros, which all filter NULLs out before returning, so it is reached the way the
+# corpus reaches this class of case: by overriding the compile macro.
+
+statement ok
+CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS
+  ['CREATE TABLE ' || nm || '(x INT)', NULL];
+
+statement error
+CALL tree_ddl_create('main', 'null_stmt', tree_spec(tree_shape(level := 'depth')));
+----
+duckent: tree_compile_create produced a NULL statement
+
+# the refusal fires during list conversion, before ExecuteCompiledStatements runs anything, so
+# the CREATE TABLE never happened at all
+statement error
+SELECT count(*) FROM null_stmt;
+----
+does not exist
+
+# a wholly-NULL list stays a distinct refusal
+statement ok
+CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS NULL::VARCHAR[];
+
+statement error
+CALL tree_ddl_create('main', 'null_list', tree_spec(tree_shape(level := 'depth')));
+----
+duckent: tree_compile_create compiled to NULL

@@ -75,9 +75,23 @@ vector<string> CompileStatements(ClientContext &context, const string &macro_nam
 	}
 	vector<string> out;
 	for (const auto &v : ListValue::GetChildren(list)) {
-		if (!v.IsNull()) {
-			out.push_back(v.ToString());
+		if (v.IsNull()) {
+			// Refused, not skipped, and refused HERE -- during the conversion, before
+			// ExecuteCompiledStatements has run anything, so there is no partial work to undo.
+			//
+			// Dropping the NULL instead would make this executor disagree with the reference
+			// one: run.py's Session.execute iterates the list unfiltered, so a NULL element
+			// raises there. The port's premise is that the semantics live in the macros and the
+			// executor only reproduces them, so a case where the two executors differ must not
+			// exist even where no macro can reach it -- and the difference here is the worst
+			// kind, a verb reporting success having silently skipped a statement.
+			//
+			// Unreachable from the shipped macros, which all list_filter(..., x IS NOT NULL)
+			// before returning. This is a guard against a future compile macro that does not,
+			// which is why it names the macro: that name is the only thing a reader can act on.
+			throw InvalidInputException("duckent: %s produced a NULL statement", macro_name);
 		}
+		out.push_back(v.ToString());
 	}
 	return out;
 }
