@@ -47,6 +47,29 @@ jobs:
         shell: bash
       - run: python3 test/check_gate.py test.log
 
+  compile-differential:
+    name: verbs compile identically in both implementations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      # NOTE: teaguesterling/duckent is the plan repo. The plan
+      # (2026-10-09-duckent-cpp-mvp, Task 11) renames that repository to
+      # duckent-plan at the very end -- when that happens, this checkout
+      # must be updated to the new name in the SAME commit as the rename,
+      # or this job starts failing for a reason that has nothing to do with
+      # argument marshalling. Same note as macro-identity above; if the
+      # rename happens, both jobs break together and are fixed in one commit.
+      - uses: actions/checkout@v4
+        with:
+          repository: teaguesterling/duckent
+          path: .plan
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install duckdb==1.5.5
+      - run: make
+      - run: python3 test/compile_differential.py --plan-repo .plan --duckdb ./build/release/duckdb
+
   from-source-load:
     name: the extension loads from a from-source build
     runs-on: ubuntu-latest
