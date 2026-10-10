@@ -129,15 +129,12 @@ SELECT tree_sql_literal_type('100'), tree_sql_literal_type('-2.5'), tree_sql_lit
 ----
 BIGINT	DOUBLE	BOOLEAN	true
 
-query II
-SELECT language, bare_safe FROM tree_catalog_languages() WHERE language = 'css';
-----
-css	true
-
-query I
-SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
-----
-css
+# The two records that used to sit here -- asserting the `css` registry row and
+# tree_default_selector_language = 'css' -- moved to 38_css_lower.test. They assert that the CSS
+# FRONT-END registered itself, which is not what a predicate suite is for, and keeping them here
+# made this file untestable in a build that does not load 09_css.sql. The C++ extension's MVP is
+# exactly such a build, and it found this by running 36_pseudo beside a core-only catalog
+# assertion and getting a contradiction.
 
 # sel_ast_leafy and sel_ast_deep (above) are no longer needed and would otherwise contaminate
 # the shared tier below: the shared tier scans every catalog macro named sel_<rest>, and both
