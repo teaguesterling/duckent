@@ -94,6 +94,15 @@ struct MatchGlobalState : public GlobalTableFunctionState {
 	//! call replaces it rather than dying with the call that fetched it.
 	unique_ptr<DataChunk> chunk;
 	bool exhausted = false;
+
+	//! Declared, not assumed. MatchInOut mutates this state -- it calls result->Fetch() and
+	//! replaces `chunk` -- and there is no local state to mutate instead, so two threads in the
+	//! operator would race on both. For tree_match the input relation is a one-row scalar
+	//! subquery, so there is one chunk and one caller anyway; this override says so to DuckDB
+	//! rather than relying on PhysicalTableInOutFunction happening not to parallelize.
+	idx_t MaxThreads() const override {
+		return 1;
+	}
 };
 
 //! One scalar out of a one-column query, or NULL when it returned no rows. Used for the settings
@@ -206,28 +215,88 @@ void RefuseTextSelector(Connection &con, const string &language) {
 	    language, registered);
 }
 
+//! What a hand-written `duckent_match` call gets, from every direction it can arrive from.
+//!
+//! One message for all of them because they are one condition to the user: they called duckent
+//! internals, and the fix is the same. It names `tree_match` because that is the function they
+//! meant.
+//!
+//! A BinderException, and specifically NOT the InternalException this used to raise: INTERNAL
+//! renders as "This error signals an assertion failure within DuckDB" over a 35-frame stack
+//! trace, which tells a caller who merely used the wrong function name that they have found a
+//! DuckDB bug. BINDER because every OTHER way of misusing duckent_match is already a Binder Error
+//! -- DuckDB's overload matcher answers `duckent_match('main','a','abc')` with "No function
+//! matches duckent_match(VARCHAR, VARCHAR, VARCHAR)" -- so a caller who got the argument's SHAPE
+//! wrong rather than its TYPE should not be told something categorically different.
+//!
+//! BINDER is also one of the six types Exception::InvalidatesTransaction exempts
+//! (duckdb/src/common/exception.cpp), unlike INVALID_INPUT and INTERNAL. That is a latent
+//! property rather than an observable one: RequireAutoCommitForRead runs first, so inside a
+//! transaction this refusal is never the one raised. Noted so that the exemption is not read as
+//! the reason for the choice.
+[[noreturn]] void RefuseInternalsCall() {
+	throw BinderException(
+	    "duckent_match is duckent internals: its selector argument has to be the relation the "
+	    "tree_match macro builds. Call tree_match(sch, nm, sel) instead.");
+}
+
 //! The selector argument as written, deparsed from the unbound copy the table macro parks in a
 //! CTE, and returned as a scalar subquery ready to splice into the compile call. See the
 //! mechanism note at the top of this file for why it has to come from there.
 string SelectorText(TableFunctionBindInput &input) {
+	if (!input.ref.function) {
+		// DuckDB treats ref.function as nullable and checks it itself (GetAlias in
+		// bind_table_function.cpp): Binder::BindTableFunction(TableFunction &, vector<Value>)
+		// builds a default TableFunctionRef with a null `function`. That path is reached only from
+		// Binder::Bind(ExtensionStatement), i.e. a parser extension, so nothing in this build can
+		// reach it -- but a null here would be a segfault rather than a message, and a call with
+		// no readable argument text is a call that cannot have come from the macro.
+		RefuseInternalsCall();
+	}
 	auto &call = input.ref.function->Cast<FunctionExpression>();
 	if (call.children.size() <= MATCH_SELECTOR_ARG ||
 	    call.children[MATCH_SELECTOR_ARG]->GetExpressionClass() != ExpressionClass::SUBQUERY) {
-		// duckent_match is reachable by name, so this is what a hand-written call gets. It names
-		// tree_match because that is the function a caller meant to use.
-		throw InvalidInputException(
-		    "duckent_match is duckent internals: its selector argument has to be the relation the "
-		    "tree_match macro builds. Call tree_match(sch, nm, sel) instead.");
+		// UNREACHABLE in this build, and kept anyway. DuckDB's overload matcher rejects a
+		// non-subquery third argument before bind runs at all -- `duckent_match('main','a','abc')`,
+		// `(..., t)` and `(..., 1)` all give "No function matches duckent_match(...)" -- because a
+		// subquery is the only thing admitted against a LogicalType::TABLE parameter. So this
+		// branch is a guard on the shape SelectorText needs, not a path a user can take; the
+		// condition a user CAN take is the missing-CTE one below.
+		RefuseInternalsCall();
 	}
 	auto &subquery = call.children[MATCH_SELECTOR_ARG]->Cast<SubqueryExpression>();
 	for (auto &cte : subquery.subquery->node->cte_map.map) {
 		if (!StringUtil::CIEquals(cte.first, MATCH_SELECTOR_CTE) || !cte.second || !cte.second->query) {
 			continue;
 		}
-		return "(" + cte.second->query->node->ToString() + ")";
+		try {
+			return "(" + cte.second->query->node->ToString() + ")";
+		} catch (const std::exception &ex) {
+			// The deparse is the one place the whole mechanism's assumption is load-bearing, so it
+			// is the one place worth labelling. An unreferenced CTE is never BOUND on this DuckDB,
+			// which is why its text is still there to read (fact 3 in the note at the top of this
+			// file). On a DuckDB that binds it, binding replaces the parsed expression in place
+			// with a BoundExpression whose ToString() unconditionally throws -- so the failure is
+			// loud and the answer is never wrong, but the message is DuckDB's internal one and
+			// reads as a DuckDB bug. It is not: it is duckent's assumption no longer holding.
+			throw InvalidInputException(
+			    "duckent: tree_match could not deparse its selector, which means this DuckDB binds "
+			    "unreferenced CTEs. tree_match reads the selector's text out of an unreferenced CTE "
+			    "*because* such a CTE is never bound; once it is bound there is no text left to "
+			    "read. This is a duckent incompatibility with this DuckDB version, not a DuckDB "
+			    "bug: the mechanism needs rework, see the note at the top of src/duckent_match.cpp. "
+			    "Underlying error: %s",
+			    // RawMessage(), not what(): a DuckDB exception's what() is the JSON envelope,
+			    // stack-trace pointers and all, and the diagnosis worth keeping is the one line
+			    // inside it ("ToString(): BoundExpression does not have a child").
+			    ErrorData(ex).RawMessage());
+		}
 	}
-	throw InternalException("duckent: the tree_match macro's %s CTE is missing from the call it built",
-	                        MATCH_SELECTOR_CTE);
+	// REACHABLE: a hand-written `duckent_match('main','app',(SELECT 1))` lands here, because a
+	// subquery passes the shape check above and carries no __duckent_selector CTE. Before this was
+	// a refusal it was an InternalException, which told the user they had hit a DuckDB assertion
+	// failure and invalidated their transaction on the way out.
+	RefuseInternalsCall();
 }
 
 //! Compile the selector into a SQL query and take the result schema from it.
@@ -240,6 +309,13 @@ string SelectorText(TableFunctionBindInput &input) {
 //! constant.
 unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInput &input,
                                    vector<LogicalType> &return_types, vector<string> &names) {
+	// Guarded HERE as well as in MatchInit, because the side connection opened on the next line is
+	// its own hazard: this is where the selector is compiled, and a compile against the
+	// pre-transaction snapshot is a stale SCHEMA and a stale query, which EXPLAIN would print and
+	// an init-time check alone would never see (EXPLAIN binds and never inits). A refusal is not a
+	// side effect, so it does not violate "no side effects in bind" -- it is the opposite of one.
+	RequireAutoCommitForRead(context, "tree_match");
+
 	auto result = make_uniq<MatchBindData>();
 	Connection con(*context.db);
 	const string selector = SelectorText(input);
@@ -311,6 +387,12 @@ unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInpu
 }
 
 unique_ptr<GlobalTableFunctionState> MatchInit(ClientContext &context, TableFunctionInitInput &input) {
+	// And guarded HERE as well as in MatchBind, because this is a SECOND side connection, and it
+	// is the one the rows actually come from. A bind-time check alone misses a statement bound
+	// outside a transaction and executed inside one: PREPARE in autocommit, then BEGIN; EXECUTE
+	// re-uses the plan without re-binding, so bind never runs again and only this check is left.
+	RequireAutoCommitForRead(context, "tree_match");
+
 	auto &bind = input.bind_data->Cast<MatchBindData>();
 	auto state = make_uniq<MatchGlobalState>();
 	state->con = make_uniq<Connection>(*context.db);
