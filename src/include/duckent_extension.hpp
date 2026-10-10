@@ -1,12 +1,11 @@
 #pragma once
-
 #include "duckdb.hpp"
 
 namespace duckdb {
 
-class WaddleExtension : public Extension {
+class DuckentExtension : public Extension {
 public:
-	void Load(ExtensionLoader &db) override;
+	void Load(ExtensionLoader &loader) override;
 	std::string Name() override;
 	std::string Version() const override;
 };

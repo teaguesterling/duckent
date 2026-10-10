@@ -1,8 +1,14 @@
+# NOTE: the pinned commit (gitlink) is authoritative — currently duckdb v1.5.5.
+# `branch` only affects `git submodule update --remote`; a normal
+# `clone --recursive` / `submodule update` checks out the pinned commit, not
+# the branch's HEAD. v1.5.5 is a tag, not a branch, so it cannot be used
+# directly as `branch` here (git submodule add -b v1.5.5 fails for tags) —
+# the pin itself lives on the gitlink commit instead.
 [submodule "duckdb"]
 	path = duckdb
-	url = https://github.com/duckdb/duckdb
+	url = https://github.com/duckdb/duckdb.git
 	branch = main
 [submodule "extension-ci-tools"]
 	path = extension-ci-tools
-	url = https://github.com/duckdb/extension-ci-tools
-	branch = main
+	url = https://github.com/duckdb/extension-ci-tools.git
+	branch = v1.5.5

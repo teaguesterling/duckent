@@ -1,0 +1,20 @@
+# name: test/sql/90_loads.test
+# description: the extension loads and its dependencies are statically present
+
+# require tells the sqllogictest harness this extension must be registered
+# in this test binary; duckent is already statically linked in (LOAD_TESTS in
+# extension_config.cmake), so this is a harness gate, not a runtime autoload.
+require duckent
+
+query I
+SELECT duckent_version();
+----
+mvp
+
+# json must be present WITHOUT an autoload, because the macros need it at load time
+require json
+
+query I
+SELECT json_serialize_sql('SELECT 1') IS NOT NULL;
+----
+true
