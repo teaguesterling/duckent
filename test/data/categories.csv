@@ -1,0 +1,6 @@
+cat_id,name,parent_id
+1,root,
+2,tools,1
+3,hand tools,2
+4,power tools,2
+5,garden,1

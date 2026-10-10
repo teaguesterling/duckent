@@ -2,6 +2,7 @@
 
 #include "duckent_extension.hpp"
 #include "duckent_macro_loader.hpp"
+#include "duckent_sql.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -16,6 +17,7 @@ static void VersionFunc(DataChunk &args, ExpressionState &state, Vector &result)
 // NOT static: the extern "C" entry block below calls it from outside the namespace.
 void LoadInternal(ExtensionLoader &loader) {
 	LoadEmbeddedMacros(loader);
+	RegisterDuckentVerbs(loader);
 
 	ScalarFunction version("duckent_version", {}, LogicalType::VARCHAR, VersionFunc);
 	loader.RegisterFunction(version);

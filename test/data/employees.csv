@@ -1,0 +1,8 @@
+email,role,manager_email,hire_date
+ada@co,cto,,2019-01-07
+bo@co,manager,ada@co,2020-03-02
+cy@co,manager,ada@co,2019-06-11
+di@co,engineer,bo@co,2021-09-20
+ed@co,engineer,bo@co,2020-11-16
+fay@co,engineer,cy@co,2022-02-01
+gus@co,intern,fay@co,2024-06-03

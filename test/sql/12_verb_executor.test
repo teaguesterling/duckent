@@ -1,0 +1,100 @@
+# name: test/sql/12_verb_executor.test
+# description: the verb executor (mechanism A'): a verb works, is atomic, refuses inside an explicit transaction, and does not fire from bind
+
+# ---- a verb works in autocommit ---------------------------------------------------------
+
+statement ok
+CALL tree_ddl_create('main', 't1', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 't1';
+----
+1
+
+# ---- the guard: refused inside an explicit transaction, by message ----------------------
+# A' runs the statement list in its own transaction, so inside a caller's BEGIN it would both
+# survive the caller's ROLLBACK and compile against stale state. Both are refused, not silently
+# tolerated.
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_ddl_create('main', 'in_txn', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+----
+duckent: tree_ddl_create cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'in_txn';
+----
+0
+
+# the guard refuses ONLY inside a transaction: the very same call works outside one. A guard
+# that refused everything would pass the record above on its own.
+statement ok
+CALL tree_ddl_create('main', 'in_txn', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'in_txn';
+----
+1
+
+# ---- bind has no side effects: EXPLAIN plans the verb but must not run it ---------------
+
+statement ok
+EXPLAIN CALL tree_ddl_create('main', 'explained', tree_spec(tree_shape(level := 'depth'), source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'explained';
+----
+0
+
+# ---- atomicity: the first statement must not survive a later one raising ----------------
+# The compile macro is overridden for this file only, reproducing the rollback probe the plan
+# repo's 00_smoke.test uses for the same property. Without the executor's own BEGIN/COMMIT the
+# CREATE TABLE commits and the table survives.
+
+statement ok
+CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS
+  ['CREATE TABLE ' || nm || '(x INT)', 'SELECT error(''boom'')'];
+
+statement error
+CALL tree_ddl_create('main', 'rolled_back', tree_spec(tree_shape(level := 'depth')));
+----
+boom
+
+statement error
+SELECT count(*) FROM rolled_back;
+----
+does not exist
+
+# a parse error in a later statement rolls the earlier one back too
+statement ok
+CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS
+  ['CREATE TABLE ' || nm || '(x INT)', 'THIS IS NOT SQL'];
+
+statement error
+CALL tree_ddl_create('main', 'parse_rolled_back', tree_spec(tree_shape(level := 'depth')));
+----
+syntax error
+
+statement error
+SELECT count(*) FROM parse_rolled_back;
+----
+does not exist
+
+# and the success path still commits every statement in the list
+statement ok
+CREATE OR REPLACE MACRO tree_compile_create(sch, nm, spec) AS
+  ['CREATE TABLE ' || nm || '(x INT)', 'INSERT INTO ' || nm || ' VALUES (7)'];
+
+statement ok
+CALL tree_ddl_create('main', 'committed', tree_spec(tree_shape(level := 'depth')));
+
+query I
+SELECT x FROM committed;
+----
+7
