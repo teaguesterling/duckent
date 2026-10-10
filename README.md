@@ -8,14 +8,27 @@ CALL tree_ddl_create('main', 'app', tree_spec(
   tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
              size := 'descendant_count',
              semantic := tree_semantic(type := 'type', key := 'name')),
-  source := 'read_parquet(''code.parquet'')'));
+  source := 'read_parquet(''test/data/app.parquet'')'));
 
 -- every string literal inside a function definition, one row per match
 FROM tree_match('main', 'app', tree_steps([
   {type: 'function_definition', "as": 'fn'},
   {comb: 'desc', type: 'string'}
-])) SELECT fn.name, name;
+])) SELECT fn.name AS fn, name AS literal;
 ```
+
+```
+┌───────┬───────────────────────────────────┐
+│  fn   │              literal              │
+├───────┼───────────────────────────────────┤
+│ greet │ f"Hello, {name}"                  │
+│ greet │ """Return a greeting for name.""" │
+└───────┴───────────────────────────────────┘
+```
+
+That runs as written against this repository's own fixture, which is why the source path is
+`test/data/app.parquet`: an example nobody has executed is a claim with nothing verifying it, and
+this project has spent a lot of effort on not shipping those.
 
 ## What this build is
 
