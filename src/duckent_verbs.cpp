@@ -73,6 +73,36 @@ unique_ptr<FunctionData> BindTreeDdlCreate(ClientContext &, TableFunctionBindInp
 	return VerbBind("tree_ddl_create", input, return_types, names);
 }
 
+unique_ptr<FunctionData> BindTreeDdlDrop(ClientContext &, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_ddl_drop", input, return_types, names);
+}
+
+unique_ptr<FunctionData> BindTreeDdlAlter(ClientContext &, TableFunctionBindInput &input,
+                                          vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_ddl_alter", input, return_types, names);
+}
+
+unique_ptr<FunctionData> BindTreeInsert(ClientContext &, TableFunctionBindInput &input,
+                                        vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_insert", input, return_types, names);
+}
+
+unique_ptr<FunctionData> BindTreeReplace(ClientContext &, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_replace", input, return_types, names);
+}
+
+unique_ptr<FunctionData> BindTreeDelete(ClientContext &, TableFunctionBindInput &input,
+                                        vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_delete", input, return_types, names);
+}
+
+unique_ptr<FunctionData> BindTreeCheck(ClientContext &, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	return VerbBind("tree_check", input, return_types, names);
+}
+
 TableFunction MakeVerb(const string &name, const vector<LogicalType> &arg_types,
                        table_function_bind_t bind) {
 	return TableFunction(name, arg_types, VerbScan, bind, VerbInit);
@@ -88,6 +118,34 @@ void RegisterDuckentVerbs(ExtensionLoader &loader) {
 	loader.RegisterFunction(MakeVerb("tree_ddl_create",
 	                                 {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
 	                                 BindTreeDdlCreate));
+
+	// tree_ddl_drop(sch, nm) -- a bare identity; nothing else to type.
+	loader.RegisterFunction(
+	    MakeVerb("tree_ddl_drop", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDdlDrop));
+
+	// tree_ddl_alter(sch, nm, semantic) -- semantic is a TREE_SEMANTIC struct from
+	// tree_semantic(), read field by field the same way create reads TREE_SPEC, so ANY for the
+	// same reason as create's third argument above.
+	loader.RegisterFunction(MakeVerb("tree_ddl_alter",
+	                                 {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
+	                                 BindTreeDdlAlter));
+
+	// tree_insert(sch, nm, source) / tree_replace(sch, nm, source) -- source is SQL text (a
+	// relation expression), spliced into the compiled statements as a string and never
+	// evaluated as a value here, so VARCHAR.
+	loader.RegisterFunction(MakeVerb(
+	    "tree_insert", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeInsert));
+	loader.RegisterFunction(MakeVerb(
+	    "tree_replace", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeReplace));
+
+	// tree_delete(sch, nm, root_predicate) -- root_predicate is SQL text too (a WHERE-clause
+	// fragment over the ROOT columns), same reasoning as source above.
+	loader.RegisterFunction(MakeVerb(
+	    "tree_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDelete));
+
+	// tree_check(sch, nm) -- records assertions; no extra argument to type.
+	loader.RegisterFunction(
+	    MakeVerb("tree_check", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeCheck));
 }
 
 } // namespace duckdb

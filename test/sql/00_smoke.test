@@ -1,0 +1,62 @@
+# name: test/sql/00_smoke.test
+# description: runner directives and executor emulation
+
+statement ok
+CREATE TABLE t AS SELECT range AS i FROM range(5);
+
+query I
+SELECT count(*) FROM t;
+----
+5
+
+query II rowsort
+SELECT i, i * 2 FROM t WHERE i > 2;
+----
+3	6
+4	8
+
+statement error
+SELECT * FROM missing_table;
+----
+does not exist
+
+# executor emulation: a compile macro that returns statements. The list is SEMANTICS ONLY --
+# no BEGIN, no COMMIT -- because atomicity belongs to the executor, not the compiler (core
+# design section 4). A compiler that emitted transaction control could not be executed by the
+# C++ extension at all, where a CALL table function already runs inside a query.
+statement ok
+CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS ['CREATE TABLE ' || nm || '(x INT)', 'INSERT INTO ' || nm || ' VALUES (1)'];
+
+statement ok
+CALL tree_check('main', 'emulated');
+
+query I
+SELECT x FROM emulated;
+----
+1
+
+# a failing compiled statement rolls back -- and now this records the EXECUTOR's rollback,
+# which is the thing the contract moved to. The first statement succeeds and the second raises,
+# so `rolled_back` must not survive the verb.
+statement ok
+CREATE OR REPLACE MACRO tree_compile_check(sch, nm) AS ['CREATE TABLE ' || nm || '(x INT)', 'SELECT error(''boom'')'];
+
+statement error
+CALL tree_check('main', 'rolled_back');
+----
+boom
+
+statement error
+SELECT * FROM rolled_back;
+----
+does not exist
+
+# tree_match rewriting
+statement ok
+CREATE OR REPLACE MACRO tree_compile_match(sch, nm, sel, semantic := NULL) AS 'SELECT i FROM t WHERE i >= ' || sel;
+
+query I rowsort
+FROM tree_match('main', 't', 3) SELECT i;
+----
+3
+4
