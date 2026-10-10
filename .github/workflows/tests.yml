@@ -12,6 +12,10 @@ jobs:
   macro-identity:
     name: embedded macros, test suites and mutants match the plan repo
     runs-on: ubuntu-latest
+    # Deliberately its own job, not folded into build-and-gates below: it needs no
+    # build at all, so it reports macro drift in under a minute instead of waiting
+    # behind the ~25 minute build that job needs. Folding it in would make this
+    # repo's fastest signal as slow as its slowest.
     steps:
       - uses: actions/checkout@v4
         with: {submodules: recursive}
@@ -29,76 +33,118 @@ jobs:
         with: {python-version: "3.12"}
       - run: python3 scripts/check_macro_identity.py --plan-repo .plan
 
-  gate:
-    name: 16 suites, 495+ assertions
+  build-and-gates:
+    name: build once, then every gate against it
     runs-on: ubuntu-latest
+    # This used to be four jobs (gate, compile-differential, from-source-load, mutants),
+    # each running its own `make` -- four from-scratch DuckDB builds, ~25 minutes each,
+    # on every push, with `cancel-in-progress` above throwing all four away the moment a
+    # second push lands. One build, every gate against it.
     steps:
       - uses: actions/checkout@v4
         with: {submodules: recursive}
-      - run: make
-      # `set -o pipefail` is load-bearing, not boilerplate. GitHub's implicit shell is
-      # `bash -e {0}`, which reports the exit status of the LAST command in a pipeline --
-      # `tee` -- so without pipefail a `make test` that crashes after Catch2 printed a
-      # passing summary leaves this step green. check_gate.py reads text and never an exit
-      # code, so it would not see it either. Measured: `bash -e -c 'false | tee f'` exits
-      # 0; with `-eo pipefail` it exits 1. check_gate.py's crash-signature check is the
-      # second, independent guard against the same failure.
-      - run: set -o pipefail; make test 2>&1 | tee test.log
-        shell: bash
-      - run: python3 test/check_gate.py test.log
-
-  mutants:
-    name: the planted defects in this increment are all killed
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: {submodules: recursive}
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
-      - run: pip install pyyaml
-      - run: make
-      # No plan-repo checkout here, unlike macro-identity and compile-differential: the
-      # mutant corpus is COPIED into test/mutants/ (and held byte-identical to the plan
-      # repo's by the macro-identity job), and the harness rebuilds each in-scope mutant
-      # from src/sql_macros/ to prove the copy is still its source plus the planted edit.
-      #
-      # No rebuild per mutant either. A mutant is applied as a `CREATE OR REPLACE MACRO`
-      # overlay through sqllogictest's `on_init`, against the binary `make` just built, so
-      # 17 mutants and their 17 controls cost one build and not 34. Not piped through
-      # `tee`: the harness's exit code IS the result (it exits 1 on a survivor, an
-      # unverified kill, a broken overlay, or a stale copy), and a pipeline would hand
-      # this step `tee`'s status instead -- the measurement in the `gate` job above
-      # applies here too, and the cheapest way to be immune to it is not to pipe.
-      - run: python3 test/run_mutants.py --increment mvp
-
-  compile-differential:
-    name: verbs compile identically in both implementations
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: {submodules: recursive}
-      # teaguesterling/duckent-plan is the plan repo, as in macro-identity above.
-      # Not `teaguesterling/duckent` -- that name belongs to THIS repo since the
-      # rename, so the old spelling would clone the extension and run the
-      # differential against itself, which would agree trivially.
+      # teaguesterling/duckent-plan is the plan repo -- the reference implementation
+      # whose sql/, test/sql/ and test/mutants/ this repo copies. It was called
+      # `duckent` until the rename this extension's own green gate unblocked; THIS
+      # repo is `duckent` now, so a checkout of `teaguesterling/duckent` here would
+      # silently clone the extension and compare it against itself. Public repo, so
+      # no token is needed; this one is private. (macro-identity above carries its own
+      # copy of this checkout and this reasoning -- it is a separate job and cannot
+      # see this one's filesystem.)
       - uses: actions/checkout@v4
         with:
           repository: teaguesterling/duckent-plan
           path: .plan
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - run: pip install duckdb==1.5.5
-      - run: make
-      - run: python3 test/compile_differential.py --plan-repo .plan --duckdb ./build/release/duckdb
-
-  from-source-load:
-    name: the extension loads from a from-source build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: {submodules: recursive}
-      - run: make
-      # The configuration where TryAutoLoadAvailableExtension silently no-ops
-      # (sitting_duck issue #82). If json or core_functions were autoloaded rather
-      # than statically linked, the macros fail to load HERE and nowhere else.
-      - run: ./build/release/duckdb -c "SELECT tree_canonical_columns()[1];"
+      # pyyaml: run_mutants.py reads the mutant manifest below. duckdb==1.5.5: the
+      # compile-differential step drives the plan repo's pure-Python implementation
+      # through the `duckdb` package, as the other half of the differential against
+      # the compiled extension.
+      - run: pip install pyyaml duckdb==1.5.5
+      - name: build
+        id: build
+        run: make
+      # From here down, every step is gated on `steps.build.outcome == 'success'`
+      # rather than left to the default (which chains off whichever step ran
+      # immediately before it). The default is exactly the vacuous-looking failure
+      # this project tracks elsewhere: the first gate to fail would skip every gate
+      # after it, so one 25-minute cycle would report ONE problem instead of all of
+      # them. `if: always()` on each step would fix that -- but it would also run
+      # every gate below after `make` ITSELF fails, against a stale or half-built
+      # tree, where the gates are meaningless and their output is noise. Pinning the
+      # condition to the build step's own outcome gets both properties at once: a
+      # build failure stops everything below (correctly -- there is no binary to gate
+      # on), and a gate failure never stops the gates after it. No separate
+      # aggregation step is needed to fail the job overall: GitHub's default is that
+      # a job's conclusion is failure if ANY step without `continue-on-error` fails,
+      # independent of whether later steps still ran.
+      #
+      # This also closes a latent gap in the four-job version: `check_gate.py` there
+      # had no `if:` of its own, so a `make test` step that failed under `pipefail`
+      # (see below) would skip it -- meaning check_gate.py's crash-signature check,
+      # described there as "the second, independent guard", would never actually run
+      # in exactly the scenario it exists for. Here it always runs once the build has
+      # succeeded, pipefail trip or not.
+      - name: from-source-load probe (must run before ANYTHING else touches ~/.duckdb)
+        if: steps.build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The configuration where TryAutoLoadAvailableExtension silently no-ops
+          # (sitting_duck issue #82). If json or core_functions were autoloaded
+          # rather than statically linked, the macros fail to load HERE and nowhere
+          # else -- but only if this probe is the FIRST thing in the job to touch
+          # ~/.duckdb/extensions. Measured directly: with json and core_functions
+          # absent from that directory, a dynamic LOAD of the built extension fails;
+          # once they are installed there, the same LOAD succeeds via autoload, with
+          # no explicit LOAD at all. So a populated directory makes this probe
+          # vacuous -- it would go green while verifying nothing. Assert the
+          # directory is absent or empty BEFORE running it, so it cannot pass for
+          # the wrong reason.
+          ext_dir="$HOME/.duckdb/extensions"
+          if [ -d "$ext_dir" ] && [ -n "$(ls -A "$ext_dir" 2>/dev/null)" ]; then
+            echo "from-source-load probe REFUSED: $ext_dir is already populated," \
+                 "so a LOAD below could succeed via autoload instead of the static" \
+                 "link this probe exists to prove nothing else ran first. Contents:" >&2
+            ls -la "$ext_dir" >&2
+            exit 1
+          fi
+          ./build/release/duckdb -c "SELECT tree_canonical_columns()[1];"
+      - name: 16 suites, 495+ assertions
+        if: steps.build.outcome == 'success'
+        shell: bash
+        # `set -o pipefail` is load-bearing, not boilerplate. GitHub's implicit shell
+        # is `bash -e {0}`, which reports the exit status of the LAST command in a
+        # pipeline -- `tee` -- so without pipefail a `make test` that crashes after
+        # Catch2 printed a passing summary leaves this step green. check_gate.py reads
+        # text and never an exit code, so it would not see it either. Measured:
+        # `bash -e -c 'false | tee f'` exits 0; with `-eo pipefail` it exits 1.
+        # check_gate.py's crash-signature check is the second, independent guard
+        # against the same failure -- and, per the `if:` comment above, it now
+        # actually runs even when this step fails.
+        run: set -o pipefail; make test 2>&1 | tee test.log
+      - name: check the gate log
+        if: steps.build.outcome == 'success'
+        run: python3 test/check_gate.py test.log
+      - name: verbs compile identically in both implementations
+        if: steps.build.outcome == 'success'
+        run: python3 test/compile_differential.py --plan-repo .plan --duckdb ./build/release/duckdb
+      - name: the planted defects in this increment are all killed
+        if: steps.build.outcome == 'success'
+        # No plan-repo comparison here, unlike compile-differential above: the mutant
+        # corpus is COPIED into test/mutants/ (and held byte-identical to the plan
+        # repo's by the macro-identity job), and this harness rebuilds each in-scope
+        # mutant from src/sql_macros/ to prove the copy is still its source plus the
+        # planted edit.
+        #
+        # No rebuild per mutant either. A mutant is applied as a `CREATE OR REPLACE
+        # MACRO` overlay through sqllogictest's `on_init`, against the binary `make`
+        # built above, so 17 mutants and their 17 controls cost one build and not 34
+        # -- and now that this job builds once for every gate, not 34 added on top of
+        # four other builds either. Not piped through `tee`: the harness's exit code
+        # IS the result (it exits 1 on a survivor, an unverified kill, a broken
+        # overlay, or a stale copy), and a pipeline would hand this step `tee`'s
+        # status instead -- the same measurement as the `pipefail` comment above
+        # applies here too, and the cheapest way to be immune to it is not to pipe.
+        run: python3 test/run_mutants.py --increment mvp
