@@ -1,0 +1,3 @@
+{
+    "statically_loaded_extensions": ["duckent", "json"]
+}
