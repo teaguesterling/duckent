@@ -1,0 +1,403 @@
+# name: test/sql/36_pseudo.test
+# description: pseudo-class binding forms expand to expression bodies
+
+query I
+SELECT (tree_semantic(element := 'is_construct(flags)')).element;
+----
+is_construct(flags)
+
+# macro form: body is macro(args)
+query II
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_predicate(tree_semantic(predicate := [{name: 'docblock', macro: 'has_docblock', args: 'file_path, node_id'}]))).predicate) AS p);
+----
+docblock	has_docblock(file_path, node_id)
+
+# map form with shared args
+query II rowsort
+SELECT (p).name, (p).body FROM (SELECT unnest((tree_expand_predicate(tree_semantic(predicate_map := MAP {'busy': 'is_busy', 'leaf': 'is_leaf'}, predicate_args := 'node_id'))).predicate) AS p);
+----
+busy	is_busy(node_id)
+leaf	is_leaf(node_id)
+
+# prefix form: every catalog scalar macro starting with the prefix, name = the remainder
+# M4: PURITY. A predicate must give the same answer for the same row, or matching stops being a
+# function of the declarations (doctrine 2) -- the same selector would return different rows on two
+# runs. DuckDB's own catalog is authoritative for built-ins: `stability` is VOLATILE for random()
+# and friends and CONSISTENT_WITHIN_QUERY for now(), and both are impure here -- the first differs
+# within one query, the second between queries.
+#
+# The functions a body references come from DuckDB's PARSE TREE, not a text scan:
+# json_serialize_sql parses without binding, so a body full of columns it cannot resolve still
+# yields its calls, and a malformed body comes back as an error object rather than raising.
+statement ok
+CREATE MACRO pure_leaf(n) AS n = 0;
+
+statement ok
+CREATE MACRO impure_leaf(n) AS n + random();
+
+statement ok
+CREATE MACRO macro_of_macro(n) AS pure_leaf(n);
+
+# a pure body is accepted and recorded pure
+statement ok
+CALL tree_ddl_create('main', 'pur', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'leaf', body: 'descendant_count = 0'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT purity FROM tree_catalog_predicates() WHERE tree_name = 'pur' AND name = 'leaf';
+----
+pure
+
+# a VOLATILE built-in is refused, naming the function and why
+statement error
+CALL tree_ddl_create('main', 'vol', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'r', body: 'descendant_count > random()'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+PREDICATE r is not pure
+
+# now() is CONSISTENT_WITHIN_QUERY, which is impure between queries and refused too
+statement error
+CALL tree_ddl_create('main', 'nw', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'n', body: 'now() IS NOT NULL'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+PREDICATE n is not pure
+
+# a macro whose own body is impure is refused -- one level of resolution
+statement error
+CALL tree_ddl_create('main', 'im', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'i', macro: 'impure_leaf', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+PREDICATE i is not pure
+
+# a macro whose body is pure records pure
+statement ok
+CALL tree_ddl_create('main', 'pm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'p', macro: 'pure_leaf', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT purity FROM tree_catalog_predicates() WHERE tree_name = 'pm' AND name = 'p';
+----
+pure
+
+# BEYOND one level the answer is UNKNOWN, and unknown is ACCEPTED rather than refused. Claiming
+# 'pure' for a body we did not resolve would be the false-positive verdict #39 was about; refusing
+# it would reject a predicate that is very likely fine. So it is recorded honestly and allowed.
+statement ok
+CALL tree_ddl_create('main', 'mm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'm', macro: 'macro_of_macro', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT purity FROM tree_catalog_predicates() WHERE tree_name = 'mm' AND name = 'm';
+----
+unknown
+
+# a body that does not parse is refused rather than recorded as pure, which a bare function scan
+# would have done: json_serialize_sql returns an error object and the extractor finds no calls
+statement error
+CALL tree_ddl_create('main', 'bad', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'b', body: 'descendant_count = )('}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+PREDICATE b does not parse
+
+statement ok
+CREATE MACRO sel_ast_leafy(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_deep(n) AS n > 3;
+
+query III rowsort
+SELECT (p).name, (p).body, (p).prefix FROM (SELECT unnest((tree_expand_predicate(tree_semantic(predicate := [{prefix: 'sel_ast_', args: 'descendant_count'}]))).predicate) AS p);
+----
+deep	sel_ast_deep(descendant_count)	sel_ast_
+leafy	sel_ast_leafy(descendant_count)	sel_ast_
+
+# expression form passes through unchanged
+query I
+SELECT (p).body FROM (SELECT unnest((tree_expand_predicate(tree_semantic(predicate := [{name: 'x', body: 'a > 1'}]))).predicate) AS p);
+----
+a > 1
+
+query IIII
+SELECT tree_sql_literal_type('100'), tree_sql_literal_type('-2.5'), tree_sql_literal_type('true'), tree_sql_literal_type('''x''') IS NULL;
+----
+BIGINT	DOUBLE	BOOLEAN	true
+
+query II
+SELECT language, bare_safe FROM tree_catalog_languages() WHERE language = 'css';
+----
+css	true
+
+query I
+SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
+----
+css
+
+# sel_ast_leafy and sel_ast_deep (above) are no longer needed and would otherwise contaminate
+# the shared tier below: the shared tier scans every catalog macro named sel_<rest>, and both
+# names start with the literal "sel_" prefix (not just "sel_ast_"), so leaving them defined
+# would bind two extra, untested pseudo-classes on every tree created from here on.
+statement ok
+DROP MACRO sel_ast_leafy;
+
+statement ok
+DROP MACRO sel_ast_deep;
+
+# shared tier: sel_* macros bind with the tree's predicate_args unless shadowed
+statement ok
+CREATE MACRO sel_leaf(n) AS n = 0;
+
+statement ok
+CREATE MACRO sel_ast_leaf(n) AS n < 0;
+
+statement ok
+CALL tree_ddl_create('main', 'shadow', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate_args := 'descendant_count', predicate := [{prefix: 'sel_ast_', args: 'descendant_count'}, {name: 'busy', body: 'children_count > 2'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_predicates() WHERE tree_name = 'shadow';
+----
+busy	local	children_count > 2
+leaf	prefix	sel_ast_leaf(descendant_count)
+
+# :leaf resolves to the prefix binding (n < 0: nothing), not the shared sel_leaf (n = 0: every leaf)
+query I
+SELECT count(*) FROM tree_match('main', 'shadow', tree_steps([{pseudo: 'leaf'}]));
+----
+0
+
+# a shared-tier name with no local or prefix binding is bound
+statement ok
+CREATE MACRO sel_deep(n) AS n > 20;
+
+statement ok
+CALL tree_ddl_create('main', 'shared', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate_args := 'descendant_count')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the full row set, not a name filter: at this point sel_leaf, sel_ast_leaf and sel_deep are all
+# live, 'shared' declares no local or prefix pseudo of its own, so all three bind as shared
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_predicates() WHERE tree_name = 'shared';
+----
+ast_leaf	shared	sel_ast_leaf(descendant_count)
+deep	shared	sel_deep(descendant_count)
+leaf	shared	sel_leaf(descendant_count)
+
+# independently verified: read_parquet('test/data/app.parquet') WHERE descendant_count > 20
+# groups as (function_definition, 2), (module, 1)
+query I rowsort
+FROM tree_match('main', 'shared', tree_steps([{pseudo: 'deep'}])) SELECT type;
+----
+function_definition
+function_definition
+module
+
+# a bare sel_ macro has an empty remainder: skipped, not bound as '', and not an error
+statement ok
+CREATE MACRO sel_(n) AS n > 0;
+
+query I
+SELECT list_contains(list_transform((tree_expand_predicate(tree_semantic(predicate_args := 'descendant_count'))).predicate, lambda p: (p).name), '');
+----
+false
+
+# LIKE provenance: a child that does not redeclare 'leaf' inherits shadow's prefix-bound entry
+# (not a fresh local one) and predicate_args, so the shared tier still applies at the child too.
+# The child ALSO gaining :deep (absent from the parent's own row set) is correct by design: PREDICATE
+# is resolved against the live catalog at create time, and sel_deep already existed by then.
+statement ok
+CALL tree_ddl_create('main', 'shadow_like', tree_spec(tree_shape(), "like" := 'shadow', source := 'read_parquet(''test/data/app.parquet'')'));
+
+query III rowsort
+SELECT name, origin, body FROM tree_catalog_predicates() WHERE tree_name = 'shadow_like';
+----
+busy	local	children_count > 2
+deep	shared	sel_deep(descendant_count)
+leaf	prefix	sel_ast_leaf(descendant_count)
+
+# tree_ddl_alter can add PREDICATE_ARGS to an existing tree: the S/PREDICATE_ARGS slot is stored,
+# has_semantic stays true, and (since altpseudo declares no local/prefix pseudo) the shared
+# tier binds every live sel_* macro
+statement ok
+CALL tree_ddl_create('main', 'altpseudo', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement ok
+CALL tree_ddl_alter('main', 'altpseudo', tree_semantic(type := 'type', predicate_args := 'descendant_count'));
+
+query III
+SELECT (SELECT expression FROM tree_catalog_slots() WHERE tree_name = 'altpseudo' AND slot = 'PREDICATE_ARGS'),
+       has_semantic,
+       (SELECT count(*) FROM tree_catalog_predicates() WHERE tree_name = 'altpseudo' AND origin = 'shared')
+FROM tree_catalog_trees() WHERE tree_name = 'altpseudo';
+----
+descendant_count	true	3
+
+query II rowsort
+SELECT name, origin FROM tree_catalog_predicates() WHERE tree_name = 'altpseudo';
+----
+ast_leaf	shared
+deep	shared
+leaf	shared
+
+# tree_match's per-query SEMANTIC overlay: a tree with no pseudo-classes at all, so any binding
+# below comes only from the overlay's own expansion
+statement ok
+CALL tree_ddl_create('main', 'bare', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type')), source := 'read_parquet(''test/data/app.parquet'')'));
+
+# no overlay: an undeclared pseudo is unknown. Checked against the compiled SQL text
+# (tree_explain), not a row count: an unknown pseudo's clause is always false, so the query
+# itself returns no rows to read _match_unknown_pseudos back from.
+query I
+SELECT (tree_explain('main', 'bare', tree_steps([{pseudo: 'deep'}]))).sql LIKE '%1 AS _match_unknown_pseudos%';
+----
+true
+
+# overlay declares predicate_args but no pseudo list: the shared tier must still be gated on the
+# EXPANDED overlay ((sem).predicate), not the raw, undeclared (semantic).predicate -- gating on the raw
+# field left the projection's _predicate map without the shared binding while the matcher believed
+# :deep was known, so the clause compiled to a lookup that silently matched nothing.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'deep'}]), semantic := tree_semantic(type := 'type', predicate_args := 'descendant_count'))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0
+module	0
+
+# An overlay that sets ONLY predicate_args is not an empty overlay: the shared tier binds every live
+# sel_* macro from it -- the record just above, with `type :=` alongside, is the same expansion --
+# so refusing it as empty denied the query the one thing it was asking for. The emptiness test now
+# asks the question create and alter ask (does this SEMANTIC declare an S slot?) through the one
+# predicate all three share, and PREDICATE_ARGS is an S slot in all three.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{pseudo: 'deep'}]), semantic := tree_semantic(predicate_args := 'descendant_count'))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0
+module	0
+
+# a genuinely empty overlay still refuses
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition'}]), semantic := tree_semantic());
+----
+semantic overlay is empty
+
+# ---------------------------------------------------------------------------------------
+# A PREDICATE prefix that binds nothing is a typo, not a declaration of nothing
+# ---------------------------------------------------------------------------------------
+#
+# A prefix entry names a NAMESPACE of catalog macros, and expansion replaces it with one
+# binding per macro that carries the prefix. When none does, expansion replaces it with
+# nothing: the tree was created, the S/PREDICATE rows were empty, and every `:name` the author
+# meant to mint was an unknown pseudo-class compiling to false. Nothing said so -- not at
+# create, not at match -- so `predicate := [{prefix: 'sel_ats_', ...}]` read as a tree with no
+# pseudo-classes rather than as a misspelling of `sel_ast_`. It is checked against the live
+# catalog at create time, which is when the prefix is resolved.
+statement error
+CALL tree_ddl_create('main', 'nopfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{prefix: 'nosuch_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+----
+tree_ddl_create: PREDICATE prefix nosuch_ binds no macro
+
+# the tree is not half-created: the refusal is in the compiler, before any statement runs
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'nopfx';
+----
+0
+
+# alter runs the same check, in its own verb's words
+statement error
+CALL tree_ddl_alter('main', 'bare', tree_semantic(type := 'type', predicate := [{prefix: 'nosuch_', args: 'descendant_count'}]));
+----
+tree_ddl_alter: PREDICATE prefix nosuch_ binds no macro
+
+# a prefix that DOES bind is unaffected, and so is a local binding whose NAME happens to look
+# like a prefix (only an entry with a prefix and no name is a prefix declaration)
+statement ok
+CALL tree_ddl_create('main', 'okpfx', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth',
+  semantic := tree_semantic(type := 'type', predicate := [{prefix: 'sel_ast_', args: 'descendant_count'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query II
+SELECT name, origin FROM tree_catalog_predicates() WHERE tree_name = 'okpfx' AND origin = 'prefix';
+----
+leaf	prefix
+
+# ---------------------------------------------------------------------------
+# tree_match's SEMANTIC overlay is the THIRD compiler of an S group, and it ran
+# none of the checks create and alter share. Each record below is refused by
+# tree_ddl_create already; the overlay accepted them, and the first two
+# returned ZERO ROWS with no error -- a Doctrine 4 empty result, reported with
+# _match_unknown_pseudos = 0, i.e. the engine positively claiming nothing was
+# unknown. The other two leaked a raw DuckDB error naming neither the tree nor
+# the predicate.
+# ---------------------------------------------------------------------------
+
+# a predicate with neither body nor macro: compiled to a dropped _predicate term, so the
+# WHERE read the TREE's own map, missed the name, and COALESCE(NULL, false) emptied the result
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'x'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'x', body: NULL, macro: NULL}]))
+SELECT type;
+----
+tree_match: every PREDICATE needs a name and a body or macro
+
+# an impure body. The overlay accepted it, so the same selector did not answer the same twice
+# within one query -- Doctrine 2 (semantics consult declarations, never state) on the one path
+# the M4 purity check did not reach
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'r'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'r', body: 'descendant_count > 100 * random()'}]))
+SELECT type;
+----
+tree_match: PREDICATE r is not pure
+
+# a malformed body: create says "does not parse", the overlay leaked `Parser Error: syntax error`
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'b'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'b', body: 'descendant_count = )('}]))
+SELECT type;
+----
+tree_match: PREDICATE b does not parse
+
+# two bindings of one name: create says S-coherence naming the predicate, the overlay leaked
+# DuckDB's "Map keys must be unique." -- which names neither the tree nor the predicate
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'd'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'd', body: 'depth = 0'}, {name: 'd', body: 'depth = 1'}]))
+SELECT type;
+----
+tree_match: S-coherence: PREDICATE d is bound twice
+
+# a prefix binding that binds no macro. Expansion replaces it with NOTHING, so the overlay
+# became indistinguishable from one that declared no predicates at all and every `:name` the
+# caller meant to mint was silently unknown
+statement error
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'leaf'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{prefix: 'no_such_prefix_', args: 'descendant_count'}]))
+SELECT type;
+----
+tree_match: PREDICATE prefix no_such_prefix_ binds no macro
+
+# and the overlay still accepts a well-formed binding: the checks refuse, they do not block.
+# children_count > 2 holds for both function_definition rows (each has 5), so this asserts a
+# specific non-empty set -- descendant_count = 0 would have been vacuous here, since both
+# function_definition rows carry 23.
+query II rowsort
+FROM tree_match('main', 'bare', tree_steps([{type: 'function_definition', pseudo: 'ok'}]),
+  semantic := tree_semantic(type := 'type', predicate := [{name: 'ok', body: 'children_count > 2'}]))
+SELECT type, _match_unknown_pseudos;
+----
+function_definition	0
+function_definition	0

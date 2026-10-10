@@ -34,4 +34,13 @@ void RequireAutoCommit(ClientContext &context, const string &verb);
 
 void RegisterDuckentVerbs(ExtensionLoader &loader);
 
+//! `tree_match(sch, nm, sel, semantic := ..., language := ...)`: compiles the selector to a SQL
+//! query and returns that query's rows. Unlike a verb it is a READ, so the compile happens at
+//! bind time, where it determines the schema and nothing else.
+//!
+//! Registers a table MACRO over a table function rather than a table function alone, because a
+//! table function's arguments cannot contain a subquery and `tree_steps` is a subquery-bodied
+//! macro. The long comment at the top of src/duckent_match.cpp has the measurements.
+void RegisterDuckentMatch(ExtensionLoader &loader);
+
 } // namespace duckdb

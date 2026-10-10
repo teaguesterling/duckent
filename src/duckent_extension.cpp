@@ -18,6 +18,7 @@ static void VersionFunc(DataChunk &args, ExpressionState &state, Vector &result)
 void LoadInternal(ExtensionLoader &loader) {
 	LoadEmbeddedMacros(loader);
 	RegisterDuckentVerbs(loader);
+	RegisterDuckentMatch(loader);
 
 	ScalarFunction version("duckent_version", {}, LogicalType::VARCHAR, VersionFunc);
 	loader.RegisterFunction(version);

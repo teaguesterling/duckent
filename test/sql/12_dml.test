@@ -1,0 +1,389 @@
+# name: test/sql/12_dml.test
+# description: tree-granular DML by ROOT, P13 on ingest, check
+
+statement ok
+CREATE TABLE src AS SELECT * FROM 'test/data/scripts.parquet';
+
+statement ok
+CREATE TABLE first_file AS SELECT * FROM src WHERE file_path = (SELECT min(file_path) FROM src);
+
+statement ok
+CREATE TABLE other_files AS SELECT * FROM src WHERE file_path <> (SELECT min(file_path) FROM src);
+
+statement ok
+CALL tree_ddl_create('main', 'scripts', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'first_file'));
+
+query I
+SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts';
+----
+1
+
+# append trees
+statement ok
+CALL tree_insert('main', 'scripts', 'other_files');
+
+query II
+SELECT (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src);
+----
+true	true
+
+# alter refuses while partitions ingested after create are present (C1): the projection is
+# rebuilt from source_sql alone, which would silently drop everything tree_insert added
+statement error
+CALL tree_ddl_alter('main', 'scripts', tree_semantic(type := 'type'));
+----
+ingested after create
+
+# the refused alter left the tree untouched: rows, partitions and the S group as before
+query III
+SELECT (SELECT count(*) FROM tree_project('main', 'scripts')) = (SELECT count(*) FROM src),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts') = (SELECT count(DISTINCT file_path) FROM src),
+       (SELECT has_semantic FROM tree_catalog_trees() WHERE tree_name = 'scripts');
+----
+true	true	false
+
+# re-inserting an existing ROOT is refused
+statement error
+CALL tree_insert('main', 'scripts', 'first_file');
+----
+already present
+
+# replace re-derives one tree and bumps its epoch
+statement ok
+CALL tree_replace('main', 'scripts', 'first_file');
+
+query I
+SELECT epoch FROM tree_state.partitions WHERE tree_name = 'scripts' AND root_key = (SELECT {file_path: min(file_path)}::VARCHAR FROM src);
+----
+2
+
+# delete by ROOT
+statement ok
+CALL tree_delete('main', 'scripts', 'file_path = (SELECT min(file_path) FROM src)');
+
+query I
+SELECT count(*) FROM tree_project('main', 'scripts') WHERE file_path = (SELECT min(file_path) FROM src);
+----
+0
+
+# delete by a non-ROOT column is ill-typed (P21 / MN17)
+statement error
+CALL tree_delete('main', 'scripts', 'node_id = 3');
+----
+node_id
+
+# P13 on ingest: a partition that descends two levels at once is rejected with the ROOT hint absent (ROOT declared)
+statement ok
+CREATE TABLE bad_levels(file_path VARCHAR, node_id INT, depth INT, descendant_count INT);
+
+statement ok
+INSERT INTO bad_levels VALUES ('x.py', 0, 0, 2), ('x.py', 1, 2, 0), ('x.py', 2, 1, 0);
+
+statement error
+CALL tree_insert('main', 'scripts', 'bad_levels');
+----
+P13 violated
+
+# Two trees in one relation with no ROOT declared: their ORDER restarts, which is a TIE within
+# the single default root, so the ORDER check refuses first and names the hint (M3 §3.2). This
+# record used to be refused by P13, whose message carried the ROOT hint; the hint moved here,
+# where the restart actually shows up, and P13 no longer mentions ROOT.
+statement ok
+CREATE TABLE two_trees(node_id INT, depth INT);
+
+statement ok
+INSERT INTO two_trees VALUES (0, 0), (1, 1), (0, 0), (1, 1), (2, 2), (5, 5);
+
+statement error
+CALL tree_ddl_create('main', 'unrooted', tree_spec(tree_shape("order" := 'node_id', level := 'depth'), source := 'two_trees'));
+----
+ORDER is not a traversal in tree main.unrooted: root {'r0': 0} has 2 rows with ORDER value 0; if the relation holds several trees whose ORDER restarts, declare ROOT
+
+# the failed create left nothing behind
+query I
+SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'unrooted';
+----
+0
+
+# check records a P13 assertion, and one assertion per declared O slot: `scripts` declares
+# SIZE, so its conformance with the derived default is recorded as well as raised at ingest.
+statement ok
+CALL tree_check('main', 'scripts');
+
+query II rowsort
+SELECT artifact, status FROM tree_catalog_assertions() WHERE tree_name = 'scripts';
+----
+assert_o_size	ok
+assert_p13	ok
+
+# a projection-mode tree refuses DML in duckent's own words (M13). tree_check is the one verb
+# M3 §3.4 lets through: assertions are exactly what a tree with no storage can still be asked
+# for, so the refusal above applies to every verb BUT that one.
+statement ok
+CALL tree_ddl_create('main', 'live', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'src', storage := 'projection'));
+
+statement error
+CALL tree_insert('main', 'live', 'first_file');
+----
+is projection-mode; DML needs storage := materialized
+
+# tree_check works for BOTH storage modes. A projection-mode tree IS its source, so it records
+# the ORDER assertion a materialized tree does not (that one had its ORDER checked at the ingest
+# that stored it, and its source may since have moved on); P13 is recorded over the projection
+# MACRO rather than over a table this tree does not have; and every declared O slot is recorded
+# too. All three artifacts are what makes assert_order reachable at all -- it was dead
+# scaffolding while tree_dml_context refused projection-mode trees outright.
+statement ok
+CALL tree_ddl_create('main', 'scripts_pm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'first_file', storage := 'projection'));
+
+statement ok
+CALL tree_check('main', 'scripts_pm');
+
+query II rowsort
+SELECT artifact, status FROM tree_state.assertions WHERE tree_name = 'scripts_pm';
+----
+assert_o_size	ok
+assert_order	ok
+assert_p13	ok
+
+# ...and the OTHER branch, `violated`, which for a projection-mode tree is the only conformance
+# report that exists at all. Create deliberately compiles no raising conformance statement for
+# these trees -- their source can change under them between any two queries, so a create-time
+# refusal would be a promise the storage mode cannot keep -- which means a corrupt projection-mode
+# tree is accepted without complaint and tree_check is the ONLY thing that ever says otherwise.
+# Every other assertion record in the suite is an `ok`, so without this one the whole `violated`
+# branch could regress to always reporting `ok` and nothing would notice.
+statement ok
+CREATE TABLE corrupt_pm AS SELECT * REPLACE (CASE WHEN node_id = 6 THEN descendant_count + 1 ELSE descendant_count END AS descendant_count) FROM 'test/data/app.parquet';
+
+# accepted at create, exactly as designed: no conformance statement is compiled here
+statement ok
+CALL tree_ddl_create('main', 'corrupt_pm', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'), source := 'corrupt_pm', storage := 'projection'));
+
+statement ok
+CALL tree_check('main', 'corrupt_pm');
+
+# only the O assertion is violated: a corrupted SIZE leaves ORDER and the levels untouched, so
+# this also says the status is computed per artifact rather than smeared across the tree
+query II rowsort
+SELECT artifact, status FROM tree_state.assertions WHERE tree_name = 'corrupt_pm';
+----
+assert_o_size	violated
+assert_order	ok
+assert_p13	ok
+
+# and the detail names the first disagreement in the same terms the ingest refusal would have
+# used, which is what makes a recorded assertion actionable rather than a bare flag
+query I
+SELECT detail FROM tree_state.assertions WHERE tree_name = 'corrupt_pm' AND artifact = 'assert_o_size';
+----
+1 disagreeing rows, first at root {'file_path': app.py} position 6: declared 24, derived 23
+
+# a quote in the tree name is escaped where it lands inside a generated error literal (M9):
+# create compiles the P13 check, tree_insert compiles the already-present message
+statement ok
+CALL tree_ddl_create('main', 'it''s', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'first_file'));
+
+statement error
+CALL tree_insert('main', 'it''s', 'first_file');
+----
+already present
+
+statement error
+CALL tree_insert('main', 'it''s', 'bad_levels');
+----
+P13 violated in tree main.it's
+
+# DML on a SHAPE ONLY tree refuses in duckent's own words, not with a raw catalog error
+statement ok
+CALL tree_ddl_create('main', 'shape_only', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), abstract := true));
+
+statement error
+CALL tree_insert('main', 'shape_only', 'first_file');
+----
+is SHAPE ONLY (abstract); it has no storage
+
+statement error
+CALL tree_delete('main', 'shape_only', 'file_path = ''x''');
+----
+is SHAPE ONLY (abstract); it has no storage
+
+# the insert is BY NAME: a source that lists the same columns in another order must not
+# misfile them into the stored table positionally
+statement ok
+CREATE TABLE reordered AS SELECT node_id, name, semantic_type, flags, type, qualified_name, signature_type,
+  parameters, modifiers, annotations, 'reordered.py' AS file_path, language, start_line, end_line,
+  parent_id, depth, sibling_index, children_count, descendant_count, scope, peek FROM first_file;
+
+statement ok
+CALL tree_insert('main', 'scripts', 'reordered');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE p.type IS DISTINCT FROM f.type OR p.name IS DISTINCT FROM f.name)
+FROM tree_project('main', 'scripts') p JOIN first_file f USING (node_id)
+WHERE p.file_path = 'reordered.py';
+----
+857	0
+
+# a source column that itself collides with a canonical column is refused at ingest, the same
+# way create refuses a shadowing ATTR alias
+statement ok
+CREATE TABLE shadowed AS SELECT * REPLACE ('shadowed.py' AS file_path), 1 AS _size FROM first_file;
+
+statement error
+CALL tree_insert('main', 'scripts', 'shadowed');
+----
+shadows a canonical column: _size
+
+# frozen order (no ORDER declared) needs preserve_insertion_order on at ingest, exactly as
+# create does: the scan sequence _pre is taken from is not the source's order otherwise (T6)
+statement ok
+CALL tree_ddl_create('main', 'frozen', tree_spec(tree_shape(root := 'file_path', level := 'depth'), source := 'first_file'));
+
+statement ok
+SET preserve_insertion_order = false;
+
+statement error
+CALL tree_insert('main', 'frozen', 'other_files');
+----
+ORDER is required because preserve_insertion_order is off
+
+statement ok
+SET preserve_insertion_order = true;
+
+statement ok
+CALL tree_insert('main', 'frozen', 'other_files');
+
+query I
+SELECT (SELECT count(*) FROM tree_project('main', 'frozen')) = (SELECT count(*) FROM src);
+----
+true
+
+# error(NULL) audit (Task 13): tree_dml_context's "not found" refusal concatenates the identity
+# it was given, and a NULL schema or name makes the lookup empty AND the message NULL. Before
+# the fix the whole context struct evaluated to NULL, every statement built from it compiled to
+# NULL, list_filter dropped them, and the verb ran BEGIN ... COMMIT over nothing -- a silent
+# no-op where a refusal was owed. This is the DML face of the same 1.5.5 hazard sql/09_css.sql
+# met (error(NULL) evaluates to NULL instead of raising).
+statement error
+CALL tree_insert(NULL, 'app', 'first_file');
+----
+tree_insert: tree <NULL>.app not found
+
+statement error
+CALL tree_replace('main', NULL, 'first_file');
+----
+tree_replace: tree main.<NULL> not found
+
+# tree_delete and tree_check went one worse, and by a second 1.5.5 mechanism: every statement
+# they build is pure string concatenation over the identity, so with a NULL identity each one
+# constant-folds to NULL before anything reads the DML context -- and the planner then prunes
+# the column holding it, so the refusal inside tree_dml_context was never evaluated at all.
+# CALL tree_check('main', NULL) reached the executor as [BEGIN, NULL, NULL, COMMIT] and died on
+# an INTERNAL "Attempted to dereference shared_ptr that is NULL". Both now read the context in a
+# predicate that cannot fold. (tree_insert and tree_replace above escaped it only by accident:
+# they also call tree_compile_projection(x.shape, ...), which forces the context.)
+statement error
+CALL tree_delete('main', NULL, 'true');
+----
+tree_delete: tree main.<NULL> not found
+
+statement error
+CALL tree_check('main', NULL);
+----
+tree_check: tree main.<NULL> not found
+
+# A tied ORDER is refused at ingest, before any statement evaluates the projection (M3 §3.2).
+# This is load-bearing for row counts, not only for _pre stability: a declared PARENT is
+# translated by a LEFT JOIN on __order, so two rows sharing an ORDER value under a declared
+# PARENT make the projection return MORE rows than its source.
+statement error
+CALL tree_insert('main', 'scripts', '(SELECT * REPLACE (0 AS node_id, ''tie.py'' AS file_path) FROM other_files LIMIT 2)');
+----
+ORDER is not a traversal in tree main.scripts
+
+# O conformance is an INGEST check, not only a create-time one (M3 §3.1): `scripts` declares
+# SIZE, so a tree_insert whose source disagrees with the derivation is refused the same way
+# create refuses it. Without this the fast path could be corrupted by the back door -- create
+# checks the source it was given, and every later partition arrives unexamined.
+statement ok
+CREATE TABLE corrupt_ins AS SELECT * REPLACE ('corrupt.py' AS file_path,
+  CASE WHEN node_id = (SELECT min(node_id) FROM first_file) THEN descendant_count + 1 ELSE descendant_count END AS descendant_count)
+  FROM first_file;
+
+statement error
+CALL tree_insert('main', 'scripts', 'corrupt_ins');
+----
+SIZE disagrees with its derived default
+
+# and the refused insert stored nothing: no rows under the new root, no partition row
+query II
+SELECT (SELECT count(*) FROM tree_project('main', 'scripts') WHERE file_path = 'corrupt.py'),
+       (SELECT count(*) FROM tree_state.partitions WHERE tree_name = 'scripts' AND root_key = '{''file_path'': corrupt.py}');
+----
+0	0
+
+# ---------------------------------------------------------------------------
+# p13_ok is the PER-ROOT P13 verdict -- core design 2.2 makes `partitions` one row per ROOT
+# value -- while assert_p13 is the tree-level one and reports only a count. So p13_ok is the
+# record that says WHICH root is bad, and the two are different grains, not duplicates.
+#
+# At ingest it is correct by construction: create emits [... s_p13, s_conform, s_table,
+# s_macro, s_partitions ...] inside one transaction, so the partitions INSERT is unreachable
+# unless P13 held. What was missing is the refresh: tree_check re-ran assert_p13 and left
+# p13_ok alone, so once the stored rows moved off P13 the two records disagreed -- p13_ok
+# still true beside assert_p13 violated.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE p13src AS SELECT * FROM (VALUES
+  ('a.py', 1, 0), ('a.py', 2, 1), ('b.py', 3, 0), ('b.py', 4, 1)) t(file_path, node_id, depth);
+
+statement ok
+CALL tree_ddl_create('main', 'p13refresh', tree_spec(tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth'), source := 'p13src'));
+
+query IT rowsort
+SELECT root_key, p13_ok FROM tree_state.partitions WHERE tree_name = 'p13refresh';
+----
+{'file_path': a.py}	true
+{'file_path': b.py}	true
+
+# move b.py off P13 behind duckent's back: a child claiming level 5 under a level-0 root is a
+# jump, which is exactly what tree_sql_p13_pred calls a violation
+statement ok
+UPDATE tree_catalog."t_4_main_p13refresh" SET _level = 5 WHERE _pre = 1 AND _root.file_path = 'b.py';
+
+statement ok
+CALL tree_check('main', 'p13refresh');
+
+# the tree-level assertion says something is wrong...
+query TT
+SELECT status, detail FROM tree_catalog_assertions() WHERE tree_name = 'p13refresh' AND artifact = 'assert_p13';
+----
+violated	1 violating rows
+
+# ...and p13_ok says WHICH root, which is the whole point of the finer grain
+query IT rowsort
+SELECT root_key, p13_ok FROM tree_state.partitions WHERE tree_name = 'p13refresh';
+----
+{'file_path': a.py}	true
+{'file_path': b.py}	false
+
+# and the refresh corrects in BOTH directions: repair the row and the verdict comes back.
+# A one-way refresh would leave a repaired root permanently marked bad.
+statement ok
+UPDATE tree_catalog."t_4_main_p13refresh" SET _level = 1 WHERE _pre = 1 AND _root.file_path = 'b.py';
+
+statement ok
+CALL tree_check('main', 'p13refresh');
+
+query IT rowsort
+SELECT root_key, p13_ok FROM tree_state.partitions WHERE tree_name = 'p13refresh';
+----
+{'file_path': a.py}	true
+{'file_path': b.py}	true
+
+query TT
+SELECT status, detail FROM tree_catalog_assertions() WHERE tree_name = 'p13refresh' AND artifact = 'assert_p13';
+----
+ok	0 violating rows

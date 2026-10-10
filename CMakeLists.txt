@@ -19,7 +19,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(src/include)
 
 set(EXTENSION_SOURCES src/duckent_extension.cpp src/duckent_macro_loader.cpp
-                      src/duckent_sql.cpp src/duckent_verbs.cpp)
+                      src/duckent_match.cpp src/duckent_sql.cpp
+                      src/duckent_verbs.cpp)
 
 set(DUCKENT_SQL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/sql_macros)
 set(DUCKENT_EMBEDDED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/embedded_sql_macros.hpp)
