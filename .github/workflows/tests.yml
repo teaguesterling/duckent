@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   macro-identity:
-    name: embedded macros and test suites match the plan repo
+    name: embedded macros, test suites and mutants match the plan repo
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +46,30 @@ jobs:
       - run: set -o pipefail; make test 2>&1 | tee test.log
         shell: bash
       - run: python3 test/check_gate.py test.log
+
+  mutants:
+    name: the planted defects in this increment are all killed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install pyyaml
+      - run: make
+      # No plan-repo checkout here, unlike macro-identity and compile-differential: the
+      # mutant corpus is COPIED into test/mutants/ (and held byte-identical to the plan
+      # repo's by the macro-identity job), and the harness rebuilds each in-scope mutant
+      # from src/sql_macros/ to prove the copy is still its source plus the planted edit.
+      #
+      # No rebuild per mutant either. A mutant is applied as a `CREATE OR REPLACE MACRO`
+      # overlay through sqllogictest's `on_init`, against the binary `make` just built, so
+      # 17 mutants and their 17 controls cost one build and not 34. Not piped through
+      # `tee`: the harness's exit code IS the result (it exits 1 on a survivor, an
+      # unverified kill, a broken overlay, or a stale copy), and a pipeline would hand
+      # this step `tee`'s status instead -- the measurement in the `gate` job above
+      # applies here too, and the cheapest way to be immune to it is not to pipe.
+      - run: python3 test/run_mutants.py --increment mvp
 
   compile-differential:
     name: verbs compile identically in both implementations

@@ -20,3 +20,32 @@ extensions duckent itself links are still the three in `extension_config.cmake`.
 parquet` line in each test file would do the same job, but a `require` that fails to resolve SKIPs
 the file silently instead of failing it, which is the vacuous-green failure mode the `--test-config`
 override in the root Makefile exists to avoid.
+
+## The mutant harness
+
+```bash
+python3 test/run_mutants.py --increment mvp
+```
+
+`mutants/` holds 23 planted defects copied from the plan repo (`scripts/check_macro_identity.py`
+holds them byte-identical to it, in both directions), each a `CREATE OR REPLACE MACRO` overlay
+with a manifest claim about which suites must fail when it is applied. It is how this repo knows
+its corpus has teeth rather than merely being large.
+
+Applying one needs no rebuild. The harness writes a copy of `test_config.json` with the overlay
+SQL added as `on_init` — which DuckDB's sqllogictest executes on the test's own connection, after
+the statically linked extensions have loaded and so after duckent has created the base macros —
+and runs the already-built binary over that mutant's suites. 17 mutants and their 17 controls cost
+one build, not 34, and about five minutes.
+
+Scope is derived, not marked: an increment is a set of suites (`INCREMENTS` in `run_mutants.py`,
+taken from the gate's own `DUCKENT_SUITES`), and an entry is in scope exactly when one of its
+`expect_fail` suites is in it. Six entries name only front-end suites this repo does not carry and
+are reported out of scope with a count; two (MN04, MN24) straddle the boundary and are run against
+their in-scope suites with the rest named. Nothing per-entry is written down, so moving a suite
+into or out of the gate cannot leave a stale marking behind.
+
+`mutants/regen.py` is the plan repo's generator, copied so the harness can import it and rebuild
+each in-scope mutant from `src/sql_macros/` to prove the copy is still its source plus the planted
+edit. Run it only in the plan repo — here it resolves its sources as `<root>/sql/`, which this
+repo spells `src/sql_macros/`, and the harness points it at a shim rather than editing the copy.
