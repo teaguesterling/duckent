@@ -15,15 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {submodules: recursive}
-      # NOTE: teaguesterling/duckent is the plan repo. The plan
-      # (2026-10-09-duckent-cpp-mvp, Task 11) renames that repository to
-      # duckent-plan at the very end -- when that happens, this checkout
-      # must be updated to the new name in the SAME commit as the rename,
-      # or this job starts failing for a reason that has nothing to do with
-      # macro drift.
+      # teaguesterling/duckent-plan is the plan repo -- the reference implementation
+      # whose sql/, test/sql/ and test/mutants/ this repo copies. It was called
+      # `duckent` until the rename this extension's own green gate unblocked; THIS
+      # repo is `duckent` now, so a checkout of `teaguesterling/duckent` here would
+      # silently clone the extension and compare it against itself. Public repo, so
+      # no token is needed; this one is private.
       - uses: actions/checkout@v4
         with:
-          repository: teaguesterling/duckent
+          repository: teaguesterling/duckent-plan
           path: .plan
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
@@ -77,16 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {submodules: recursive}
-      # NOTE: teaguesterling/duckent is the plan repo. The plan
-      # (2026-10-09-duckent-cpp-mvp, Task 11) renames that repository to
-      # duckent-plan at the very end -- when that happens, this checkout
-      # must be updated to the new name in the SAME commit as the rename,
-      # or this job starts failing for a reason that has nothing to do with
-      # argument marshalling. Same note as macro-identity above; if the
-      # rename happens, both jobs break together and are fixed in one commit.
+      # teaguesterling/duckent-plan is the plan repo, as in macro-identity above.
+      # Not `teaguesterling/duckent` -- that name belongs to THIS repo since the
+      # rename, so the old spelling would clone the extension and run the
+      # differential against itself, which would agree trivially.
       - uses: actions/checkout@v4
         with:
-          repository: teaguesterling/duckent
+          repository: teaguesterling/duckent-plan
           path: .plan
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}

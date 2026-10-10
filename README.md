@@ -104,8 +104,8 @@ Running the gates:
 make                                    # build
 set -o pipefail; make test 2>&1 | tee test.log
 python3 test/check_gate.py test.log
-python3 scripts/check_macro_identity.py --plan-repo ../duckent
-python3 test/compile_differential.py --plan-repo ../duckent --duckdb ./build/release/duckdb
+python3 scripts/check_macro_identity.py --plan-repo ../duckent-plan
+python3 test/compile_differential.py --plan-repo ../duckent-plan --duckdb ./build/release/duckdb
 python3 test/run_mutants.py --increment mvp
 ```
 
