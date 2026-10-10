@@ -43,9 +43,35 @@ void RequireAutoCommit(ClientContext &context, const string &verb) {
 
 vector<string> CompileStatements(ClientContext &context, const string &macro_name,
                                  const vector<Value> &args) {
+	// One placeholder per argument, except a NULL argument, which is written as the literal NULL.
+	//
+	// run.py splices every argument's TEXT into `SELECT {macro}({args})`, so a caller's `NULL`
+	// reaches the macro as a NULL literal, which is typeless. Here it does not: DuckDB folds a
+	// table function's arguments to Values, and a bare `NULL` against a LogicalType::ANY
+	// parameter arrives as a NULL of type INTEGER -- SQLNULL only in the `arguments` list DuckDB
+	// matched the overload on, not in the Value it hands over. Bound as a parameter, that INTEGER
+	// is what the macro inlines against, and `CALL tree_ddl_alter('main', 'bare', NULL)` reports
+	// "UNNEST() for correlated expressions is not supported yet" instead of the refusal
+	// 11_ddl.test pins. Measured, on this build, with the compile macro called directly:
+	//
+	//     tree_compile_alter('main', 'bare', NULL)                           -> nothing to alter
+	//     tree_compile_alter('main', 'bare', NULL::TREE_SEMANTIC)            -> nothing to alter
+	//     tree_compile_alter('main', 'bare', NULL::STRUCT(abstract BOOLEAN)) -> nothing to alter
+	//     tree_compile_alter('main', 'bare', NULL::INTEGER)                  -> UNNEST() ... error
+	//
+	// So writing `NULL` restores what the caller wrote and the reference passes on. The type of a
+	// NULL is dropped rather than respelled as `NULL::<type>` because it is not the caller's: an
+	// INTEGER is the one case that misbinds, and it is the one DuckDB invented.
 	string placeholders;
+	vector<Value> bound;
 	for (idx_t i = 0; i < args.size(); i++) {
-		placeholders += (i ? ", ?" : "?");
+		placeholders += (i ? ", " : "");
+		if (args[i].IsNull()) {
+			placeholders += "NULL";
+			continue;
+		}
+		placeholders += "?";
+		bound.push_back(args[i]);
 	}
 	const string sql = "SELECT " + macro_name + "(" + placeholders + ")";
 
@@ -57,7 +83,6 @@ vector<string> CompileStatements(ClientContext &context, const string &macro_nam
 		// contract. Pass it through untouched; the corpus matches on what the error SAYS.
 		prepared->GetErrorObject().Throw();
 	}
-	vector<Value> bound = args;
 	auto result = prepared->Execute(bound, false);
 	if (result->HasError()) {
 		// The macro's refusal is the product. Unwrapped, verbatim.
