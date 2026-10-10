@@ -120,19 +120,28 @@ mutant without rebuilding.
   `45_duck_blocks` suites are not carried here, and the 6 mutants they guard are reported as out
   of scope by name rather than silently skipped.
 
-### Known issue
+### One unexplained observation
 
-Loading the built extension into a client where `json` and `core_functions` are not yet installed
-fails with an unhelpful message:
+A dynamic `LOAD` of the built extension into a Python `duckdb` 1.5.5 client failed once with:
 
 ```
 duckent: internal: refusal with a NULL message; see FINDINGS on error(NULL) in 1.5.5
 ```
 
-The dependency handling itself is correct — `INSTALL json; INSTALL core_functions` once, and
-autoload handles it from then on, with no explicit `LOAD` needed. It is the diagnostic that is
-wrong, at the worst possible moment. The from-source build is unaffected, because both are
-statically linked via `extension_config.cmake`.
+**It has not reproduced**, across four configurations: default; autoload and autoinstall
+disabled; an empty `extension_directory`; and both together. An earlier draft of this section
+attributed it to `json` and `core_functions` being uninstalled, which is wrong — in that client
+`duckdb_extensions()` reports both as `STATICALLY_LINKED` once the repository copies are out of
+the way, so they are never actually absent there. The cause is unknown and the trigger is not
+isolated, which is why this is recorded as an observation rather than as a diagnosis.
+
+What the message itself means is verifiable, and is the useful part. `error(NULL)` does not raise
+in DuckDB 1.5.5 — it evaluates to NULL — so every duckent refusal goes through `tree_err`, which
+`COALESCE`s a NULL message to that text. Seeing it means some refusal fired and built a NULL
+message, which `sql/00_types.sql` states plainly is "a duckent bug, not a user error." It
+deliberately does not name the caller, because it has no way to know one.
+
+If you hit it, the reproduction is worth more than the workaround.
 
 ## Building
 

@@ -29,6 +29,16 @@ namespace duckdb {
 //     CREATE MACRO m() AS (SELECT 3); FROM range(m());
 //     -- Binder Error: Table function cannot contain subqueries
 //
+// This is settled upstream and is NOT waiting on a fix, so the shape below is permanent rather
+// than a stopgap. duckdb/duckdb#10228 reports exactly this, was labelled `reproduced`, and was
+// closed in January 2024 with a maintainer's verdict: "Macros only substitute their expression
+// wherever they are used, as such, the error is expected and seems relatively reasonable." The
+// subquery here is uncorrelated and constant-foldable, so folding it would make the obvious
+// shape work -- but that argument has been made and declined. Verified against v1.5.5
+// (d8cdaa33fd) with the two controls that isolate the variable: `FROM range(3)` and
+// `CREATE MACRO n() AS 3; FROM range(n())` both work, so it is the subquery body alone that is
+// refused.
+//
 // `tree_steps` is exactly such a macro -- its body is `(WITH lvl0 AS (...) SELECT ...)` -- and
 // the corpus writes nearly every selector as `tree_steps([...])`. Hand-written IR
 // (`[{node_id: 0, ...}]`) is a plain list literal and binds fine, which is why a bare table
