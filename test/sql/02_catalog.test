@@ -11,10 +11,19 @@ SELECT count(*) FROM tree_catalog_slots();
 ----
 0
 
-query III rowsort
-SELECT language, printer, bare_safe FROM tree_catalog_languages();
+# The `treeql` row, which sql/01_catalog.sql registers, and which is what this suite's
+# description claims. The registry's FULL contents are deliberately not asserted here: `css` is
+# registered by sql/09_css.sql, a front-end a core-only build omits, so an unfiltered assertion
+# makes this suite untestable without the front-end. 38_css_lower.test asserts both the `css` row
+# and that the whole registry is exactly [css, treeql] -- beside the registration it verifies.
+#
+# This is the same defect 36_pseudo.test had, found the same way (the C++ port's core-only build),
+# and this is the last of them: of the 16 suites in the port's gate, 7 mention css and only these
+# two ever asserted css STATE. The other five are `css_classes`, a fixture column name, and
+# comments.
+query III
+SELECT language, printer, bare_safe FROM tree_catalog_languages() WHERE language = 'treeql';
 ----
-css	tree_selector_to_treeql	true
 treeql	tree_selector_to_treeql	true
 
 query I
