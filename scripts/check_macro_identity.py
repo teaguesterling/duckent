@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Every embedded .sql file, and every copied test suite, must be byte-identical
-to the plan repo's.
+"""Every embedded .sql file, every copied test suite, and every copied mutant must
+be byte-identical to the plan repo's.
 
 Embedding the macros puts the same semantics in two repositories. The only
 permitted difference is WHICH files the extension embeds -- 09_css.sql is a
@@ -16,6 +16,20 @@ to it, and a file with no counterpart must be explicitly named as extension-only
 (EXTENSION_ONLY_TESTS below) rather than silently passing by virtue of having
 nothing to compare against -- an unlisted new file is a drift finding, the same
 way an un-embedded new macro file is one below.
+
+The mutant corpus under test/mutants/ is a third set of copies with the same
+property, and it is the one where drift is hardest to see from the outside. A
+mutant is "that macro, with one planted edit", so a copy that has drifted from its
+source still FAILS the suites -- a macro from two commits ago fails the same tests
+a wrong macro does -- and goes on being reported KILLED while saying nothing about
+the edit. The plan repo has already been bitten by exactly this (its `error(` ->
+`tree_err(` sweep moved ten mutants out from under their originals at once), which
+is why test/mutants/regen.py generates the copies there and why test/run_mutants.py
+re-derives each in-scope one here. This check is the cheaper, earlier half: if the
+copies here are byte-identical to the plan repo's, the two repositories cannot have
+planted different defects under the same id. Both directions again -- a mutant
+added in the plan repo and never copied here would otherwise be silence, which is
+the same defect shape as an un-mirrored suite.
 """
 import argparse, hashlib, os, sys
 
@@ -48,6 +62,20 @@ NOT_MIRRORED_TESTS = {
     "44_parsers.test",
     "45_duck_blocks.test",
 }
+
+# The two escape hatches for test/mutants/, deliberately empty: every file in the plan
+# repo's test/mutants/ is copied here and nothing here is local to this repo. They exist
+# named and empty rather than not at all, because the alternative to a named exception is
+# an unnamed one -- a file that passes because nothing compared it.
+#
+# test/run_mutants.py is NOT in either list and is not compared: it lives in test/, not
+# test/mutants/, precisely because it is the one ADAPTED file. The plan repo applies a
+# mutant by handing its own runner an overlay path; this repo applies the same overlay
+# through DuckDB sqllogictest's `on_init` against the built binary. Same corpus, same
+# claims, different mechanism -- so it is a sibling of the copied directory, not a member
+# of it, and that placement is what keeps this check free of an exception for it.
+MUTANTS_EXTENSION_ONLY = set()
+MUTANTS_NOT_MIRRORED = set()
 
 def digest(path):
     with open(path, "rb") as fh:
@@ -117,6 +145,64 @@ def check_test_corpus(root, plan_repo, bad):
                 "in NOT_MIRRORED_TESTS (copy it, or add it there with a reason)"
             )
 
+def check_mutants(root, plan_repo, bad):
+    """test/mutants/ -- the planted defects, their controls, the manifest and regen.py.
+
+    Every regular file is compared, not just .sql: manifest.yaml carries the expect_fail
+    claims a kill is measured against, and regen.py carries the planted edits themselves,
+    so either one drifting changes what a kill means as surely as a mutant body would.
+    __pycache__ is skipped because it is a build artifact of running regen.py, not a copy.
+    """
+    here = os.path.join(root, "test", "mutants")
+    there = os.path.join(plan_repo, "test", "mutants")
+
+    def files(d):
+        return sorted(n for n in os.listdir(d)
+                      if n != "__pycache__" and os.path.isfile(os.path.join(d, n)))
+
+    for name in files(here):
+        mine, theirs = os.path.join(here, name), os.path.join(there, name)
+        has_counterpart = os.path.exists(theirs)
+
+        if name in MUTANTS_EXTENSION_ONLY:
+            if has_counterpart:
+                bad.append(
+                    f"{name}: listed as extension-only in MUTANTS_EXTENSION_ONLY, but the plan "
+                    "repo now has a file by this name -- remove it from MUTANTS_EXTENSION_ONLY "
+                    "and let the identity check compare it"
+                )
+            continue
+
+        if not has_counterpart:
+            bad.append(
+                f"{name}: no counterpart in the plan repo's test/mutants/, and not listed in "
+                "MUTANTS_EXTENSION_ONLY (add it there with a reason, or confirm it should be "
+                "copied from the plan repo)"
+            )
+        elif digest(mine) != digest(theirs):
+            bad.append(
+                f"{name}: differs from the plan repo's test/mutants/{name} -- a mutant, control, "
+                "manifest or edit table that is not the plan repo's plants a different defect, or "
+                "claims a different kill, under the same id"
+            )
+
+    # The reverse direction: a mutant added in the plan repo and never copied here would
+    # otherwise be invisible, because the loop above only walks files that already exist here.
+    for name in files(there):
+        if name in MUTANTS_NOT_MIRRORED:
+            if os.path.exists(os.path.join(here, name)):
+                bad.append(
+                    f"{name}: listed in MUTANTS_NOT_MIRRORED but present here -- remove it "
+                    "from that list so the identity check compares it"
+                )
+            continue
+        if not os.path.exists(os.path.join(here, name)):
+            bad.append(
+                f"{name}: in the plan repo's test/mutants/ but not copied here, and not listed "
+                "in MUTANTS_NOT_MIRRORED (copy it, or add it there with a reason)"
+            )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan-repo", required=True, help="path to the duckent plan repo")
@@ -127,13 +213,15 @@ def main():
 
     check_macros(root, args.plan_repo, bad)
     check_test_corpus(root, args.plan_repo, bad)
+    check_mutants(root, args.plan_repo, bad)
 
     if bad:
         sys.stderr.write("macro identity check FAILED:\n")
         for b in bad:
             sys.stderr.write("  - " + b + "\n")
         sys.exit(1)
-    print("macro identity: every embedded macro and copied test suite matches the plan repo")
+    print("macro identity: every embedded macro, copied test suite and copied mutant "
+          "matches the plan repo")
 
 if __name__ == "__main__":
     main()

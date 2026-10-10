@@ -1,0 +1,268 @@
+# test/mutants/manifest.yaml
+# id is permanent. expect_fail lists test files that must FAIL when the mutant is applied.
+#
+# An optional `env` map is added to the environment of every `test/run.py ... --mutant`
+# subprocess run for that mutant. It is for mutations that are not expressible as a
+# CREATE OR REPLACE MACRO override because the code they mutate is not a macro -- the runner's
+# own css parser, which stands in for the extension's parse-time hook. Such a mutant still has
+# an SQL file, comment-only, so that every mutant is one id, one file, one row. MN08 is the one.
+#
+# WHAT MAKES A KILL EVIDENCE. Most mutants here are copy-and-edit: the whole macro, with one
+# planted edit. A kill only says something about that edit while the copy is still the macro --
+# and in M2 it silently stopped being: the `error(` -> `tree_err(` sweep left ten copies quoting
+# macros that no longer existed, and every one went on being reported KILLED, because a macro
+# from two commits ago fails the same tests a wrong macro does. Two checks hold the claim up,
+# both run by `python3 test/run_mutants.py`:
+#
+#   1. STRUCTURAL. `test/mutants/regen.py` GENERATES each copy from the macro it copies plus its
+#      planted edit; `regen.py --check` rebuilds and compares, and run_mutants.py runs it first,
+#      before touching a database. A drifted copy is out of date whatever the tests say. Edit the
+#      source macro, or the edit table in regen.py -- never the generated body.
+#   2. BEHAVIOURAL. Next to each generated mutant, regen.py writes `<file>.control.sql`: the same
+#      copy with the edit LEFT OUT, so applying it is a no-op CREATE OR REPLACE. run_mutants.py
+#      applies it and requires every suite in expect_fail to PASS, which is what says the kill
+#      comes from the difference between mutant and control. `--no-verify` skips this half;
+#      an explicit `control:` key overrides the file name.
+#
+# A kill needs EVERY suite in expect_fail to fail with a FAIL record; a suite that sees the
+# mutant only sometimes belongs in also_kills.
+#
+# MN08 has no control, because its mutation is not a macro override at all -- there is nothing to
+# leave out. Its manifest row carries `control: manual`: run_mutants.py reports it as a manual
+# verification rather than counting it as verified against a control. Verify it by hand: unset
+# DUCKENT_MUTANT and run the two suites in its expect_fail list; they must PASS. That is the same
+# procedure as the automated one, run by a person.
+#
+# ---------------------------------------------------------------------------------------------
+# NOT PLANTED. Ids are permanent and never renumbered, so the six below are part of the list
+# even though no file implements them. The core design's mutant table already says the deferred
+# ids are "listed as open in the manifest", and README is moving to calling this file the
+# complete list rather than the handover; this block is what makes those claims true. The m3
+# plan asked for it in exactly this shape -- a header block listing MN09/MN10/MN11/MN16/MN23 as
+# deferred with the milestone that needs them, and MN20 as retired.
+#
+# They are COMMENTS, not rows, because the schema cannot express "declared but not planted":
+# both consumers iterate every entry and dereference m["file"] and m["expect_fail"]
+# (test/mutants/regen.py's main loop, test/run_mutants.py's). A row without those keys raises;
+# a row naming a file that does not exist passes regen's existence guard and is then reported
+# BROKEN by run_mutants.py, which exits 1. Giving them rows means teaching both loops to skip a
+# `deferred:` key -- a harness contract change, deliberately not bundled into this PR.
+#
+# DEFERRED TO W (attachment, cross-taxon planning, incremental load). All four need a tree that
+# SPLICES and a frontier that can be UNLOADED; every current fixture is complete, so nothing
+# among them can distinguish *unloaded* from *absent*. That is issue #33, still open, and it
+# blocks all four -- the fixture is the blocker, not the mutation.
+#
+#   MN09  adding an attachment changes a SINGLE-TREE match set                      gate: P18
+#   MN10  the planner prunes a cross-taxon descendant walk with a parent-tree
+#         descendant_count, so attached matches vanish                              gate: P19
+#   MN11  an O-derived prune above an unloaded frontier, using a stale size         gate: P19
+#                                                                                   + tri-state
+#   MN16  the matcher skips an unloaded branch instead of loading it, so unloaded
+#         silently becomes ABSENT                                                   gate: P20
+#
+# DEFERRED TO M-LANG (the language-registration layer, D-N10).
+#
+#   MN23  a delimiter-required language parsed BARE -- jq, whose own `select` collides with
+#         bare-form clause termination, so bare eligibility has to be a per-language registry
+#         flag rather than a property of MATCH. Needs the registry to exist first.
+#
+# RETIRED, number reserved.
+#
+#   MN20  bare `[WHERE]` (no head) accepted. It guarded the css host escape's head rule; the
+#         escape was removed from css entirely (the host door is TREEQL step WHERE, which MN19
+#         now guards), so there is nothing left for it to catch. Not deferred -- retired. The
+#         number is not reused.
+# ---------------------------------------------------------------------------------------------
+- id: MN01
+  file: MN01_encoder_tiebreak_desc.sql
+  what: reverse the source-order tiebreak in DFS derivation
+  expect_fail: [test/sql/20_derivations.test]
+  also_kills: 10_projection.test does NOT fail under this mutant -- checked under the
+    every-suite-must-fail rule (test/run.py test/sql/10_projection.test --mutant
+    MN01_encoder_tiebreak_desc.sql PASSes) -- its records happen not to distinguish the
+    reversed source-order tiebreak on this fixture, so it moved out of expect_fail here.
+- id: MN02
+  file: MN02_parent_same_level.sql
+  what: derive parent as nearest prior row at the same level, not level - 1
+  expect_fail: [test/sql/10_projection.test, test/sql/20_derivations.test]
+  also_kills: parent join without root equality (no id reserved; see FINDINGS)
+# MN03's ORIGINAL mutant was retired by M3 Task 6: its edit was a textual one on the `__s` line of
+# tree_compile_projection, and that line was restructured into tree_sql_size_join(), so regen.py
+# could no longer find the text to plant. The id is NOT reused for the same claim: M3 Task 9
+# re-plants MN03 as a DIFFERENT mutant (a semantics-path function reading an O accessor, in
+# sql/07_match.sql). Its CLAIM -- that a declared SIZE override must not silently disagree with
+# the derivation -- is carried by MN04 below as of M3 Task 7, against the restructured line.
+- id: MN03
+  file: MN03_semantics_reads_o_accessor.sql
+  what: a semantics-path function reads an O accessor -- the compiler picks its sibling form by
+    whether SIZE is declared
+  expect_fail: [test/sql/42_second_differential.test]
+  also_kills: nothing; results cannot see it by construction. The two forms this mutant chooses
+    between answer identically on a conforming tree -- _element is true on every row of a tree
+    that declares no ELEMENT, so "the nearest element sibling" and "the row at _pre + _size + 1"
+    are the same row. Only the compiled TEXT moves, and only for an ELEMENT-less tree, which is
+    why 42 carries an ELEMENT-less pair and compares tree_explain(...).sql across it. Measured by
+    running the whole suite under the mutant -- 42 is the only file that fails, 23 pass, and
+    within 42 exactly three records fail. THREE of the four ELEMENT-less plan records, not
+    four -- the `.fn:has(string)` one does not move, because the descendant relation does not
+    branch on the element flag at all. That record is a guard against other mutations of the
+    plan, not a discriminator for this one, and it is kept on that footing rather than
+    counted as part of this kill.
+  # The id is MN03's original claim restored. M2 used MN03 for the declared-SIZE-plus-one mutation;
+  # M3 Task 6 retired that copy (it embedded tree_compile_projection and the edit no longer
+  # applied) and Task 7 re-planted the claim as MN04. This is the module-boundary mutant M3's gate
+  # asks for: not a wrong answer, a wrong DEPENDENCY.
+
+- id: MN04
+  file: MN04_size_override_plus_one.sql
+  what: a declared SIZE override returns size + 1; conformance must refuse it as corruption
+  expect_fail: [test/sql/11_ddl.test, test/sql/12_dml.test, test/sql/42_second_differential.test]
+  also_kills: measured by running the whole suite under the mutant -- every file that CREATES a
+    tree declaring SIZE also fails; 31_match, 32_traversal, 33_navigation, 34_groups,
+    37_css_parser, 38_css_lower, 40_corpus, 41_differential_sitting_duck, 41b_live_sitting_duck,
+    43_representation and 44_parsers. O conformance refuses the declared SIZE at CREATE, so the
+    tree never exists and every later record in those files fails behind it. That is the reverse
+    of MN03, which 40 and 41 could not see at all -- the kill moved from a subtree range one row
+    short, on a row no selector names, to the tree being refused outright.
+  # MN03's number was used for this claim in M2; corrected in M3 (spec §6).
+  # The suites that PASS under it declare no SIZE through tree_ddl_create: 10_projection reaches
+  # tree_compile_projection directly and never creates a tree, and 20_derivations' SIZE-free
+  # parent-basis trees record PARENT as an R slot, which is not an O override at all.
+- id: MN05
+  file: MN05_has_child_only.sql
+  what: a group's first inner step is joined as a CHILD whatever its op, so :has() is child-only
+  expect_fail: [test/sql/40_corpus.test]
+  also_kills: 34_groups and 41_differential_sitting_duck, both verified -- any :has whose
+    target is not a direct child of the subject
+- id: MN06
+  file: MN06_sibling_free_silent.sql
+  what: sibling combinators silently no-op under the sibling-free profile
+  expect_fail: [test/sql/31_match.test]
+- id: MN07
+  file: MN07_unknown_pseudo_raises.sql
+  what: an unknown pseudo-class raises instead of compiling to a clause that selects nothing
+  expect_fail: [test/sql/40_corpus.test]
+  also_kills: 37_css_parser, 31_match, 34_groups, 36_pseudo (all carry an unknown-pseudo
+    record). 40 sees it through corpus row c17 (`.fn:not(:nope)`), which was added for this
+    mutant -- every OTHER corpus row uses only has/not/first-child and the declared `def`.
+- id: MN08
+  file: MN08_parser_grouping.sql
+  what: the runner parser records a child combinator as a descendant, so `a > b c` is grouped
+    the way `a b c` is
+  env: {DUCKENT_MUTANT: MN08}
+  control: manual
+  # Python-side: the SQL file is comment-only and the mutation is the DUCKENT_MUTANT hook in
+  # test/css_parser.py. 44 catches it on the live-parser side of every row with a `>`.
+  expect_fail: [test/sql/44_parsers.test, test/sql/37_css_parser.test]
+- id: MN12
+  file: MN12_shared_wins.sql
+  what: the shared sel_* predicate tier shadows a tree's own local or prefix binding
+  expect_fail: [test/sql/36_pseudo.test]
+  also_kills: nothing in the corpus -- no corpus tree declares a predicate a sel_* macro could
+    shadow, so 36_pseudo's `shadow` tree (:leaf count = 0) is the only witness
+- id: MN13
+  file: MN13_map_no_cast.sql
+  what: an ATTR MAP comparison casts the literal to text instead of the map value to the
+    literal's type, so '9' and '10' compare as strings
+  expect_fail: [test/sql/35_attr_map.test]
+- id: MN14
+  file: MN14_cross_partition.sql
+  what: descendant, child and sibling tests cross ROOT partitions
+  # 12_dml.test was listed here but has never failed under this mutant (verified against the
+  # pre-M2 base): its fixtures do not reach a cross-partition comparison. 33_navigation.test
+  # covers the sibling guard, which the containment suites cannot see.
+  expect_fail: [test/sql/31_match.test, test/sql/33_navigation.test]
+- id: MN15
+  file: MN15_p13_disabled.sql
+  what: INSERT of a partition violating P13 accepted
+  expect_fail: [test/sql/12_dml.test, test/sql/20_derivations.test]
+- id: MN17
+  file: MN17_row_surgery_delete.sql
+  what: pre-MATCH filter on a non-ROOT column accepted (row surgery)
+  expect_fail: [test/sql/12_dml.test]
+- id: MN18
+  file: MN18_abstract_open.sql
+  what: a closed abstract silently serves undeclared attributes
+  expect_fail: [test/sql/11_ddl.test]
+- id: MN19
+  file: MN19_where_raw_relation.sql
+  what: step WHERE compiled against the raw relation instead of the projection view
+  expect_fail: [test/sql/31_match.test]
+- id: MN21
+  file: MN21_type_default_null.sql
+  what: an S-empty tree fails structural matching (TYPE default lost)
+  expect_fail: [test/sql/11_ddl.test]
+- id: MN22
+  file: MN22_lowering_reads_state.sql
+  what: the css lowering consults tree_state.partitions and refuses while a partition is not
+    P13-clean (a language front-end reading engine state)
+  expect_fail: [test/sql/44_parsers.test]
+  # 44 carries the bait: one partition row, p13_ok = false, for a tree name nothing declares.
+  # The kill is total by construction, not incidental: every record in 44 calls tree_parse_css
+  # and the bait row is inserted before the first of them, so all 252 fail while it is there.
+  # Deleting the bait would leave this mutant alive, which is why the insert is commented in
+  # the generated file and templated in test/import_astcss_eval.py's write_44_parsers.
+  also_kills: nothing else -- 40_corpus was checked and PASSES under this mutant. Its
+    `language := 'css'` selectors are parsed by the RUNNER's parser (test/css_parser.py), so no
+    record there reaches tree_css_lower at all; 44 is the suite that runs the SQL front-end.
+- id: MN24
+  file: MN24_printer_drops_group.sql
+  what: the printer omits NOT groups, so `.fn:not(:has(string))` prints as `.fn`
+  expect_fail: [test/sql/34_groups.test, test/sql/38_css_lower.test]
+  # 40_corpus cannot see this one: its printed-TREEQL records compare
+  # tree_selector_to_treeql(<ir>) with tree_explain(...).treeql, and both sides go through the
+  # same mutated printer, so the equality still holds (checked: 40 PASSES under it). Only a
+  # record comparing the print against a FROZEN literal catches a symmetric printer mutation.
+- id: MN25
+  file: MN25_promoted_class_from_body.sql
+  what: a CLASS clause is answered from the pseudo-class of the same name when the row's
+    TAGS list is empty (promotion recomputed at match time)
+  expect_fail: [test/sql/43_representation.test]
+  # 43's `rep_class_none` record is the discriminating one: the tree binds `def` as a PREDICATE
+  # and declares an empty TAGS list, so `.def` must select nothing there. The two promotion
+  # records before it cannot see the mutant -- on rep_class every def row has a non-empty
+  # TAGS list, so the fallback never fires.
+- id: MN26
+  file: MN26_pre_is_order_value.sql
+  what: the projection uses the ORDER value as _pre instead of its rank within ROOT, so every
+    O(1) positional form (_pre = _parent + 1, _pre = 0, _pre + _size + 1) is arithmetic on the
+    wrong number
+  expect_fail: [test/sql/33_navigation.test]
+  # 33's gapped-ORDER records are the discriminating ones: x's ORDER is 0/10/20 and y's is
+  # 100/110/120, so :first-child's `_pre = _parent + 1` is false for both first children and
+  # `_pre = 0` is false for y's root. Every other record in that file -- and every positional
+  # record elsewhere -- runs on app.parquet, whose node_id is already dense and 0-based, where
+  # the mutation is invisible. Measured before planting: 2 of 25 records fail, and they are these.
+- id: MN27
+  file: MN27_shared_tier_unchecked.sql
+  what: PREDICATE_ARGS that binds no macro is accepted, so the tree declares an S group holding
+    no predicates while tree_semantic_declares still counts it -- has_semantic goes true, the
+    S-less refusal stops firing, and every `:name` the author meant to mint is silently unknown
+  expect_fail: [test/sql/11_ddl.test]
+  # 11's two PREDICATE_ARGS records are the discriminating ones: one declares PREDICATE_ARGS with
+  # no sel_* macro in scope at all, the other with only the BARE prefix macro, which binds nothing
+  # because the shared arm requires a non-empty remainder. Every other PREDICATE_ARGS record in
+  # the suite has a bindable sel_* macro present, where the mutation is invisible.
+- id: MN28
+  file: MN28_malformed_reads_pure.sql
+  what: tree_sql_purity never asks whether the body parses, so a malformed body -- which contains
+    no resolvable function calls -- is indistinguishable from a pure one and is recorded 'pure'
+    instead of refused
+  expect_fail: [test/sql/36_pseudo.test]
+  # 36's malformed-body record is the discriminating one. The impure records cannot see this
+  # mutant: a VOLATILE body parses, so the stability arms still fire and still refuse. This is
+  # the false positive the parse-ability arm exists to prevent -- "no function calls found" and
+  # "pure" are the same observation unless parse-ability is a separate question.
+- id: MN29
+  file: MN29_coherence_blind_to_prefix.sql
+  what: the S-coherence duplicate-name check compares only locally-named entries, so a collision
+    that exists only AFTER expansion -- a local name against a prefix-derived one, or two prefix
+    bindings whose remainders agree -- is not seen by duckent at all
+  expect_fail: [test/sql/11_ddl.test]
+  # The kill is on the MESSAGE, not on whether it refuses: the duplicate still fails, but as
+  # DuckDB's `Map keys must be unique.` when the predicate map is built, naming neither the tree
+  # nor the predicate. So the discriminating records are 11's post-expansion collisions, which
+  # assert `S-coherence: PREDICATE leaf is bound twice`. Measured before planting: blinding the
+  # check passed all 1506 assertions that existed before those records, which is why this mutant
+  # and those records had to arrive together.
