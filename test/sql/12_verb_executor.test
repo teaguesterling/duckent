@@ -52,6 +52,276 @@ SELECT count(*) FROM tree_catalog_trees() WHERE tree_name = 'explained';
 ----
 0
 
+# ---- the guard is ENUMERATED, not spot-checked ------------------------------------------
+# Task 7 added tree_match, whose executor opens side connections for exactly the same reason the
+# verbs' does -- and shipped with no guard, because the guard lives at each call site and a new
+# call site is free not to call it. The hazard was already known, already written down in
+# RequireAutoCommit's own comment, and already guarded seven times over; it recurred anyway. The
+# durable fix is not the eighth call site, it is this: read the set of native entry points out of
+# the CATALOG and exercise every member of it.
+#
+# `macro_definition IS NULL` is what separates the C++ entry points from the embedded SQL macros,
+# so `tree_match` -- a macro over duckent_match -- is deliberately NOT in this list; the thing it
+# expands to, duckent_match, is.
+#
+# THIS RECORD IS MEANT TO FAIL when a native entry point is added, removed or renamed. That is
+# its whole job. Do not simply update the expected value: add the name here AND add a record
+# below that exercises the new entry point inside an explicit transaction -- a refusal if it
+# compiles or executes on a connection of its own, or, like duckent_version, a record proving it
+# needs no connection and so is safe inside one.
+
+query I
+SELECT string_agg(f, ', ' ORDER BY f) FROM (
+  SELECT DISTINCT function_name AS f FROM duckdb_functions()
+  WHERE (function_name LIKE 'tree\_%' ESCAPE '\' OR function_name LIKE 'duckent\_%' ESCAPE '\')
+    AND macro_definition IS NULL);
+----
+duckent_match, duckent_version, tree_check, tree_ddl_alter, tree_ddl_create, tree_ddl_drop, tree_delete, tree_insert, tree_replace
+
+# a tree with a semantic group, so that the tree_match records below can have a POSITIVE control:
+# a guard that refused unconditionally would satisfy every `statement error` on its own.
+statement ok
+CALL tree_ddl_create('main', 'guarded', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', key := 'name', tags := '[CAST(semantic_type AS VARCHAR)]',
+                                       predicate := [{name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+query I
+SELECT count(*) FROM tree_match('main', 'guarded', tree_steps([{type: 'function_definition'}]));
+----
+2
+
+# --- one record per member of the enumerated set ---
+# Each gets its OWN BEGIN/ROLLBACK, and that is not tidiness. Every one of these refusals is an
+# InvalidInputException, and Exception::InvalidatesTransaction (duckdb/src/common/exception.cpp)
+# exempts only BINDER, CATALOG, CONNECTION, PARAMETER_NOT_ALLOWED, PARSER and PERMISSION -- so an
+# INVALID_INPUT refusal invalidates the transaction it was raised in, whether it came from bind or
+# from the scan. A second refusal in the same transaction would therefore report "Current
+# transaction is aborted" instead of its own message, and the record would be pinning DuckDB's
+# transaction bookkeeping rather than duckent's guard. Measured, not assumed: that is exactly how
+# this block failed when it was first written as one transaction.
+#
+# The guard runs before the compile, so each of these refuses on the guard and not on whatever
+# its arguments would otherwise have been refused for. tree_ddl_create's own record is above.
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_ddl_drop('main', 'guarded');
+----
+duckent: tree_ddl_drop cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_ddl_alter('main', 'guarded', tree_semantic(type := 'type'));
+----
+duckent: tree_ddl_alter cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_insert('main', 'guarded', 'read_parquet(''test/data/app.parquet'')');
+----
+duckent: tree_insert cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_replace('main', 'guarded', 'read_parquet(''test/data/app.parquet'')');
+----
+duckent: tree_replace cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_delete('main', 'guarded', 'true');
+----
+duckent: tree_delete cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+CALL tree_check('main', 'guarded');
+----
+duckent: tree_check cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+# duckent_match, reached the only way a caller is meant to reach it. Its message is the READER's,
+# not the verbs': tree_match writes nothing, so nothing of its work could survive a ROLLBACK --
+# what the transaction invalidates is its ANSWER. Measured before the guard existed, against the
+# relation the match reads: BEGIN; DELETE FROM src; gave `SELECT count(*) FROM src` = 0 while
+# tree_match still said 2, with no error and no warning.
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT count(*) FROM tree_match('main', 'guarded', tree_steps([{type: 'function_definition'}]));
+----
+duckent: tree_match cannot run inside an explicit transaction. It compiles the selector and runs the compiled query on connections of its own
+
+statement ok
+ROLLBACK;
+
+# the BIND half of that guard specifically: EXPLAIN binds and never inits, so a refusal here can
+# only have come from MatchBind. It matters on its own because the plan EXPLAIN would otherwise
+# print is the plan of a query compiled against the pre-transaction snapshot -- a stale schema and
+# a stale query, shown to the user as though it were the plan of the query they asked about.
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+EXPLAIN SELECT count(*) FROM tree_match('main', 'guarded', tree_steps([{type: 'function_definition'}]));
+----
+duckent: tree_match cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+# duckent_version is the one member of the set that takes no connection of its own -- it returns a
+# compile-time constant -- so for it the property to pin is the opposite one: it must KEEP working
+# inside a transaction. Listed because the enumeration above is only honest if every member has a
+# record, including the members that are fine.
+
+statement ok
+BEGIN TRANSACTION;
+
+query I
+SELECT duckent_version() IS NOT NULL;
+----
+true
+
+statement ok
+ROLLBACK;
+
+# the enumerated refusals above are not a blanket refusal: every one of these verbs is exercised
+# for real, outside a transaction, by 11_ddl / 12_dml / 13_alter, and tree_match by 30_selector
+# through 36_pseudo. The positive control above is the local half of the same argument.
+query I
+SELECT count(*) FROM tree_match('main', 'guarded', tree_steps([{type: 'function_definition'}]));
+----
+2
+
+# ---- the INIT half of the tree_match guard, which a bind-time check alone would miss ---------
+# A statement bound in autocommit and executed inside a transaction never re-binds, so MatchBind
+# does not run a second time and only MatchInit is left to refuse. Measured with a selector that
+# advances a sequence, which fires 27 times per bind and 9 times per execution: the counter went
+# 27 (PREPARE) -> 36 (EXECUTE in autocommit) -> 45 (EXECUTE refused inside BEGIN) -> 54 (EXECUTE
+# in autocommit again). +9 for the refused execution, not +27+9, is bind not having re-run.
+
+statement ok
+PREPARE guarded_match AS SELECT count(*) FROM tree_match('main', 'guarded', tree_steps([{type: 'function_definition'}]));
+
+query I
+EXECUTE guarded_match;
+----
+2
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+EXECUTE guarded_match;
+----
+duckent: tree_match cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+query I
+EXECUTE guarded_match;
+----
+2
+
+statement ok
+DEALLOCATE guarded_match;
+
+# ---- duckent_match called by hand is a refusal, not an assertion failure ---------------------
+# duckent_match is reachable by name, and a subquery third argument is the only shape DuckDB's
+# overload matcher admits, so `(SELECT 1)` gets all the way into MatchBind and finds no
+# __duckent_selector CTE. That condition used to raise an InternalException, which DuckDB renders
+# as "This error signals an assertion failure within DuckDB" over a 35-frame stack trace -- for
+# what is plain user input. It is a refusal now, and it names the function the caller meant.
+
+statement error
+FROM duckent_match('main', 'guarded', (SELECT 1));
+----
+duckent_match is duckent internals: its selector argument has to be the relation the tree_match macro builds
+
+# it is a Binder Error, and it is one on purpose: every OTHER way of getting duckent_match's third
+# argument wrong is already a Binder Error from DuckDB's own overload matcher, so a caller who got
+# the argument's shape wrong rather than its type should not be told something categorically
+# different. This record is the comparison.
+statement error
+FROM duckent_match('main', 'guarded', 'abc');
+----
+No function matches
+
+# ORDER, pinned: inside a transaction the same by-hand call gets the TRANSACTION refusal, not the
+# internals one, because RequireAutoCommitForRead runs before the selector is ever looked at. That
+# is the right way round -- "your answer would be stale" is the more serious thing to say than
+# "you called the wrong function" -- and it is why the internals refusal cannot be observed inside
+# a transaction at all.
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+FROM duckent_match('main', 'guarded', (SELECT 1));
+----
+duckent: tree_match cannot run inside an explicit transaction
+
+statement ok
+ROLLBACK;
+
+# ---- the deparse assumption fails as OURS, not as a DuckDB bug -------------------------------
+# tree_match reads the selector's text out of an UNREFERENCED CTE because such a CTE is never
+# bound, and binding replaces a parsed expression in place with a BoundExpression whose ToString()
+# throws. Referencing the CTE is the one way to make this DuckDB bind it, which is how an
+# eager-binding DuckDB is simulated here: the mechanism fails loudly, never quietly and never with
+# a wrong answer. What this record pins is the LABEL -- a reader hitting it must be sent to
+# duckent's assumption rather than to DuckDB's issue tracker -- and that the underlying message
+# survives in the rethrow.
+
+statement error
+FROM duckent_match('main', 'guarded',
+  (WITH __duckent_selector AS (SELECT tree_steps([{type: 'function_definition'}]) AS s)
+   SELECT s FROM __duckent_selector));
+----
+duckent: tree_match could not deparse its selector, which means this DuckDB binds unreferenced CTEs
+
+statement error
+FROM duckent_match('main', 'guarded',
+  (WITH __duckent_selector AS (SELECT tree_steps([{type: 'function_definition'}]) AS s)
+   SELECT s FROM __duckent_selector));
+----
+Underlying error: ToString(): BoundExpression does not have a child
+
 # ---- atomicity: the first statement must not survive a later one raising ----------------
 # The compile macro is overridden for this file only, reproducing the rollback probe the plan
 # repo's 00_smoke.test uses for the same property. Without the executor's own BEGIN/COMMIT the
