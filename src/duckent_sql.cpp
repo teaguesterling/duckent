@@ -16,8 +16,15 @@ string DuckentCompileMacroName(const string &verb) {
 	return "tree_compile_" + verb;
 }
 
+//! The one test both guards below are made of. Written once so that the two refusals cannot come
+//! to disagree about WHEN they fire while differing about WHY, which is the whole point of there
+//! being two of them.
+static bool InsideExplicitTransaction(ClientContext &context) {
+	return !context.transaction.IsAutoCommit();
+}
+
 void RequireAutoCommit(ClientContext &context, const string &verb) {
-	if (context.transaction.IsAutoCommit()) {
+	if (!InsideExplicitTransaction(context)) {
 		return;
 	}
 	// A verb executes its compiled statement list on its OWN connection, in its own transaction
@@ -39,6 +46,37 @@ void RequireAutoCommit(ClientContext &context, const string &verb) {
 	    "rather than against what this transaction has done so far. COMMIT or ROLLBACK first, "
 	    "then call %s outside the transaction.",
 	    verb, verb);
+}
+
+void RequireAutoCommitForRead(ClientContext &context, const string &reader) {
+	if (!InsideExplicitTransaction(context)) {
+		return;
+	}
+	// Same test as RequireAutoCommit, different consequence, so a different message.
+	//
+	// A reader has no work to survive a ROLLBACK -- it writes nothing. What it has instead is an
+	// ANSWER, and the answer is the thing the transaction invalidates: both the compile step and
+	// the execution of the compiled query run on side connections of their own, which see only
+	// committed data (docs/executor-mechanism.md). Measured against the relation the match reads,
+	// before this guard existed:
+	//
+	//     baseline_match        2
+	//     BEGIN; DELETE FROM src;
+	//     SELECT count(*) FROM src WHERE ...   -> 0   what the caller's transaction sees
+	//     tree_match(...)                      -> 2   what tree_match said, silently
+	//
+	// A read disagreeing with its own reader is worse than the verb case, because a read is what
+	// a user is most likely to interleave with uncommitted DML. Executing on the CALLER's
+	// connection would fix it and cannot be done: that is mechanism B, which deadlocks. So this
+	// refuses, for the same reason the verbs do -- a legible refusal beats a silent wrong answer.
+	throw InvalidInputException(
+	    "duckent: %s cannot run inside an explicit transaction. It compiles the selector and runs "
+	    "the compiled query on connections of its own, which see only committed data, so its "
+	    "answer would describe the database as of this transaction's start rather than what this "
+	    "transaction has done so far -- rows this transaction has inserted, deleted or altered "
+	    "would be missing from, or still present in, the result. COMMIT or ROLLBACK first, then "
+	    "call %s outside the transaction.",
+	    reader, reader);
 }
 
 vector<string> CompileStatements(ClientContext &context, const string &macro_name,

@@ -32,11 +32,26 @@ void ExecuteCompiledStatements(ClientContext &context, const vector<string> &sta
 //! definition: this is the guard that makes mechanism A-prime safe.
 void RequireAutoCommit(ClientContext &context, const string &verb);
 
+//! The same refusal for a READER -- `tree_match` -- which compiles and executes on side
+//! connections too and so cannot see the caller's uncommitted work either.
+//!
+//! Deliberately a sibling rather than a flag on RequireAutoCommit: the test is identical but the
+//! consequence is not. A verb's WORK would survive the caller's ROLLBACK; a reader's ANSWER would
+//! not reflect the caller's transaction. Telling a user of `tree_match` that its work might
+//! survive their ROLLBACK would be false, and `tree_match` writes nothing.
+void RequireAutoCommitForRead(ClientContext &context, const string &reader);
+
 void RegisterDuckentVerbs(ExtensionLoader &loader);
 
 //! `tree_match(sch, nm, sel, semantic := ..., language := ...)`: compiles the selector to a SQL
 //! query and returns that query's rows. Unlike a verb it is a READ, so the compile happens at
 //! bind time, where it determines the schema and nothing else.
+//!
+//! Both halves run on connections of their own, not the caller's: bind compiles on a side
+//! connection, and the compiled query is EXECUTED on a second one. That second connection is the
+//! fact that made the missing transaction guard invisible -- "the compile is at bind time" reads
+//! as though only the schema could be stale, when in truth every row comes from a connection that
+//! cannot see the caller's uncommitted work. Hence RequireAutoCommitForRead at both sites.
 //!
 //! Registers a table MACRO over a table function rather than a table function alone, because a
 //! table function's arguments cannot contain a subquery and `tree_steps` is a subquery-bodied
