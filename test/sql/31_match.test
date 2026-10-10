@@ -750,13 +750,20 @@ SELECT (SELECT list(name ORDER BY node_id) FROM tree_match('main', 'app', tree_s
 # against uppercase data (the f-string `f"Hello, {name}"`) and an uppercase pattern against
 # lowercase data (the `greet` identifiers). The LIKE columns are 0 by the same fold, and they are
 # in the same record as their non-empty ILIKE partner so that neither zero can be vacuous.
+#
+# The first column is string_agg and not list() on purpose: the matched name is the f-string
+# `f"Hello, {name}"`, and a list whose element contains a comma and a quote renders differently
+# under the two runners that have to agree on this corpus -- DuckDB's sqllogictest quotes the
+# element, test/run.py's fmt does not. Both runners compute the same single value; only the
+# rendering of the list wrapper differed, so the old spelling pinned a renderer detail rather
+# than the semantic. A plain VARCHAR renders identically under both, which is what this needs.
 query IIII
-SELECT (SELECT list(name ORDER BY node_id) FROM tree_match('main', 'app', tree_steps([{attr: 'name ILIKE ''%hello%'''}]))),
+SELECT (SELECT string_agg(name, '|' ORDER BY node_id) FROM tree_match('main', 'app', tree_steps([{attr: 'name ILIKE ''%hello%'''}]))),
        (SELECT count(*) FROM tree_match('main', 'app', tree_steps([{attr: 'name LIKE ''%hello%'''}]))),
        (SELECT list(node_id ORDER BY node_id) FROM tree_match('main', 'app', tree_steps([{type: 'identifier', attr: 'name ILIKE ''%GREET%'''}]))),
        (SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'identifier', attr: 'name LIKE ''%GREET%'''}])));
 ----
-[f"Hello, {name}"]	0	[8, 44]	0
+f"Hello, {name}"	0	[8, 44]	0
 
 # The TRY_CAST branch, with ordering operators on it. `is_element` is BOOLEAN -- neither VARCHAR
 # nor numeric -- so `>= true` compiles to TRY_CAST(... AS BOOLEAN) >= true. BOOLEAN orders
