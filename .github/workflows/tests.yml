@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   macro-identity:
-    name: embedded macros match the plan repo
+    name: embedded macros and test suites match the plan repo
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,3 +28,25 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: python3 scripts/check_macro_identity.py --plan-repo .plan
+
+  gate:
+    name: 16 suites, 495+ assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - run: make
+      - run: make test 2>&1 | tee test.log
+      - run: python3 test/check_gate.py test.log
+
+  from-source-load:
+    name: the extension loads from a from-source build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {submodules: recursive}
+      - run: make
+      # The configuration where TryAutoLoadAvailableExtension silently no-ops
+      # (sitting_duck issue #82). If json or core_functions were autoloaded rather
+      # than statically linked, the macros fail to load HERE and nowhere else.
+      - run: ./build/release/duckdb -c "SELECT tree_canonical_columns()[1];"
