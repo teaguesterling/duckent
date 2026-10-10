@@ -26,6 +26,29 @@ OMITTED = {"09_css.sql"}
 # extension loads its statically-linked dependencies and embedded macros at all.
 EXTENSION_ONLY_TESTS = {"12_verb_executor.test", "90_loads.test", "91_macros_load.test"}
 
+# The reverse direction, which the first version of this check did not have: plan-repo
+# .test files this repo deliberately does NOT mirror. Everything here belongs to the
+# front-end increment -- the css parser and its lowering, the sitting_duck differentials,
+# the corpus and representation suites -- none of which a core-only build can run.
+#
+# Without this set, a NEW suite appearing in the plan repo is silence: the forward check
+# only ever looks at files that exist HERE, so a suite added there and never copied here
+# would never be mentioned by anything. That is the same defect shape as every other one
+# this project has hit, and it is the reason OMITTED exists for the macros. The cost of
+# the list is that adding a deliberately-unmirrored suite needs a line here; the benefit
+# is that forgetting to mirror one cannot pass quietly.
+NOT_MIRRORED_TESTS = {
+    "37_css_parser.test",
+    "38_css_lower.test",
+    "40_corpus.test",
+    "41_differential_sitting_duck.test",
+    "41b_live_sitting_duck.test",
+    "42_second_differential.test",
+    "43_representation.test",
+    "44_parsers.test",
+    "45_duck_blocks.test",
+}
+
 def digest(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
@@ -74,6 +97,25 @@ def check_test_corpus(root, plan_repo, bad):
             )
         elif digest(mine) != digest(theirs):
             bad.append(f"{name}: differs from the plan repo's test/sql/{name}")
+
+    # The reverse direction: every plan-repo suite is either mirrored here or declared
+    # unmirrored. A suite added there and forgotten here is otherwise invisible, because
+    # the loop above only ever walks files that already exist in this repo.
+    for name in sorted(os.listdir(there)):
+        if not name.endswith(".test"):
+            continue
+        if name in NOT_MIRRORED_TESTS:
+            if os.path.exists(os.path.join(here, name)):
+                bad.append(
+                    f"{name}: listed in NOT_MIRRORED_TESTS but present here -- remove it "
+                    "from that list so the identity check compares it"
+                )
+            continue
+        if not os.path.exists(os.path.join(here, name)):
+            bad.append(
+                f"{name}: in the plan repo's test/sql/ but not copied here, and not listed "
+                "in NOT_MIRRORED_TESTS (copy it, or add it there with a reason)"
+            )
 
 def main():
     ap = argparse.ArgumentParser()

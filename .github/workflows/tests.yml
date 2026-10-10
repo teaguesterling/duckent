@@ -36,7 +36,15 @@ jobs:
       - uses: actions/checkout@v4
         with: {submodules: recursive}
       - run: make
-      - run: make test 2>&1 | tee test.log
+      # `set -o pipefail` is load-bearing, not boilerplate. GitHub's implicit shell is
+      # `bash -e {0}`, which reports the exit status of the LAST command in a pipeline --
+      # `tee` -- so without pipefail a `make test` that crashes after Catch2 printed a
+      # passing summary leaves this step green. check_gate.py reads text and never an exit
+      # code, so it would not see it either. Measured: `bash -e -c 'false | tee f'` exits
+      # 0; with `-eo pipefail` it exits 1. check_gate.py's crash-signature check is the
+      # second, independent guard against the same failure.
+      - run: set -o pipefail; make test 2>&1 | tee test.log
+        shell: bash
       - run: python3 test/check_gate.py test.log
 
   from-source-load:
