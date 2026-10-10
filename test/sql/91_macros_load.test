@@ -1,0 +1,23 @@
+# name: test/sql/91_macros_load.test
+# description: the embedded macros are in the catalog, and the registry holds treeql alone
+
+query I
+SELECT count(*) > 100 FROM duckdb_functions() WHERE function_name LIKE 'tree%';
+----
+true
+
+query I
+SELECT tree_canonical_columns()[1];
+----
+_root
+
+# core embeds no front-end, so the registry holds exactly one language with no parser
+query IT
+SELECT language, parser FROM tree_catalog_languages();
+----
+treeql	NULL
+
+query I
+SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';
+----
+treeql

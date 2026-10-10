@@ -18,10 +18,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/duckent_extension.cpp)
+set(EXTENSION_SOURCES src/duckent_extension.cpp src/duckent_macro_loader.cpp)
+
+set(DUCKENT_SQL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/sql_macros)
+set(DUCKENT_EMBEDDED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/embedded_sql_macros.hpp)
+
+file(GLOB DUCKENT_SQL_FILES ${DUCKENT_SQL_DIR}/*.sql)
+
+add_custom_command(
+    OUTPUT ${DUCKENT_EMBEDDED_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E echo "Embedding duckent SQL macros"
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_sql_macros.py
+            --input-dir ${DUCKENT_SQL_DIR}
+            --output ${DUCKENT_EMBEDDED_HEADER}
+    DEPENDS ${DUCKENT_SQL_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_sql_macros.py
+    COMMENT "Generating embedded_sql_macros.hpp"
+)
+add_custom_target(duckent_embed_sql DEPENDS ${DUCKENT_EMBEDDED_HEADER})
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+add_dependencies(${EXTENSION_NAME} duckent_embed_sql)
+add_dependencies(${LOADABLE_EXTENSION_NAME} duckent_embed_sql)
 
 # Link OpenSSL in both the static library as the loadable extension
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
