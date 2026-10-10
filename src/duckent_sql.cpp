@@ -39,13 +39,12 @@ void RequireAutoCommit(ClientContext &context, const string &verb) {
 	//
 	// Both arise only inside an explicit transaction, so one refusal covers both. A legible
 	// refusal beats a silent wrong answer.
-	throw InvalidInputException(
-	    "duckent: %s cannot run inside an explicit transaction. A duckent verb executes its "
-	    "compiled statement list in a transaction of its own, so its work would survive your "
-	    "ROLLBACK, and it would compile against the database as of this transaction's start "
-	    "rather than against what this transaction has done so far. COMMIT or ROLLBACK first, "
-	    "then call %s outside the transaction.",
-	    verb, verb);
+	throw InvalidInputException("duckent: %s cannot run inside an explicit transaction. A duckent verb executes its "
+	                            "compiled statement list in a transaction of its own, so its work would survive your "
+	                            "ROLLBACK, and it would compile against the database as of this transaction's start "
+	                            "rather than against what this transaction has done so far. COMMIT or ROLLBACK first, "
+	                            "then call %s outside the transaction.",
+	                            verb, verb);
 }
 
 void RequireAutoCommitForRead(ClientContext &context, const string &reader) {
@@ -79,8 +78,7 @@ void RequireAutoCommitForRead(ClientContext &context, const string &reader) {
 	    reader, reader);
 }
 
-vector<string> CompileStatements(ClientContext &context, const string &macro_name,
-                                 const vector<Value> &args) {
+vector<string> CompileStatements(ClientContext &context, const string &macro_name, const vector<Value> &args) {
 	// One placeholder per argument, except a NULL argument, which is written as the literal NULL.
 	//
 	// run.py splices every argument's TEXT into `SELECT {macro}({args})`, so a caller's `NULL`

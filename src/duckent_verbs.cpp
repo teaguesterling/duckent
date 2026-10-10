@@ -22,8 +22,8 @@ struct VerbGlobalState : public GlobalTableFunctionState {
 //! brief's `__macro` named parameter was dropped because nothing ever supplied it (every verb
 //! would have compiled `SELECT (?, ...)`) and because a hidden named parameter that changes
 //! which macro runs is worse than one wrapper per verb.
-unique_ptr<FunctionData> VerbBind(const char *verb, TableFunctionBindInput &input,
-                                  vector<LogicalType> &return_types, vector<string> &names) {
+unique_ptr<FunctionData> VerbBind(const char *verb, TableFunctionBindInput &input, vector<LogicalType> &return_types,
+                                  vector<string> &names) {
 	auto result = make_uniq<VerbBindData>();
 	result->verb = verb;
 	result->macro_name = DuckentCompileMacroName(result->verb);
@@ -103,8 +103,7 @@ unique_ptr<FunctionData> BindTreeCheck(ClientContext &, TableFunctionBindInput &
 	return VerbBind("tree_check", input, return_types, names);
 }
 
-TableFunction MakeVerb(const string &name, const vector<LogicalType> &arg_types,
-                       table_function_bind_t bind) {
+TableFunction MakeVerb(const string &name, const vector<LogicalType> &arg_types, table_function_bind_t bind) {
 	return TableFunction(name, arg_types, VerbScan, bind, VerbInit);
 }
 
@@ -115,37 +114,33 @@ void RegisterDuckentVerbs(ExtensionLoader &loader) {
 	// compile macro re-reads field by field, so the argument type is ANY rather than a struct
 	// shape spelled out here. (LogicalType::ANY is established for table-function arguments in
 	// core: src/function/table/repeat_row.cpp.)
-	loader.RegisterFunction(MakeVerb("tree_ddl_create",
-	                                 {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
-	                                 BindTreeDdlCreate));
+	loader.RegisterFunction(
+	    MakeVerb("tree_ddl_create", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY}, BindTreeDdlCreate));
 
 	// tree_ddl_drop(sch, nm) -- a bare identity; nothing else to type.
-	loader.RegisterFunction(
-	    MakeVerb("tree_ddl_drop", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDdlDrop));
+	loader.RegisterFunction(MakeVerb("tree_ddl_drop", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDdlDrop));
 
 	// tree_ddl_alter(sch, nm, semantic) -- semantic is a TREE_SEMANTIC struct from
 	// tree_semantic(), read field by field the same way create reads TREE_SPEC, so ANY for the
 	// same reason as create's third argument above.
-	loader.RegisterFunction(MakeVerb("tree_ddl_alter",
-	                                 {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
-	                                 BindTreeDdlAlter));
+	loader.RegisterFunction(
+	    MakeVerb("tree_ddl_alter", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY}, BindTreeDdlAlter));
 
 	// tree_insert(sch, nm, source) / tree_replace(sch, nm, source) -- source is SQL text (a
 	// relation expression), spliced into the compiled statements as a string and never
 	// evaluated as a value here, so VARCHAR.
-	loader.RegisterFunction(MakeVerb(
-	    "tree_insert", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeInsert));
-	loader.RegisterFunction(MakeVerb(
-	    "tree_replace", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeReplace));
+	loader.RegisterFunction(
+	    MakeVerb("tree_insert", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeInsert));
+	loader.RegisterFunction(
+	    MakeVerb("tree_replace", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeReplace));
 
 	// tree_delete(sch, nm, root_predicate) -- root_predicate is SQL text too (a WHERE-clause
 	// fragment over the ROOT columns), same reasoning as source above.
-	loader.RegisterFunction(MakeVerb(
-	    "tree_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDelete));
+	loader.RegisterFunction(
+	    MakeVerb("tree_delete", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeDelete));
 
 	// tree_check(sch, nm) -- records assertions; no extra argument to type.
-	loader.RegisterFunction(
-	    MakeVerb("tree_check", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeCheck));
+	loader.RegisterFunction(MakeVerb("tree_check", {LogicalType::VARCHAR, LogicalType::VARCHAR}, BindTreeCheck));
 }
 
 } // namespace duckdb

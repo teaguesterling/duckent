@@ -138,12 +138,11 @@ string ResolveSelectorLanguage(Connection &con, TableFunctionBindInput &input) {
 	if (named != input.named_parameters.end() && !named->second.IsNull()) {
 		return named->second.ToString();
 	}
-	const Value fallback = ScalarOf(
-	    con, "SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language'");
+	const Value fallback =
+	    ScalarOf(con, "SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language'");
 	if (fallback.IsNull()) {
-		throw InvalidInputException(
-		    "duckent: tree_catalog.settings has no tree_default_selector_language row, so the "
-		    "language of a selector given as text cannot be determined");
+		throw InvalidInputException("duckent: tree_catalog.settings has no tree_default_selector_language row, so the "
+		                            "language of a selector given as text cannot be determined");
 	}
 	return fallback.ToString();
 }
@@ -202,11 +201,10 @@ void RefuseTextSelector(Connection &con, const string &language) {
 		// the refusal below, because a front-end extension registering its parser is the whole
 		// point of the registry, and the day one does the refusal has to name what is missing --
 		// the DISPATCH -- rather than claim nothing is registered.
-		throw NotImplementedException(
-		    "tree_match: selector language '%s' registers the parser %s in "
-		    "tree_catalog.selector_languages, but this build has no front-end dispatch for a "
-		    "selector given as text; pass tree_steps(...) to hand over IR. Registered: %s",
-		    language, parser.ToString(), registered);
+		throw NotImplementedException("tree_match: selector language '%s' registers the parser %s in "
+		                              "tree_catalog.selector_languages, but this build has no front-end dispatch for a "
+		                              "selector given as text; pass tree_steps(...) to hand over IR. Registered: %s",
+		                              language, parser.ToString(), registered);
 	}
 	throw InvalidInputException(
 	    "tree_match: selector language '%s' has no parser in tree_catalog.selector_languages, so a "
@@ -235,9 +233,8 @@ void RefuseTextSelector(Connection &con, const string &language) {
 //! transaction this refusal is never the one raised. Noted so that the exemption is not read as
 //! the reason for the choice.
 [[noreturn]] void RefuseInternalsCall() {
-	throw BinderException(
-	    "duckent_match is duckent internals: its selector argument has to be the relation the "
-	    "tree_match macro builds. Call tree_match(sch, nm, sel) instead.");
+	throw BinderException("duckent_match is duckent internals: its selector argument has to be the relation the "
+	                      "tree_match macro builds. Call tree_match(sch, nm, sel) instead.");
 }
 
 //! The selector argument as written, deparsed from the unbound copy the table macro parks in a

@@ -19,8 +19,7 @@ string DuckentCompileMacroName(const string &verb);
 //!
 //! A macro's refusal is the product, so its error is rethrown VERBATIM via ErrorData::Throw() --
 //! the corpus pins these messages by substring and a prefix of our own is a contract change.
-vector<string> CompileStatements(ClientContext &context, const string &macro_name,
-                                 const vector<Value> &args);
+vector<string> CompileStatements(ClientContext &context, const string &macro_name, const vector<Value> &args);
 
 //! Execute a compiled statement list atomically on a fresh connection: BEGIN TRANSACTION, the
 //! statements, COMMIT; on any errored result ROLLBACK and rethrow the original error verbatim.
