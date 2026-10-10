@@ -96,8 +96,8 @@ struct MatchGlobalState : public GlobalTableFunctionState {
 	bool exhausted = false;
 };
 
-//! One scalar out of a one-column query, or NULL when it returned no rows. Used for the two
-//! catalog reads the text-selector path makes; a macro's own refusals never come through here.
+//! One scalar out of a one-column query, or NULL when it returned no rows. Used for the settings
+//! read the text-selector path makes; a macro's own refusals never come through here.
 Value ScalarOf(Connection &con, const string &sql) {
 	auto result = con.Query(sql);
 	if (result->HasError()) {
@@ -168,9 +168,25 @@ string RegisteredLanguages(Connection &con) {
 //! sql/01_catalog.sql asks for in as many words: "a text selector is then refused by a lookup
 //! that finds no parser instead of by a hardcoded branch".
 void RefuseTextSelector(Connection &con, const string &language) {
-	const Value parser = ScalarOf(con, "SELECT parser FROM tree_catalog.selector_languages WHERE language = " +
-	                                       KeywordHelper::WriteQuoted(language, '\'') + " LIMIT 1");
+	auto row = con.Query("SELECT parser FROM tree_catalog.selector_languages WHERE language = " +
+	                     KeywordHelper::WriteQuoted(language, '\'') + " LIMIT 1");
+	if (row->HasError()) {
+		row->GetErrorObject().Throw();
+	}
 	const string registered = RegisteredLanguages(con);
+	if (row->RowCount() == 0) {
+		// Not the same thing as a row with no parser, and worth saying so: a language nothing has
+		// registered is a missing EXTENSION, while a language registered without one is a
+		// front-end that has not got a parser to offer. `language := 'css'` on a core-only build
+		// is the first; treeql, which core registers because IR needs no parsing, is the second.
+		throw InvalidInputException(
+		    "tree_match: selector language '%s' is not registered in "
+		    "tree_catalog.selector_languages, so a selector given as text cannot be parsed in this "
+		    "build; pass tree_steps(...) to hand over IR, or load the front-end extension that "
+		    "registers it. Registered: %s",
+		    language, registered);
+	}
+	const Value parser = row->GetValue(0, 0);
 	if (!parser.IsNull()) {
 		// Unreachable in a core-only build: the only row with a parser is css's, and the file
 		// that inserts it is the file this extension does not embed. Kept, and kept distinct from
