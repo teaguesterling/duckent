@@ -73,6 +73,31 @@ that registers itself into that same table, which is why the registry is a table
 compile-time list. Load it and `tree_catalog_languages()` gains a `css` row; nothing in this
 extension changes.
 
+#### Handing over a pre-parsed selector
+
+TREEQL's own text form has no parser yet, so `treeql`'s `parser` column is NULL — deliberately,
+because TREEQL *is* the IR. A front-end that parses its own syntax somewhere else hands the
+result over directly, as a list of IR rows:
+
+```sql
+FROM tree_match('main', 'app', [
+  {node_id: 0, parent_id: NULL, kind: 'selector', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 0,    kind: 'step',     value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1,    kind: 'type',     value: 'function_definition',
+                                                  op: NULL, arg: NULL, alias: NULL}
+]::TREE_SELECTOR) SELECT name;
+```
+
+That is the same shape `tree_steps()` produces and the same shape the CSS front-end emits, so
+every language converges on one IR before anything compiles it. **The door is checked, not
+trusted** — nothing parsed those rows, so the compile path validates them and refuses an unknown
+kind, a repeated `node_id`, a step under the wrong parent, or a selector with no steps.
+
+The row layout, the full set of kinds, and each refusal's exact message are in the reference
+repository's [`docs/cheatsheet.md`](https://github.com/teaguesterling/duckent-plan/blob/main/docs/cheatsheet.md),
+under *Handing over a pre-parsed selector* — generated from a live catalog, so it cannot describe
+a check the implementation does not perform.
+
 ## Verification
 
 The durable asset here is the test corpus, not the code. These are the numbers this build is
