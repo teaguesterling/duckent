@@ -172,7 +172,22 @@
   # 12_dml.test was listed here but has never failed under this mutant (verified against the
   # pre-M2 base): its fixtures do not reach a cross-partition comparison. 33_navigation.test
   # covers the sibling guard, which the containment suites cannot see.
-  expect_fail: [test/sql/31_match.test, test/sql/33_navigation.test]
+  # 31_match.test WAS here, and witnessed this mutation through a compiled match -- until the
+  # slot engine (Task 2) made tree_catalog.combinators freeze each relation's output into a
+  # template at INSERT time. tree_sql_comb now reads that frozen row instead of calling
+  # tree_sql_subtree/tree_sql_children, so redefining them no longer reaches a compiled match at
+  # all; verified directly (python3 test/run.py test/sql/31_match.test --mutant
+  # test/mutants/MN14_cross_partition.sql now PASSES, where it used to FAIL). Removed rather than
+  # left in place, and the reason is unconditional rather than a future risk: run_mutants.py
+  # reports KILLED only when `all(v == "fail")` holds over expect_fail, so a listed suite that has
+  # stopped failing does not sit there as extra assurance -- it makes this row report SURVIVED
+  # immediately, however well the other listed suite does its job.
+  # test/sql/46_slot_registry.test's derivation gate compares a row's
+  # frozen template against the macro called DIRECTLY, so it still sees this mutation even though
+  # tree_match cannot, and takes over as this mutant's witness on the combinator-compile surface
+  # (verified: it fails under this mutant with the frozen template now disagreeing with the
+  # mutated macro).
+  expect_fail: [test/sql/33_navigation.test, test/sql/46_slot_registry.test]
 - id: MN15
   file: MN15_p13_disabled.sql
   what: INSERT of a partition violating P13 accepted
@@ -266,3 +281,36 @@
   # assert `S-coherence: PREDICATE leaf is bound twice`. Measured before planting: blinding the
   # check passed all 1506 assertions that existed before those records, which is why this mutant
   # and those records had to arrive together.
+
+  # --- Task 7: two mutants that plant defects in what this increment made new -- the combinator
+  # --- registry's own templates, and the capability column the sibling-free refusal now reads.
+- id: MN30
+  file: MN30_comb_template.sql
+  what: the registry's 'child' row loses its root equality, the same defect MN14 plants in
+    tree_sql_children itself -- but planted in the ROW instead, so a kill proves the compiler
+    reads the frozen TEMPLATE rather than calling the macro
+  expect_fail: [test/sql/31_match.test, test/sql/46_slot_registry.test]
+  # MN14's comment already says why it can no longer witness this through a compiled match:
+  # Task 1 froze each combinator's template at INSERT time, so tree_sql_comb reads the frozen
+  # row and redefining tree_sql_children afterward reaches nothing a match compiles. MN30 plants
+  # the identical defect where it now lives -- directly in the row -- so there are still two
+  # witnesses. 46_slot_registry.test's derivation gate sees it structurally: it substitutes the
+  # row's template back and compares it against the macro called DIRECTLY, which a hand-edited
+  # row disagrees with by construction. 31_match.test sees it BEHAVIOURALLY, through a compiled
+  # match, on scripts.parquet (which has more than one ROOT): the CHILD chain
+  # `{type: 'module'}, {comb: 'child', type: 'function_definition'}` over-matches to include
+  # function_definitions rooted under a DIFFERENT module once the join drops `s3._root = f._root`,
+  # so the count against the raw parquet (`parent_id = 0 AND type = 'function_definition'`)
+  # disagrees. tree_explain's printed SQL pins the same thing textually. 47_new_combinators.test
+  # was the brief's other suggestion for this mutant and does NOT fail under it -- verified
+  # directly -- so it is not listed: 47's own CHILD assertions all stay within app.parquet, which
+  # this fixture set gives exactly one ROOT, so the dropped conjunct changes nothing it checks.
+- id: MN31
+  file: MN31_capability_ignored.sql
+  what: the sibling-free refusal goes back to a hardcoded op list (IN ('next','after')) instead
+    of reading the registry's requires_sibling_order column -- the exact pre-Task-3 behaviour,
+    which passed every test in the repo until Task 3 added a probe for it
+  expect_fail: [test/sql/46_slot_registry.test, test/sql/47_new_combinators.test]
+  # 'prev' (PRECEDING) is requires_sibling_order := true and is not in the hardcoded pair, so
+  # under this mutant a sibling-free tree stops refusing :prev -- compiling it against a _pre no
+  # SIBLING_ORDER governs instead of raising. Verified individually against both suites.

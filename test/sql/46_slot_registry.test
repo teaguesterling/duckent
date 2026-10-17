@@ -1,0 +1,409 @@
+# name: test/sql/46_slot_registry.test
+# description: the clause-kind and combinator vocabularies, declared once and derived from the macros
+
+# THE DERIVATION GATE. A row's template must be the macro's own output, not a copy of it. If
+# someone hand-edits a template, substituting it stops matching the macro and this fails. For
+# every row the registry holds -- including one a front-end registered that this file has never
+# heard of, which fails here by the ELSE below rather than being skipped.
+#
+# THE ELSE AND THE `IS DISTINCT FROM` ARE THE GATE, not tidiness. Written as
+# `template <> CASE ... END` with no ELSE, the CASE yields NULL for any op it does not name,
+# `template <> NULL` is NULL, and WHERE does not count the row -- so a row whose template was
+# TRANSCRIBED BY HAND passed silently, in the OPEN half of the registry that spec section 9
+# exists to provide. Measured, before this was fixed:
+#
+#   INSERT INTO tree_catalog.combinators
+#     VALUES ('sideways','SIDEWAYS','{b}._root = 1 /* nonsense */',NULL,false);
+#   -- the gate reported 0, and tree_sql_comb('sideways',...) emitted s1._root = 1 /* nonsense */
+#
+# The ELSE is a sentinel string no relation macro can produce, so an op this CASE does not name
+# is now counted and this fails. `IS DISTINCT FROM` rather than `<>` for the same reason in the
+# other direction: a NULL template would otherwise be skipped too. What this gate therefore
+# covers is: EVERY registered op, by name against its macro for the eight sql/07_match.sql
+# registers, and by refusal for any other -- so registering a ninth row means adding its macro
+# call here, which is what keeps "derived" from decaying into "transcribed".
+query I
+SELECT count(*) FROM tree_catalog_combinators() c
+WHERE replace(replace(c.template, '{a}', 's0'), '{b}', 's1') IS DISTINCT FROM CASE c.op
+  WHEN 'desc'     THEN tree_sql_subtree('s0','s1')
+  WHEN 'child'    THEN tree_sql_children('s0','s1')
+  WHEN 'self'     THEN tree_sql_self('s0','s1')
+  WHEN 'next'     THEN tree_sql_next_sibling('s0','s1', false)
+  WHEN 'after'    THEN tree_sql_after('s0','s1')
+  WHEN 'parent'   THEN tree_sql_parent('s0','s1')
+  WHEN 'ancestor' THEN tree_sql_ancestors('s0','s1')
+  WHEN 'prev'     THEN tree_sql_prev_sibling('s0','s1', false)
+  ELSE '<<derivation gate: no relation macro is named for this op>>' END;
+----
+0
+
+# No separate "count of ops the CASE knows" is pinned here, deliberately: the ELSE makes an
+# unnamed op FAIL, which is strictly stronger than a count, and the registered set is already
+# pinned row by row by the `SELECT op FROM tree_catalog_combinators()` assertion below. A second
+# written-out copy of the combinator set in this file would be the fourteenth site this whole
+# increment exists to remove.
+
+# the ELEMENT-aware arm, for the rows that have one -- with the same ELSE sentinel, for the same
+# reason: a newly registered relation that declares a template_elem must have its macro named
+# here, not be waved through by a NULL comparison.
+query I
+SELECT count(*) FROM tree_catalog_combinators() c
+WHERE c.template_elem IS NOT NULL
+  AND replace(replace(c.template_elem, '{a}', 's0'), '{b}', 's1') IS DISTINCT FROM CASE c.op
+        WHEN 'next' THEN tree_sql_next_sibling('s0','s1', true)
+        WHEN 'prev' THEN tree_sql_prev_sibling('s0','s1', true)
+        ELSE '<<derivation gate: no ELEMENT-aware macro is named for this op>>' END;
+----
+0
+
+# every op the compiler can be asked for has a row
+query I rowsort
+SELECT op FROM tree_catalog_combinators() ORDER BY op;
+----
+after
+ancestor
+child
+desc
+next
+parent
+prev
+self
+
+# sibling relations declare that they need SIBLING_ORDER; the others do not
+query II rowsort
+SELECT op, requires_sibling_order FROM tree_catalog_combinators() ORDER BY op;
+----
+after	true
+ancestor	false
+child	false
+desc	false
+next	true
+parent	false
+prev	true
+self	false
+
+# the clause-kind vocabulary: six rows, one per S-block slot plus the host door
+query III rowsort
+SELECT kind, slot, needs_semantic FROM tree_catalog_clause_kinds() ORDER BY kind;
+----
+attr	_attr	true
+class	_tags	true
+id	_key	true
+pseudo	_predicate	true
+type	_type	true
+where	NULL	false
+
+# the printed keyword for every kind and op, which the printer will read in Task 5
+query II rowsort
+SELECT kind, keyword FROM tree_catalog_clause_kinds() ORDER BY kind;
+----
+attr	ATTR
+class	CLASS
+id	ID
+pseudo	PSEUDO
+type	TYPE
+where	WHERE
+
+# The compiled join condition must be identical whether it came from the macro or the registry.
+# This is the assertion that lets the registry replace the CASE at all.
+query I
+SELECT count(*) FROM (VALUES ('desc'), ('child'), ('self'), ('next'), ('after')) v(op)
+WHERE tree_sql_comb(v.op, 's0', 's1', false) IS NULL;
+----
+0
+
+# AN UNKNOWN COMBINATOR MUST REFUSE, NOT RETURN NULL. A registry lookup that misses yields NULL,
+# and a NULL concatenated into the join text makes the whole fragment NULL -- a guard that does not
+# fire, the same family as the error(NULL) audit. The CASE this replaces ended in tree_err; the
+# lookup has to keep that.
+statement error
+SELECT tree_sql_comb('sideways', 's0', 's1', false);
+----
+tree_match: unknown combinator sideways
+
+statement error
+SELECT tree_sql_comb(NULL, 's0', 's1', false);
+----
+tree_match: unknown combinator <NULL>
+
+# A NULL ALIAS MUST NOT BE BLAMED ON THE OP. replace(text, '{a}', NULL) is NULL, which used to
+# fall into the SAME branch a genuinely unregistered op does -- 'child' IS registered, so this
+# must not read "unknown combinator child"; it must name the NULL alias instead. Only hand-built
+# IR reaches this (tree_steps always assigns a step an alias before a selector gets here).
+statement error
+SELECT tree_sql_comb('child', NULL, 's1', false);
+----
+combinator child given a NULL alias
+
+# THE PRINTER'S SILENT DROP. tree_treeql_comb ended in ELSE NULL, and tree_treeql_step wraps it in
+# COALESCE(... || ' ', '') -- so an op the printer did not know rendered as NOTHING and the
+# combinator vanished from the printed text. The printer already refuses an unknown clause KIND
+# for exactly this reason ("a kind this printer does not know refuses rather than rendering as
+# nothing"); combinators had no equivalent. Now they do.
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL, kind: 'selector', value: 'treeql', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: 'sideways', arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'type', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+tree_selector_to_treeql: unknown combinator sideways
+
+# and the keyword for every registered op still prints
+query I
+SELECT string_agg(tree_treeql_comb(op), ',' ORDER BY op) FROM tree_catalog_combinators();
+----
+FOLLOWING,ANCESTOR,CHILD,DESCENDANT,SIBLING,PARENT,PRECEDING,SELF
+
+# THE SIBLING-FREE REFUSAL READS requires_sibling_order, NOT A HARDCODED OP LIST.
+#
+# Verifying the mechanism first: `profile` is 'sibling_free' only when NOT level_basis (level_basis
+# is `level IS NOT NULL OR parent IS NULL`, sql/03_ddl.sql) AND sibling_order IS NULL. A LEVEL-basis
+# tree is ALWAYS 'full' regardless of SIBLING_ORDER -- 11_ddl.test's bad20 proves this directly
+# ("LEVEL basis does not take SIBLING_ORDER"). So a fixture that declares `level := 'depth'` (as
+# app.parquet fixtures elsewhere in this suite do) can never reach the sibling_free arm at all; it
+# takes a PARENT-basis tree, which requires a KEY (11_ddl.test's bad5), with no SIBLING_ORDER
+# declared (the shape 11_ddl.test's 'cats' tree and 31_match.test's 'cats' fixture already use).
+statement ok
+CALL tree_ddl_create('main', 'nosib', tree_spec(
+  tree_shape(unique_key := 'email', parent := 'manager_email',
+             semantic := tree_semantic(type := 'role', key := 'email')),
+  source := 'read_csv(''test/data/employees.csv'')'));
+
+# confirms the fixture actually lands on the capability this gate exists to test, not just a
+# tree that happens to error for some other reason
+query II
+SELECT basis, profile FROM tree_catalog_trees() WHERE tree_name = 'nosib';
+----
+parent	sibling_free
+
+# Sibling relations are unavailable on it, and the refusal must name them from the registry
+# rather than from a string literal listing four spellings by hand.
+statement error
+FROM tree_match('main', 'nosib', tree_steps([{type: 'a'}, {comb: 'next', type: 'b'}]));
+----
+is sibling-free
+
+# A relation that does NOT require sibling order is still available on the same tree -- so the
+# refusal is reading the capability, not refusing every combinator.
+query I
+SELECT count(*) >= 0 FROM tree_match('main', 'nosib', tree_steps([{type: 'manager'}, {comb: 'child', type: 'engineer'}]));
+----
+true
+
+# THE GATE WITH TEETH: register a probe relation that declares it needs sibling order, and it must
+# be refused on this tree WITHOUT any edit to the refusal. Then flip the column and the refusal
+# must stop firing. A hardcoded op list cannot pass both halves.
+statement ok
+INSERT INTO tree_catalog.combinators VALUES
+  ('probe_sib', 'PROBE', tree_sql_children('{a}','{b}'), NULL, true);
+
+statement error
+FROM tree_match('main', 'nosib', tree_steps([{type: 'a'}, {comb: 'probe_sib', type: 'b'}]));
+----
+is sibling-free
+
+statement ok
+UPDATE tree_catalog.combinators SET requires_sibling_order = false WHERE op = 'probe_sib';
+
+query I
+SELECT count(*) >= 0 FROM tree_match('main', 'nosib', tree_steps([{type: 'manager'}, {comb: 'probe_sib', type: 'engineer'}]));
+----
+true
+
+statement ok
+DELETE FROM tree_catalog.combinators WHERE op = 'probe_sib';
+
+# AND THE MESSAGE SURVIVES AN EMPTY CAPABILITY SET. string_agg over no rows returns NULL, and a
+# NULL anywhere in the refusal's concatenation makes the whole message NULL -- which tree_err
+# reports as "refusal with a NULL message", losing the one sentence the caller needed. That state
+# is reachable by exactly the per-op flipping above, so it is pinned rather than reasoned about.
+# The positional pseudo-classes are refused by a separate disjunct and are NOT registry-derived,
+# so they must still be named when no combinator requires sibling order at all.
+#
+# SAVED FIRST, and restored from the save rather than re-asserted as a literal. The restore below
+# used to read `SET requires_sibling_order = (op IN ('next', 'after'))`, which transcribed the
+# capability column by hand: it left `prev` FALSE, contradicting this same file's pinned
+# `prev true` 150 lines above, and re-planted by hand the exact pair MN31 exists to plant as a
+# DEFECT. It was harmless only because nothing later in the file reads the column -- not a
+# property to rely on. A snapshot cannot drift from the registry, because it IS the registry.
+statement ok
+CREATE TEMP TABLE sib_saved AS SELECT op, requires_sibling_order FROM tree_catalog.combinators;
+
+statement ok
+UPDATE tree_catalog.combinators SET requires_sibling_order = false;
+
+statement error
+FROM tree_match('main', 'nosib', tree_steps([{type: 'manager', pseudo: 'first-child'}]));
+----
+:first-child and :last-child are unavailable
+
+# ...and specifically NOT the NULL-message backstop
+statement error
+FROM tree_match('main', 'nosib', tree_steps([{type: 'manager', pseudo: 'first-child'}]));
+----
+is sibling-free
+
+statement ok
+UPDATE tree_catalog.combinators AS c SET requires_sibling_order =
+  (SELECT s.requires_sibling_order FROM sib_saved s WHERE s.op = c.op);
+
+# ...and the restore is itself checked, because an UPDATE that matched nothing would leave every
+# row FALSE and look exactly like success. Symmetric difference against the snapshot, so it
+# catches both a row left behind and a row set to the wrong value, without naming a value here.
+query I
+SELECT (SELECT count(*) FROM (SELECT op, requires_sibling_order FROM tree_catalog.combinators
+                              EXCEPT SELECT op, requires_sibling_order FROM sib_saved))
+     + (SELECT count(*) FROM (SELECT op, requires_sibling_order FROM sib_saved
+                              EXCEPT SELECT op, requires_sibling_order FROM tree_catalog.combinators));
+----
+0
+
+statement ok
+DROP TABLE sib_saved;
+
+# the node-kind list the IR allows: the four structural kinds plus every registered clause kind
+query I
+SELECT list_sort(tree_ir_kinds()) = list_sort(['selector','step','has','not'] ||
+       (SELECT list(kind) FROM tree_catalog_clause_kinds()));
+----
+true
+
+# THE AGREEMENT GATE. TREE_STEP_L0/L1/L2 are STRUCT types whose field lists are fixed at
+# definition and cannot be generated from the registry, so this duplication cannot be removed --
+# it is verified instead. Both directions, because each fails differently: a registry row with no
+# struct field cannot be BUILT by tree_steps, and a struct field with no row is accepted by the
+# constructor and then refused by the compiler.
+#
+# ALL THREE LEVELS, not just L0. Spec section 2 names THREE irreducible struct copies
+# (sql/00_types.sql: TREE_STEP_L0, L1 and L2 -- one per literal nesting level, because the
+# constructor nests three), and both queries here used to read TREE_STEP_L0 alone, so L1 and L2
+# were unchecked in BOTH directions while sql/01_catalog.sql's comment claimed the duplication was
+# "verified instead" with no such qualification. The levels are enumerated as rows rather than
+# repeated as three statement pairs, so a fourth level is one VALUES entry and cannot be added to
+# one direction only.
+query I
+WITH stepfield AS (
+    SELECT 'TREE_STEP_L0' AS lvl, column_name AS f FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L0))
+    UNION ALL SELECT 'TREE_STEP_L1', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L1))
+    UNION ALL SELECT 'TREE_STEP_L2', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L2)))
+SELECT count(*) FROM tree_catalog_clause_kinds() k,
+                     (VALUES ('TREE_STEP_L0'), ('TREE_STEP_L1'), ('TREE_STEP_L2')) v(lvl)
+WHERE NOT EXISTS (SELECT 1 FROM stepfield d WHERE d.lvl = v.lvl AND d.f = k.step_field);
+----
+0
+
+# ...and each level actually contributes rows to that CTE, so neither direction can read 0 because
+# a level turned out to be empty -- an absence assertion over nothing passes vacuously. 8 fields on
+# L0, 10 each on L1 and L2 (comb/as plus the six kinds, and has/not on the two nesting levels),
+# which also pins "three levels, not two".
+query I
+WITH stepfield AS (
+    SELECT 'TREE_STEP_L0' AS lvl, column_name AS f FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L0))
+    UNION ALL SELECT 'TREE_STEP_L1', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L1))
+    UNION ALL SELECT 'TREE_STEP_L2', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L2)))
+SELECT string_agg(lvl || '=' || n, ' ' ORDER BY lvl)
+FROM (SELECT lvl, count(*) AS n FROM stepfield GROUP BY lvl);
+----
+TREE_STEP_L0=8 TREE_STEP_L1=10 TREE_STEP_L2=10
+
+# the other direction, over all three levels too: a struct field with no registry row
+query I
+WITH stepfield AS (
+    SELECT 'TREE_STEP_L0' AS lvl, column_name AS f FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L0))
+    UNION ALL SELECT 'TREE_STEP_L1', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L1))
+    UNION ALL SELECT 'TREE_STEP_L2', column_name FROM (DESCRIBE SELECT unnest(NULL::TREE_STEP_L2)))
+SELECT count(*) FROM stepfield d
+WHERE d.f NOT IN ('comb', 'as', 'has', 'not')
+  AND d.f NOT IN (SELECT k.step_field FROM tree_catalog_clause_kinds() k);
+----
+0
+
+# the printer's clause keyword comes from the registry
+query I
+SELECT tree_treeql_clause('type', 'x', NULL, NULL);
+----
+TYPE 'x'
+
+# and an unregistered kind still refuses at the printer, as it did before
+statement error
+SELECT tree_selector_to_treeql([
+  {node_id: 0, parent_id: NULL, kind: 'selector', value: 'treeql', op: NULL, arg: NULL, alias: NULL},
+  {node_id: 1, parent_id: 0, kind: 'step', value: NULL, op: NULL, arg: NULL, alias: NULL},
+  {node_id: 2, parent_id: 1, kind: 'frobnicate', value: 'x', op: NULL, arg: NULL, alias: NULL}]::TREE_SELECTOR);
+----
+unknown node kind frobnicate
+
+# A tree with no SEMANTIC group: the five slot kinds refuse, WHERE does not. The refusal must come
+# from needs_semantic, so flipping the column changes behaviour -- which a site reading the column
+# without acting on it cannot fake.
+statement ok
+CALL tree_ddl_create('main', 'nosem', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count'),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+statement error
+FROM tree_match('main', 'nosem', tree_steps([{type: 'module'}]));
+----
+has no SEMANTIC group
+
+# WHERE is the host door and needs no S slot, so it stays available
+query I
+SELECT count(*) >= 0 FROM tree_match('main', 'nosem', tree_steps([{"where": '_level = 0'}]));
+----
+true
+
+statement ok
+UPDATE tree_catalog.clause_kinds SET needs_semantic = false WHERE kind = 'type';
+
+query I
+SELECT count(*) >= 0 FROM tree_match('main', 'nosem', tree_steps([{type: 'module'}]));
+----
+true
+
+statement ok
+UPDATE tree_catalog.clause_kinds SET needs_semantic = true WHERE kind = 'type';
+
+# THE COMPILE-SIDE AGREEMENT GATE. tree_sql_clause keeps a literal CASE, by design: the attr arm
+# (projected column vs ATTR MAP, TRY_CAST by literal type, the negation prefix, the
+# canonical-column refusal) is not expressible as a template, so the COMPILATION of each kind
+# stays there while the registry owns the vocabulary, the keyword and needs_semantic.
+#
+# That leaves the kind set declared in TWO places -- these rows, and those CASE arms -- and the
+# agreement gate above only checks the rows against the TREE_STEP_* struct fields, which is the
+# constructor's surface, not the compiler's. Nothing checked that every registered kind has an arm.
+# The hole is not theoretical: a row added with no arm is ACCEPTED by tree_steps and by the printer
+# (both read the registry) and then refused at compile with 'unknown clause kind', so the three
+# consumers disagree about what exists. One assertion per kind, because tree_err raises and cannot
+# be aggregated over.
+statement ok
+SELECT tree_sql_clause('type', 'x', NULL, NULL, 's0', [], false, false);
+
+statement ok
+SELECT tree_sql_clause('id', 'x', NULL, NULL, 's0', [], false, false);
+
+statement ok
+SELECT tree_sql_clause('class', 'x', NULL, NULL, 's0', [], false, false);
+
+statement ok
+SELECT tree_sql_clause('pseudo', 'leaf', NULL, NULL, 's0', [], false, false);
+
+statement ok
+SELECT tree_sql_clause('attr', 'lang', '=', '''py''', 's0', [], true, false);
+
+statement ok
+SELECT tree_sql_clause('where', 'true', NULL, NULL, 's0', [], false, false);
+
+# ...and the count is pinned, so a SEVENTH row added without an arm above fails here rather than
+# being discovered when someone writes a selector that uses it.
+query I
+SELECT count(*) FROM tree_catalog_clause_kinds();
+----
+6
+
+# The converse, stated as the refusal it actually produces: a kind with no arm compiles to nothing
+# and says so by name. This is what the three consumers disagreeing looks like from the compiler's
+# side, and it is why the six assertions above exist.
+statement error
+SELECT tree_sql_clause('frobnicate', 'x', NULL, NULL, 's0', [], false, false);
+----
+tree_match: unknown clause kind frobnicate

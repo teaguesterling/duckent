@@ -1,0 +1,155 @@
+# name: test/sql/47_new_combinators.test
+# description: PARENT, ANCESTOR and PRECEDING -- relations the engine already computed with no spelling
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', key := 'name')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# NON-VACUITY, pinned before anything compares sets. Every inverse-property assertion below
+# expects an EXCEPT of 0, and 0 is also what two EMPTY chains produce -- so on its own each of
+# those six assertions is satisfied by a fixture or a relation that matches nothing at all. These
+# three say the forward chains do match something; set equality in both directions then carries
+# the backward chains with them. Without this, a regression that emptied both sides would leave
+# all six green.
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'p'}, {comb: 'child'}]));
+----
+true
+
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'a'}, {comb: 'desc'}]));
+----
+true
+
+query I
+SELECT count(*) > 0 FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'x'}, {comb: 'next'}]));
+----
+true
+
+# PARENT is the inverse of CHILD, so the pair must agree on the same fixture: every (parent, child)
+# the CHILD chain finds must be the (child, parent) the PARENT chain finds. Asserted as a set
+# difference in BOTH directions -- a one-sided EXCEPT only proves containment, not equality.
+#
+# The brief's own draft of this query put the `type: 'module'` filter on the PARENT chain's FIRST
+# step (the row PARENT is asked to find the parent OF). module is this fixture's ROOT, which has no
+# parent, so that chain was provably empty (0 rows) while CHILD's chain is not (3 rows) -- the
+# EXCEPT would have caught that as a mismatch, not passed vacuously, but it was testing the wrong
+# thing: "rows with no parent" is not "the inverse of CHILD". The fix moves the type filter onto
+# the COMB step -- the one PARENT actually returns -- so both chains describe the same relation
+# (module, child-of-module) from opposite ends, which is the inverse property the comment claims.
+query I
+SELECT count(*) FROM (
+  SELECT p.name AS up, c.name AS down FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'p'}, {comb: 'child'}])) c
+  EXCEPT
+  SELECT p2.name AS up, c2.name AS down FROM tree_match('main', 'app', tree_steps([{"as": 'c2'}, {comb: 'parent', type: 'module', "as": 'p2'}])) p2
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT p2.name AS up, c2.name AS down FROM tree_match('main', 'app', tree_steps([{"as": 'c2'}, {comb: 'parent', type: 'module', "as": 'p2'}])) p2
+  EXCEPT
+  SELECT p.name AS up, c.name AS down FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'p'}, {comb: 'child'}])) c
+);
+----
+0
+
+# ANCESTOR is DESCENDANT read backwards -- tree_sql_ancestors is literally tree_sql_subtree(b, a) --
+# so the same inverse property holds and is the cheapest check that the template was derived from
+# the right macro rather than from tree_sql_subtree directly. Asserted both ways, with the same
+# fix as PARENT/CHILD above: the type filter sits on the ANCESTOR comb step, not on the anchor
+# (module is the root, so "find the ancestor of module" is empty for the same reason "find the
+# parent of module" is).
+query I
+SELECT count(*) FROM (
+  SELECT a.name AS up, d.name AS down FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'a'}, {comb: 'desc'}])) d
+  EXCEPT
+  SELECT a2.name AS up, d2.name AS down FROM tree_match('main', 'app', tree_steps([{"as": 'd2'}, {comb: 'ancestor', type: 'module', "as": 'a2'}])) a2
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT a2.name AS up, d2.name AS down FROM tree_match('main', 'app', tree_steps([{"as": 'd2'}, {comb: 'ancestor', type: 'module', "as": 'a2'}])) a2
+  EXCEPT
+  SELECT a.name AS up, d.name AS down FROM tree_match('main', 'app', tree_steps([{type: 'module', "as": 'a'}, {comb: 'desc'}])) d
+);
+----
+0
+
+# PRECEDING is the inverse of SIBLING on a tree that HAS sibling order. Asserted both ways, same
+# fix again: the type filter sits on the PRECEDING comb step (the "earlier" row it returns), not
+# on the anchor, so both chains describe (function_definition, its-next-sibling) from opposite
+# ends instead of two differently-filtered relations that only coincidentally might agree.
+query I
+SELECT count(*) FROM (
+  SELECT x.name AS l, y.name AS r FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'x'}, {comb: 'next'}])) y
+  EXCEPT
+  SELECT l2.name AS l, r2.name AS r FROM tree_match('main', 'app', tree_steps([{"as": 'r2'}, {comb: 'prev', type: 'function_definition', "as": 'l2'}])) l2
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT l2.name AS l, r2.name AS r FROM tree_match('main', 'app', tree_steps([{"as": 'r2'}, {comb: 'prev', type: 'function_definition', "as": 'l2'}])) l2
+  EXCEPT
+  SELECT x.name AS l, y.name AS r FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', "as": 'x'}, {comb: 'next'}])) y
+);
+----
+0
+
+# the three new ops print, and round-trip through the printer. replace(..., chr(10), ' | ')
+# collapses the printer's embedded newline to one line, matching the convention
+# test/sql/38_css_lower.test uses for every multi-line TREEQL result: this runner's "query"
+# record reads each physical line as a SEPARATE expected row (test/run.py's parse_records), so
+# a literal embedded newline in a single-row, single-column result cannot be spelled directly.
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'parent', type: 'b'}])), chr(10), ' | ');
+----
+(TYPE 'a') | PARENT (TYPE 'b')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'ancestor', type: 'b'}])), chr(10), ' | ');
+----
+(TYPE 'a') | ANCESTOR (TYPE 'b')
+
+query I
+SELECT replace(tree_selector_to_treeql(tree_steps([{type: 'a'}, {comb: 'prev', type: 'b'}])), chr(10), ' | ');
+----
+(TYPE 'a') | PRECEDING (TYPE 'b')
+
+# PRECEDING declares it needs sibling order, so it is refused on a sibling-free tree -- by the
+# capability column, with no edit to the refusal. This is Task 3's gate holding for a real row.
+# The fixture must be PARENT basis. sql/03_ddl.sql sets
+#   level_basis = (level IS NOT NULL OR parent IS NULL)
+#   profile     = CASE WHEN NOT level_basis AND sibling_order IS NULL THEN 'sibling_free' ELSE 'full' END
+# so ANY tree declaring `level` is 'full' and can never reach the sibling-free arm. An earlier
+# draft of this plan used the app.parquet shape here and would have asserted a refusal that
+# cannot fire. PARENT basis also requires UNIQUE KEY.
+statement ok
+CALL tree_ddl_create('main', 'nosib2', tree_spec(
+  tree_shape(unique_key := 'email', parent := 'manager_email',
+             semantic := tree_semantic(type := 'role', key := 'email')),
+  source := 'read_csv(''test/data/employees.csv'')'));
+
+# Pin the fixture's own property, so this gate cannot go vacuous if the shape rules move.
+query II
+SELECT basis, profile FROM tree_catalog_trees() WHERE tree_name = 'nosib2';
+----
+parent	sibling_free
+
+statement error
+FROM tree_match('main', 'nosib2', tree_steps([{type: 'manager'}, {comb: 'prev', type: 'engineer'}]));
+----
+is sibling-free
+
+# PARENT and ANCESTOR do NOT need sibling order, so they stay available there
+query I
+SELECT count(*) >= 0 FROM tree_match('main', 'nosib2', tree_steps([{type: 'manager'}, {comb: 'parent'}]));
+----
+true

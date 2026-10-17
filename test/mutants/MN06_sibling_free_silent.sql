@@ -6,17 +6,45 @@
 -- vvv GENERATED BELOW by test/mutants/regen.py from sql/07_match.sql -- do not edit by hand vvv
 -- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
 -- Combinator between the previous step alias a and this step alias b. MN14 mutates
--- tree_sql_subtree/tree_sql_children to drop the root equality.
+-- tree_sql_subtree/tree_sql_children, but no longer reaches a compiled match through them: the
+-- registry below freezes each relation's output into a template at INSERT time, so redefining
+-- the macro afterward changes nothing this lookup reads. MN14 still bites sql/08_traversal.sql's
+-- direct calls, and test/sql/46_slot_registry.test's derivation gate, which compares a frozen
+-- template against the macro called directly rather than through a compiled match -- see
+-- manifest.yaml's MN14 row.
 -- 'self' only ever arrives here as a group's first inner step, which sql/06_selector.sql
 -- enforces when the IR is built; nothing else in the compiler treats it specially.
-CREATE OR REPLACE MACRO tree_sql_comb(op, a, b, elem) AS
-  CASE op
-    WHEN 'desc'  THEN tree_sql_subtree(a, b)
-    WHEN 'child' THEN tree_sql_children(a, b)
-    WHEN 'self'  THEN tree_sql_self(a, b)
-    -- the mutation, half one: 'next' and 'after' fall through to the ELSE below
-    -- ... which is a predicate that never raises and never matches
-    ELSE 'false' END;
+--
+-- The relation is looked up rather than branched on, so a front-end that registers a combinator
+-- is compiled without editing this macro. The templates are DERIVED from the relation macros
+-- above (sql/01_catalog.sql says why), so this is a lookup over their own output.
+--
+-- COALESCE around the lookup is load-bearing, not defensive: a miss returns NULL, and a NULL
+-- concatenated into the join text would make the whole FROM fragment NULL -- the refusal silently
+-- becoming no refusal at all. The parameter is `want_op` and not `op` because a parameter sharing
+-- a name with a column of the table it queries is a Binder Error, and `tree_sql_comb.op` is not a
+-- spelling DuckDB accepts.
+--
+-- The NULL-alias check runs BEFORE the lookup rather than inside the same COALESCE:
+-- replace(text, '{a}', NULL) is NULL too, so a NULL alias used to fall into the SAME branch a
+-- genuinely unregistered op does, and the refusal blamed a registered op ('unknown combinator
+-- child') for a NULL that came from the alias, not the lookup. Only hand-built IR reaches this --
+-- tree_steps always gives a step an alias, its own or the generated 's' || node_id default,
+-- before a selector gets here.
+CREATE OR REPLACE MACRO tree_sql_comb(want_op, a, b, elem) AS
+  CASE WHEN a IS NULL OR b IS NULL
+    THEN tree_err('tree_match: combinator ' || COALESCE(want_op, '<NULL>') || ' given a NULL alias (a='
+                  || COALESCE(a, '<NULL>') || ', b=' || COALESCE(b, '<NULL>') || ')')
+    ELSE COALESCE(
+      (SELECT replace(replace(
+                CASE WHEN elem AND c.template_elem IS NOT NULL THEN c.template_elem ELSE c.template END,
+                '{a}', a), '{b}', b)
+       -- the mutation, half one: 'next' and 'after' no longer match a row here, so they
+       -- fall through to the COALESCE's second branch below, exactly like a genuinely
+       -- unregistered op would
+       FROM tree_catalog.combinators c WHERE c.op = want_op AND c.op NOT IN ('next', 'after')),
+      -- the mutation, half two: ... which is a predicate that never raises and never matches
+      'false') END;
 
 -- The compiler is a fold over the IR: every node's text is built from its children's, so the
 -- chain and the HAS/NOT groups hanging off its steps are compiled by the same two rules applied
@@ -67,9 +95,12 @@ WITH t AS (
 ov AS (SELECT CASE WHEN semantic IS NULL THEN NULL ELSE tree_expand_predicate(semantic) END AS sem),
 -- 1.5.5 refuses a subquery anywhere inside an expression that carries a lambda ("subqueries in
 -- lambda expressions are not supported"), and macro inlining puts the argument text inside the
--- lambda. So everything a lambda-bearing fragment (tree_sql_predicate_map, tree_sql_chain) or a
--- lambda here is handed has to arrive as a plain column reference, which is what ovp and cfg are
--- for: each is one row, joined in rather than read with (SELECT ... FROM ...).
+-- lambda. So everything a lambda-bearing fragment (tree_sql_predicate_map, and the lambda in THIS
+-- CTE's own list_transform) is handed has to arrive as a plain column reference, which is what ovp
+-- and cfg are for: each is one row, joined in rather than read with (SELECT ... FROM ...).
+-- tree_sql_chain used to be lambda-bearing too and is named here no longer: its join text is now
+-- built from a plain correlated subquery (see its own comment, sql/07_match.sql), which carries no
+-- lambda and so is in no way restricted by this.
 ovp AS (SELECT sem, list_transform(COALESCE((sem).predicate, []), lambda x: (x).name) AS names FROM ov),
 -- the selector's rows, flattened once and read by both the checks below and the n CTE
 ir AS (SELECT * FROM (SELECT unnest(sel, recursive := true))),
@@ -86,7 +117,7 @@ bad_empty AS (
   WHERE g.kind IN ('has', 'not') AND NOT EXISTS (SELECT 1 FROM ir s WHERE s.parent_id = g.node_id AND s.kind = 'step')),
 bad_clause AS (
   SELECT min(c.kind) AS k FROM ir c
-  WHERE c.kind IN ('type', 'id', 'class', 'attr', 'pseudo', 'where')
+  WHERE list_contains(tree_clause_kinds(), c.kind)
     AND NOT EXISTS (SELECT 1 FROM ir s WHERE s.node_id = c.parent_id AND s.kind = 'step')),
 -- Node ids ARE the parent links, so a repeated one turns the parent relation into a graph: the
 -- depth walk tree_selector_group_depth runs below then never terminates (0 -> 1, 1 -> 2, 2 -> 1).
@@ -125,7 +156,7 @@ bad_kind AS (
   SELECT min(c.node_id) AS id, min_by(COALESCE(c.kind, '<NULL>'), c.node_id) AS k
   FROM ir c LEFT JOIN ir p ON p.node_id = c.parent_id
   WHERE c.kind IS NULL
-     OR (c.kind NOT IN ('selector', 'step', 'has', 'not', 'type', 'id', 'class', 'attr', 'pseudo', 'where')
+     OR (NOT list_contains(tree_ir_kinds(), c.kind)
          AND p.kind IS DISTINCT FROM 'step')),
 -- The shape of the IR, as one rule: what may hang off what. The fold reaches a node only through
 -- the parent link its kind is expected to have, so a node hung somewhere else is not compiled --
@@ -135,7 +166,7 @@ bad_kind AS (
 bad_parent AS (
   SELECT min(c.node_id) AS id, min_by(c.kind, c.node_id) AS k, min_by(COALESCE(p.kind, '<none>'), c.node_id) AS pk
   FROM ir c LEFT JOIN ir p ON p.node_id = c.parent_id
-  WHERE c.kind IN ('step', 'has', 'not', 'type', 'id', 'class', 'attr', 'pseudo', 'where')
+  WHERE (c.kind = 'step' OR c.kind IN ('has', 'not') OR list_contains(tree_clause_kinds(), c.kind))
     AND NOT COALESCE(CASE WHEN c.kind = 'step' THEN p.kind IN ('selector', 'has', 'not')
                           ELSE p.kind = 'step' END, false)),
 -- SELF says the step IS the row the group hangs off, which only means anything for the first
@@ -246,13 +277,13 @@ n AS (
                    AND NOT list_contains(COALESCE((SELECT known_predicates FROM t), []), value)
                    AND (semantic IS NULL OR NOT list_contains((SELECT names FROM ovp), value)) THEN 'pseudo_unknown' ELSE kind END AS kind,
          value, op, arg, COALESCE(alias, 's' || node_id) AS alias,
-         -- The S-less refusal, with the built-in positional predicates exempted: they are
-         -- structural (they compile through the navigation fragments, read no S slot and bind
-         -- nothing from the SEMANTIC group), so there is nothing about them for an R-only tree to
-         -- be missing. Refusing them said "this tree has no SEMANTIC group" about a clause that
-         -- never wanted one. An unknown pseudo on the same tree still refuses: `ir.kind` is read
-         -- here, not the `pseudo_unknown` the column above computes.
-         CASE WHEN ir.kind IN ('type', 'id', 'class', 'attr', 'pseudo') AND NOT (SELECT has_semantic FROM t)
+         -- needs_semantic comes from the registry. This used to be a FIVE-member list with
+         -- `where` left out, so the rule "the host door reads no S slot" was encoded as an
+         -- omission that nothing stated -- and a search for the clause-kind set did not even find
+         -- this site. The built-in positional predicates stay exempt on the VALUE, not the kind:
+         -- they compile through the navigation fragments, read no S slot and bind nothing.
+         CASE WHEN ir.kind IN (SELECT k.kind FROM tree_catalog.clause_kinds k WHERE k.needs_semantic)
+                   AND NOT (SELECT has_semantic FROM t)
                    AND NOT (ir.kind = 'pseudo' AND list_contains(tree_builtin_predicates(), ir.value))
               THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' has no SEMANTIC group; only combinators and WHERE are available. Add one with tree_ddl_alter or pass semantic :=')
               -- The sibling-free refusal, which covers the POSITIONAL built-ins too: "first" and
@@ -274,8 +305,12 @@ clause AS (
   FROM n c JOIN n s ON s.node_id = c.parent_id AND s.kind = 'step' CROSS JOIN cfg
   WHERE c.kind NOT IN ('has', 'not', 'step') AND cfg.known),
 -- Each pass is two CTEs: the first gathers a group's inner chain into one list column, the second
--- renders it. They cannot be one, because tree_sql_chain's lambda may not be handed an aggregate
--- or a subquery -- only a column.
+-- renders it. This used to be because tree_sql_chain's lambda could not be handed an aggregate or
+-- a subquery, only a column -- that stopped being true once tree_sql_chain's join text was
+-- rewritten as a plain correlated subquery (see its own comment): handing tree_sql_group the
+-- list(...) aggregate directly, with no separate gathering CTE, was tried and produced
+-- byte-identical compiled SQL. No other reason for the split was found; it is kept as-is here,
+-- unexamined, rather than merged on that one experiment's say-so.
 stepA AS (
   SELECT s.node_id, s.parent_id, s.op, s.alias,
          COALESCE((SELECT string_agg(x.txt, ' AND ' ORDER BY x.id) FROM clause x WHERE x.step = s.node_id), 'true') AS pred

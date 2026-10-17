@@ -59,20 +59,40 @@ SPEC = {
          " || ' AND (' || (steps[1]).pred || ')' END", 1)]),
 
     "MN06": ("sql/07_match.sql", ["tree_sql_comb", "tree_compile_match"], [
-        ("    WHEN 'next'  THEN tree_sql_next_sibling(a, b, elem)\n"
-         "    WHEN 'after' THEN tree_sql_after(a, b)\n",
-         "    -- the mutation, half one: 'next' and 'after' fall through to the ELSE below\n", 1),
-        ("    -- COALESCE: only the first step of the outer chain may carry a NULL op, and tree_sql_chain\n"
-         "    -- defaults that one before it gets here, so a NULL arriving is hand-built IR -- which is\n"
-         "    -- exactly the case that must be told what is wrong instead of receiving a NULL fragment.\n"
-         "    ELSE tree_err('tree_match: unknown combinator ' || COALESCE(op, '<NULL>')) END;",
-         "    -- ... which is a predicate that never raises and never matches\n"
-         "    ELSE 'false' END;", 1),
-        ("              WHEN (SELECT profile FROM t) = 'sibling_free'\n"
-         "                   AND ((ir.kind = 'step' AND ir.op IN ('next', 'after'))\n"
+        ("       FROM tree_catalog.combinators c WHERE c.op = want_op),\n",
+         "       -- the mutation, half one: 'next' and 'after' no longer match a row here, so they\n"
+         "       -- fall through to the COALESCE's second branch below, exactly like a genuinely\n"
+         "       -- unregistered op would\n"
+         "       FROM tree_catalog.combinators c WHERE c.op = want_op AND c.op NOT IN ('next', 'after')),\n", 1),
+        ("      tree_err('tree_match: unknown combinator ' || COALESCE(want_op, '<NULL>'))) END;",
+         "      -- the mutation, half two: ... which is a predicate that never raises and never matches\n"
+         "      'false') END;", 1),
+        ("              -- The op list is the registry's, not a literal: a relation registered by a\n"
+         "              -- front-end declares requires_sibling_order and is refused here BECAUSE it said so.\n"
+         "              -- When this was `IN ('next','after')`, a newly registered sibling relation compiled\n"
+         "              -- against a _pre no SIBLING_ORDER governs and answered with whatever rows happened\n"
+         "              -- to land there -- the one thing this profile exists to prevent. The message is\n"
+         "              -- generated for the same reason: it used to name four spellings by hand and would\n"
+         "              -- have gone stale on the first registration.\n"
+         "              WHEN (SELECT profile FROM t) = 'sibling_free'\n"
+         "                   AND ((ir.kind = 'step'\n"
+         "                         AND ir.op IN (SELECT c.op FROM tree_catalog.combinators c\n"
+         "                                       WHERE c.requires_sibling_order))\n"
          "                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_predicates(), ir.value)))\n"
-         "              THEN tree_err('tree_match: tree ' || sch || '.' || nm || ' is sibling-free"
-         " (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable')\n",
+         "              -- COALESCE around the aggregate, not decoration: string_agg over NO rows returns\n"
+         "              -- NULL, and a NULL anywhere in this concatenation makes the whole message NULL --\n"
+         "              -- which tree_err reports as \"refusal with a NULL message\", losing the one sentence\n"
+         "              -- the caller needed. That is reachable, not hypothetical: every row having\n"
+         "              -- requires_sibling_order = false is exactly what the per-op flipping this refusal\n"
+         "              -- was built for produces. The trailing ', ' lives INSIDE the COALESCE so the empty\n"
+         "              -- case reads \"...declared); :first-child and :last-child are unavailable\" rather\n"
+         "              -- than leaving a stray comma.\n"
+         "              THEN tree_err('tree_match: tree ' || sch || '.' || nm\n"
+         "                   || ' is sibling-free (no SIBLING_ORDER declared); '\n"
+         "                   || COALESCE((SELECT string_agg(c.keyword, ', ' ORDER BY c.keyword)\n"
+         "                                FROM tree_catalog.combinators c WHERE c.requires_sibling_order)\n"
+         "                               || ', ', '')\n"
+         "                   || ':first-child and :last-child are unavailable')\n",
          "              -- the mutation, half two: the sibling-free refusal branch is gone\n", 1)]),
 
     "MN07": ("sql/07_match.sql", ["tree_sql_clause"], [
@@ -189,6 +209,21 @@ SPEC = {
          "    -- the mutation: parse-ability is never asked, and a malformed body contains no\n"
          "    -- resolvable function calls -- so 'no calls' reads exactly like purity and the\n"
          "    -- body is recorded 'pure' instead of refused\n", 1)]),
+
+    # --- Task 7 (slot engine): the capability column read but not acted on. Pre-Task-3, the
+    # --- sibling-free refusal tested a hardcoded op list, so a relation registered later
+    # --- (PRECEDING, say) would compile against a sibling-free tree with no refusal at all --
+    # --- the exact bug that passed every test in the repo until Task 3 added a probe for it.
+    "MN31": ("sql/07_match.sql", ["tree_compile_match"], [
+        ("                   AND ((ir.kind = 'step'\n"
+         "                         AND ir.op IN (SELECT c.op FROM tree_catalog.combinators c\n"
+         "                                       WHERE c.requires_sibling_order))\n"
+         "                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_predicates(), ir.value)))",
+         "                   AND ((ir.kind = 'step'\n"
+         "                         -- the mutation: a hardcoded op list, not the registry's\n"
+         "                         -- requires_sibling_order column -- the exact pre-Task-3 behaviour\n"
+         "                         AND ir.op IN ('next','after'))\n"
+         "                        OR (ir.kind = 'pseudo' AND list_contains(tree_builtin_predicates(), ir.value)))", 1)]),
 
     "MN29": ("sql/00_types.sql", ["tree_sql_check_semantic"], [
         ("    WHEN len(list_distinct(list_transform(COALESCE((sem).predicate, []), lambda x: (x).name)))"
