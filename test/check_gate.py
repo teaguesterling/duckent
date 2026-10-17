@@ -47,13 +47,20 @@ both are worth stating because they are the same mistake in two costumes.
 """
 import re, sys
 
-EXPECTED_FILES = 16
+EXPECTED_FILES = 18
 EXPECTED_ASSERTIONS = 495  # a FLOOR, asserted with >=
 
 DUCKENT_SUITES = {
     "00_smoke", "01_types", "02_catalog", "03_fixtures", "10_projection", "11_ddl",
     "12_dml", "13_alter", "20_derivations", "30_selector", "31_match", "32_traversal",
     "33_navigation", "34_groups", "35_attr_map", "36_pseudo",
+    # Mirrored with the slot engine (duckent-plan#66). They are the gates that prove
+    # tree_catalog.clause_kinds and tree_catalog.combinators are READ rather than merely
+    # declared -- the derivation gate, the two agreement gates, the capability probe and the
+    # compile-side arm check -- so they belong in the declared set for the same reason the
+    # others do: this gate exists because a suite dropping out of the glob would otherwise
+    # read as a smaller green number instead of as a failure.
+    "46_slot_registry", "47_new_combinators",
 }
 
 # Catch2's ConsoleReporter::printTotals (duckdb/third_party/catch/catch.hpp:16921-16954)

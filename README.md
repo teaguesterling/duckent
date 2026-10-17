@@ -105,11 +105,11 @@ gated on, all measured on the committed tree:
 
 | Gate | What it proves | State |
 |---|---|---|
-| `make test` | the 16 reference suites plus 3 extension-only ones | **19 cases, 1230 assertions, 0 failures, 0 skipped** |
-| `test/check_gate.py` | that the corpus **ran**, not merely that nothing failed | all 16 suites present by run marker; floor of 495 assertions; no crash signature |
+| `make test` | the 18 reference suites plus 3 extension-only ones | **21 cases, 1347 assertions, 0 failures, 0 skipped** |
+| `test/check_gate.py` | that the corpus **ran**, not merely that nothing failed | all 18 suites present by run marker; floor of 495 assertions; no crash signature |
 | `scripts/check_macro_identity.py` | no drift in the embedded macros, the copied suites, or the copied mutants — in both directions | green |
 | `test/compile_differential.py` | the two implementations compile identical SQL from identical arguments | 26 macro cases + 3 verb cases agree |
-| `test/run_mutants.py --increment mvp` | the corpus has teeth | **17 of 23 planted defects in scope, all 17 killed, 17/17 controls pass**, 6 reported out of scope by name |
+| `test/run_mutants.py --increment mvp` | the corpus has teeth | **19 of 25 planted defects in scope, all 19 killed, 19/19 controls pass**, 6 reported out of scope by name |
 
 Two of these exist because the corpus alone cannot see certain bugs:
 
