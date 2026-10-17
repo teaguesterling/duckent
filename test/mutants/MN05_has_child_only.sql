@@ -19,16 +19,30 @@
 -- The first step has nothing before it to join against, so its predicate becomes the WHERE. At
 -- the top level that predicate is the whole WHERE and needs no parentheses; inside a group it is
 -- ANDed with the relation to the anchor, so there it is parenthesized like every joined step's.
--- 1.5.5: list_transform's two-argument lambda indexes from 1, so steps[i - 1] is the previous step.
 -- The empty-step refusal is the fragment's own guard, not the compiler's: a group with no inner
 -- steps contributes no row to the fold's group pass, so nothing would call this for it. That case
 -- is refused in chk. This branch is what stops a direct caller emitting a FROM with no relation.
+--
+-- This used to be list_aggregate(list_transform(steps, lambda s, i: ...), 'string_agg', ' '), with
+-- steps[i - 1] reaching the previous step. tree_sql_comb now reads tree_catalog.combinators, and
+-- 1.5.5 refuses a subquery anywhere inside an expression that carries a lambda -- macro inlining
+-- puts tree_sql_comb's own SELECT inside the lambda body no matter how it is called from there.
+-- So the per-step join text is built as a plain correlated subquery instead: `cur` numbers each
+-- step with generate_subscripts, `prev` is the same list offset by one, and the LEFT JOIN on
+-- prev.i = cur.i - 1 hands step i the alias of step i - 1 as an ordinary column, not a lambda
+-- closure. Nothing inside this subquery is a lambda, so tree_sql_comb's own subquery is free to
+-- run here.
 CREATE OR REPLACE MACRO tree_sql_chain(steps, anchor, elem) AS
   CASE WHEN steps IS NULL OR len(steps) = 0 THEN tree_err('tree_match: empty group') ELSE
-    list_aggregate(list_transform(steps, lambda s, i:
-        CASE WHEN i = 1 THEN '__proj ' || (s).alias
-             ELSE 'JOIN __proj ' || (s).alias || ' ON ' || tree_sql_comb((s).op, (steps[i - 1]).alias, (s).alias, elem)
-                  || ' AND (' || (s).pred || ')' END), 'string_agg', ' ')
+    (SELECT string_agg(
+        CASE WHEN cur.i = 1 THEN '__proj ' || (cur.s).alias
+             ELSE 'JOIN __proj ' || (cur.s).alias || ' ON '
+                  || tree_sql_comb((cur.s).op, (prev.s).alias, (cur.s).alias, elem)
+                  || ' AND (' || (cur.s).pred || ')' END,
+        ' ' ORDER BY cur.i)
+     FROM (SELECT unnest(steps) AS s, generate_subscripts(steps, 1) AS i) cur
+     LEFT JOIN (SELECT unnest(steps) AS s, generate_subscripts(steps, 1) AS i) prev
+       ON prev.i = cur.i - 1)
     || ' WHERE '
     -- COALESCE, although tree_steps already defaults a group's first inner step to desc: only the
     -- first step of the OUTER chain may carry a NULL op, and there anchor is NULL and no

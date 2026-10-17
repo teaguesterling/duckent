@@ -82,6 +82,19 @@ import argparse, json, os, re, shutil, subprocess, sys, tempfile, time
 import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Mutants that plant their defect in CATALOG DATA rather than in a copied macro, and so have
+# no regen.SPEC entry because there is no copy to rebuild. Named explicitly, never inferred from
+# a missing SPEC entry -- "no entry" must keep meaning "something is wrong" for every mutant that
+# IS a copy, which is all the others.
+#
+# MN30 arrived with the slot engine (duckent-plan#66), which turned the combinator vocabulary into
+# rows: `UPDATE tree_catalog.combinators SET template = ... WHERE op = 'child'`. It is the first
+# in-scope mutant of this shape. MN08 is the other non-generated mutant in the manifest and is out
+# of scope for the mvp increment, which is why this category had not come up before.
+DATA_MUTANTS = {
+    "MN30": "mutates tree_catalog.combinators' child template; no macro copy exists to regenerate",
+}
+
 MUTANT_DIR = os.path.join(ROOT, "test", "mutants")
 MANIFEST = os.path.join(MUTANT_DIR, "manifest.yaml")
 BASE_CONFIG = os.path.join(ROOT, "test", "test_config.json")
@@ -192,11 +205,33 @@ def check_staleness(ids, manifest, problems):
         for mid in ids:
             spec = regen.SPEC.get(mid)
             mutant = os.path.join(MUTANT_DIR, by_id[mid]["file"])
+            if mid in DATA_MUTANTS and spec is None:
+                # A mutant that plants its defect in catalog DATA has no macro copy, so there is
+                # nothing for regen to rebuild and the SPEC requirement below does not apply. Its
+                # structural evidence comes from its CONTROL instead, and that is not a weaker
+                # claim here: the control re-asserts the CORRECT value, and the derivation gate in
+                # 46_slot_registry.test -- which is listed in this mutant's expect_fail, so it must
+                # PASS under the control -- compares every registry row against the macro it was
+                # derived from. A control whose literal had drifted from that macro therefore fails
+                # the control run loudly, which is exactly what the SPEC check buys for a copy.
+                # The control must still exist; a data mutant with no control has no evidence at all.
+                control = mutant[: -len(".sql")] + ".control.sql"
+                if not os.path.exists(control):
+                    problems.append(
+                        "%s: listed in DATA_MUTANTS but has no .control.sql, so neither half of "
+                        "the kill's evidence is present" % mid
+                    )
+                continue
             if spec is None:
                 problems.append(
                     "%s: in scope for this increment but test/mutants/regen.py has no SPEC entry "
                     "for it, so its copy cannot be rebuilt from the macro it copies -- the "
-                    "structural half of the kill's evidence is missing" % mid
+                    "structural half of the kill's evidence is missing%s" % (
+                        mid,
+                        "" if mid in DATA_MUTANTS else
+                        " (if it mutates catalog data rather than copying a macro, add it to "
+                        "DATA_MUTANTS with a reason)",
+                    )
                 )
                 continue
             control = mutant[: -len(".sql")] + ".control.sql"
