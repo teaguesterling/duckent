@@ -428,12 +428,12 @@ SIBLING_ORDER
 statement error
 FROM tree_match('main', 'cats', tree_steps([{pseudo: 'first-child'}]));
 ----
-tree main.cats is sibling-free (no SIBLING_ORDER declared); SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+tree main.cats is sibling-free (no SIBLING_ORDER declared); FOLLOWING, PRECEDING, SIBLING, :first-child and :last-child are unavailable
 
 statement error
 FROM tree_match('main', 'cats', tree_steps([{pseudo: 'last-child'}]));
 ----
-SIBLING, FOLLOWING, :first-child and :last-child are unavailable
+FOLLOWING, PRECEDING, SIBLING, :first-child and :last-child are unavailable
 
 # and inside a group, where every other refusal is read too
 statement error

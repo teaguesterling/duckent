@@ -150,7 +150,8 @@ CREATE OR REPLACE MACRO tree_steps(steps) AS (
     UNION ALL SELECT j FROM jdeep),
   bad_key AS (
     SELECT min(k) AS k FROM (SELECT unnest(json_keys(j)) AS k FROM jall)
-    WHERE k NOT IN ('comb', 'type', 'id', 'class', 'attr', 'pseudo', 'where', 'as', 'has', 'not')),
+    WHERE k NOT IN (SELECT unnest(['comb', 'as', 'has', 'not'] ||
+                                  (SELECT list(step_field) FROM tree_catalog.clause_kinds)))),
   bad_depth AS (
     SELECT count(*) AS n FROM (SELECT unnest(json_keys(j)) AS k FROM jdeep) WHERE k IN ('has', 'not')),
   bad_empty AS (
@@ -292,17 +293,21 @@ CREATE OR REPLACE MACRO tree_steps_group(sel, step_alias, kind, "inner") AS (
       THEN tree_err('tree_steps_group: groups nested deeper than ' || tree_group_depth_limit() || ' levels are not supported')
     ELSE (SELECT v FROM spliced) END);
 
-CREATE OR REPLACE MACRO tree_treeql_comb(op) AS
-  CASE op WHEN 'desc' THEN 'DESCENDANT' WHEN 'child' THEN 'CHILD' WHEN 'next' THEN 'SIBLING' WHEN 'after' THEN 'FOLLOWING'
-          WHEN 'self' THEN 'SELF' ELSE NULL END;
+-- The keyword for a combinator, from the registry rather than a second copy of the set. Returns
+-- NULL for an unregistered op, which tree_selector_to_treeql's bad_comb arm refuses -- see the
+-- note there; it must not reach tree_treeql_step, which would render it as nothing.
+CREATE OR REPLACE MACRO tree_treeql_comb(want_op) AS
+  (SELECT c.keyword FROM tree_catalog.combinators c WHERE c.op = want_op);
 
-CREATE OR REPLACE MACRO tree_treeql_clause(kind, value, op, arg) AS
-  CASE kind WHEN 'type' THEN 'TYPE ' || tree_sql_lit(value)
-            WHEN 'id' THEN 'ID ' || tree_sql_lit(value)
-            WHEN 'class' THEN 'CLASS ' || tree_sql_lit(value)
-            WHEN 'attr' THEN 'ATTR ' || value || ' ' || op || ' ' || arg
-            WHEN 'pseudo' THEN 'PSEUDO ' || tree_sql_lit(value)
-            WHEN 'where' THEN 'WHERE ' || value END;
+-- The keyword is the registry's; the BODY's rendering is not uniform and stays here. TYPE, ID,
+-- CLASS and PSEUDO print a quoted literal; ATTR prints `name op arg` and WHERE prints raw host
+-- SQL, both unquoted -- which is why the TREEQL text form needs a quote- and paren-aware reader
+-- and why this cannot collapse into one concatenation.
+CREATE OR REPLACE MACRO tree_treeql_clause(want_kind, value, op, arg) AS
+  (SELECT k.keyword FROM tree_catalog.clause_kinds k WHERE k.kind = want_kind) || ' ' ||
+  CASE want_kind WHEN 'attr'  THEN value || ' ' || op || ' ' || arg
+                 WHEN 'where' THEN value
+                 ELSE tree_sql_lit(value) END;
 
 -- One step's text: its combinator keyword, its clause list in parentheses, its capture.
 CREATE OR REPLACE MACRO tree_treeql_step(op, clauses, alias) AS
@@ -335,14 +340,22 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
   bad_kind AS (
     SELECT min(COALESCE(kind, '<NULL>')) AS k FROM n
     WHERE kind IS NULL
-       OR kind NOT IN ('selector', 'step', 'has', 'not', 'type', 'id', 'class', 'attr', 'pseudo', 'where')),
+       OR NOT list_contains(tree_ir_kinds(), kind)),
   -- Node ids are the parent links, so a repeated one makes the parent relation a graph rather
   -- than a tree and the depth walk below a cycle. Refused before any walk is asked for.
   bad_dup AS (SELECT count(*) <> count(DISTINCT node_id) AS bad FROM n),
+  -- A step whose op is not registered has no keyword, and tree_treeql_step wraps the keyword in
+  -- COALESCE(... || ' ', '') -- so it used to render as NOTHING and the combinator vanished from
+  -- the printed text. Refused for the same reason bad_kind is refused: a printer that silently
+  -- drops part of a selector is worse than one that stops.
+  bad_comb AS (
+    SELECT min(op) AS o FROM n
+    WHERE kind = 'step' AND op IS NOT NULL
+      AND op NOT IN (SELECT c.op FROM tree_catalog.combinators c)),
   -- (step node id, part node id, part text) for every clause: the same at every level
   clause AS (
     SELECT c.parent_id AS step, c.node_id AS id, tree_treeql_clause(c.kind, c.value, c.op, c.arg) AS t
-    FROM n c WHERE c.kind IN ('type', 'id', 'class', 'attr', 'pseudo', 'where')),
+    FROM n c WHERE list_contains(tree_clause_kinds(), c.kind)),
   stepA AS (
     SELECT s.node_id, s.parent_id, s.op, s.alias,
            (SELECT string_agg(p.t, ', ' ORDER BY p.id) FROM clause p WHERE p.step = s.node_id) AS body
@@ -370,6 +383,8 @@ CREATE OR REPLACE MACRO tree_selector_to_treeql(sel) AS (
   SELECT CASE
     WHEN (SELECT k FROM bad_kind) IS NOT NULL
       THEN tree_err('tree_selector_to_treeql: unknown node kind ' || (SELECT k FROM bad_kind))
+    WHEN (SELECT o FROM bad_comb) IS NOT NULL
+      THEN tree_err('tree_selector_to_treeql: unknown combinator ' || (SELECT o FROM bad_comb))
     WHEN (SELECT bad FROM bad_dup)
       THEN tree_err('tree_selector_to_treeql: selector node ids are not unique')
     WHEN tree_selector_group_depth(sel) > tree_group_depth_limit()
