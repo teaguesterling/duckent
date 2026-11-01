@@ -56,10 +56,13 @@ repo's; the third is this repo's, because this repo holds a COPY of the mutant c
    every suite the mutant is expected to kill to PASS. A kill against a control that also fails
    proves nothing.
 
-3. SCOPE, REPORTED RATHER THAN ASSUMED. This repo carries 16 of the plan repo's suites; the
+3. SCOPE, REPORTED RATHER THAN ASSUMED. This repo carries 18 of the plan repo's suites. The
    front-end ones (the css parser and its lowering, the sitting_duck differentials, the corpus
-   and representation suites) belong to a later increment. A mutant whose expect_fail suites are
-   all outside is not evidence here either way -- and a mutant that does not run looks exactly
+   and representation suites) belong to a later increment, and 48_treeql_parse.test -- the
+   reader's own proof, whose macro this repo DOES embed -- is left there for the two measured
+   reasons scripts/check_macro_identity.py records beside it, with the part that is C++ carried
+   by test/sql/49_treeql_dispatch.test instead. A mutant whose expect_fail suites are all outside
+   is not evidence here either way -- and a mutant that does not run looks exactly
    like a mutant that passed, which is the absence-assertion failure mode this project has
    already been bitten by. So every entry not run is named, with its reason, and counted.
 

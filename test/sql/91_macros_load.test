@@ -11,11 +11,16 @@ SELECT tree_canonical_columns()[1];
 ----
 _root
 
-# core embeds no front-end, so the registry holds exactly one language with no parser
+# Core embeds no front-end, so the registry still holds exactly ONE language -- and the single row
+# is the claim: 09_css.sql is not embedded, so there is no css row to find. What changed is the
+# PARSER column. It read NULL while treeql's text had no reader and IR was the only way to hand a
+# selector over; 10_treeql.sql is embedded now, so the column names the reader and the front-end
+# dispatch in duckent_match.cpp has something to dispatch TO. This record is where that goes from
+# a design claim to a shipped one.
 query IT
 SELECT language, parser FROM tree_catalog_languages();
 ----
-treeql	NULL
+treeql	tree_parse_treeql
 
 query I
 SELECT value FROM tree_catalog.settings WHERE name = 'tree_default_selector_language';

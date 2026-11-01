@@ -314,3 +314,75 @@
   # 'prev' (PRECEDING) is requires_sibling_order := true and is not in the hardcoded pair, so
   # under this mutant a sibling-free tree stops refusing :prev -- compiling it against a _pre no
   # SIBLING_ORDER governs instead of raising. Verified individually against both suites.
+
+  # --- Task 8 (the TREEQL reader): the first two mutants that point at sql/10_treeql.sql. At the task's BASE
+  # --- no mutant named that file -- MEASURED over the DECLARATIONS: `grep -c 10_treeql` answered 0
+  # --- for regen.py's SPEC, 0 for this manifest, and 0 summed over all 49 .sql files here. (Not
+  # --- over the GATE's output: run_mutants.py never prints a mutant's source file, so that figure
+  # --- reads 0 whether the gap is open or closed, and the task's report retires it as evidence.)
+  # --- So Task 7's gate could not speak to the parser it had just registered. One mutant per half
+  # --- of what the parser is: the TOKENIZER and the canonical NUMBERING.
+  # ---
+  # --- IDS. MN32 and MN33 are the next free ids. MN01-MN31 are declared, and the six with no .sql
+  # --- file are NOT free: MN09/MN10/MN11/MN16/MN23 are deferred and MN20 is retired, declared in
+  # --- the header block above because the schema cannot express "declared but not planted".
+- id: MN32
+  file: MN32_split_quote_blind.sql
+  what: the clause/step tokenizer loses its quote state -- the depth scan reads the raw text
+    instead of tree_treeql_quote_mask(s), so a separator inside a literal separates and a bracket
+    inside one moves the depth
+  expect_fail: [test/sql/48_treeql_parse.test]
+  # THE SEPARATOR ASSERTIONS ARE THE WITNESS, which the brief asks to confirm rather than assume:
+  # if they did not kill this, they would not cover the tokenizer and that would be a finding about
+  # them. MEASURED under the pinned interpreter -- 9 of 48's 249 assertions fail, and FIVE of the
+  # nine are tree_treeql_split records, so the kill does not rest on any one of them:
+  #   :31  R4's quoted close paren beside a real separator
+  #   :37  R4's quoted open paren -- the other sign, which fails depth = 0 for the other reason
+  #   :44  the comma-SPACE inside 'a, b'
+  #   :51  the '' escape inside 'it''s, ok'
+  #   :284 R22's correlated multi-row form, where `ord` must restart per row
+  # The remaining four are parser-level: :1158 (EXACT on a literal carrying a comma, a quote and a
+  # newline -- REFUSES, `unterminated quoted value`), :2285 (NORMALISING on two odd bodies plus an
+  # unmatched close paren -- REFUSES, `cannot read ...`), :2450 and :2460 (the unpaired-`"`
+  # collision pair, whose two preimages stop printing the same bytes).
+  also_kills: nothing -- MEASURED by running the WHOLE suite under this mutant, not inferred from
+    which files name the macro. 28 files, 1832 assertions, 9 failures, and all nine are in
+    48_treeql_parse.test. No other file reaches tree_treeql_split_parts at all, because its only
+    callers are tree_treeql_split and tree_parse_treeql and 48 is the only suite that calls either.
+    The front-end dispatch that would give another suite a path to it is the extension's. INFERRED
+    that it does not exist yet, from the design spec section 9 and not from that repository, which
+    this task read no file of -- and section 9's plan-repo half has since gone stale, so treat its
+    extension half as a claim to check too (see Task 8 Step 6).
+- id: MN33
+  file: MN33_clauses_after_groups.sql
+  what: a step's parts are numbered GROUPS FIRST and clauses second, at all three assembly levels,
+    against requirement 2 -- the shape is unchanged and only the node ids move
+  expect_fail: [test/sql/48_treeql_parse.test]
+  # THE KILL IS ATTRIBUTED, not counted, which is what the brief asks for here. MEASURED -- 33 of
+  # 48's 249 assertions fail and EVERY ONE is a `result mismatch`; NONE is a runner error
+  # (grep -cE '^FAIL .*runner error' over the run answers 0), so the kill is wrong ANSWERS on
+  # node-id-sensitive comparisons and not an incidental breakage. Classified by the shape of each
+  # failing record's SQL:
+  #   22  EXACT, parse(print(ir)) = ir     952 959 1001 1015 1029 1036 1081 1088 1095 1102 1110
+  #                                        1166 1173 1496 1872 2039 2053 2061 2325 2349 2370 2560
+  #    5  NORMALISING, print(parse(print(ir)))                 1378 2249 2258 2269 2285
+  #    1  NORMALISING, print(parse(text)) = text               1890
+  #    5  other node-id-sensitive comparisons                  1189 1255 1473 1842 1929
+  # -- 1189 lists node_id/parent_id/kind/value/op row by row, 1255 is the two-reading differential
+  # count, and 1473/1842/1929 are whole-value equality against a literal or tree_steps.
+  #
+  # THE PLAN'S PREDICTION FOR THIS MUTANT IS WRONG AND IS CORRECTED HERE. It reads "The shape is
+  # unchanged, so ONLY the exact round-trip theorem can see it". The printer emits a step's parts
+  # ORDER BY node_id, so renumbering them moves the PRINTED TEXT as well -- measured:
+  #     print(parse('(CLASS ''fn'', HAS ( (TYPE ''string'') ))'))
+  #        base    (CLASS 'fn', HAS ( (TYPE 'string') ))     NORMALISING true
+  #        mutant  (HAS ( (TYPE 'string') ), CLASS 'fn')     NORMALISING FALSE
+  # Six of the 33 above are normalising records, so this is not a quibble. What CANNOT see the
+  # mutant is a SHAPE-only record -- the parent links, the kind set, or a match result -- because
+  # clauses are ANDed and AND is commutative. That claim is narrower than the plan's and is the
+  # one that holds.
+  also_kills: nothing -- MEASURED over the WHOLE suite. 28 files, 1832 assertions, 33 failures, and
+    all 33 are in 48_treeql_parse.test. 40_corpus and 44_parsers cannot see it, for the reason
+    MN22's row already records -- 40's selectors are parsed by the RUNNER's css parser and 44 runs
+    tree_css_lower, so no record in either reaches tree_parse_treeql at all. Nothing else calls it
+    and 48 is the only suite that does.

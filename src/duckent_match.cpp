@@ -115,8 +115,10 @@ struct MatchGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-//! One scalar out of a one-column query, or NULL when it returned no rows. Used for the settings
-//! read the text-selector path makes; a macro's own refusals never come through here.
+//! One scalar out of a one-column query, or NULL when it returned no rows. Used for the two reads
+//! the text-selector path makes -- the default language out of tree_catalog.settings, and the
+//! selector's own text out of the deparsed CTE. Neither is a macro call, so a macro's own
+//! refusals never come through here; the compile call makes its own and throws them verbatim.
 Value ScalarOf(Connection &con, const string &sql) {
 	auto result = con.Query(sql);
 	if (result->HasError()) {
@@ -176,16 +178,29 @@ string RegisteredLanguages(Connection &con) {
 	return out.empty() ? "none" : out;
 }
 
-//! A selector handed over as TEXT needs a front-end to parse it, and this build has none.
+//! The macro that parses a selector written as TEXT in `language`, or a refusal naming what is
+//! missing.
 //!
-//! run.py's counterpart is the second half of `rewrite_selectors`: resolve the language, then
-//! `if lang != "css": raise(... pass tree_steps(...))`, else hand the text to css_parser. The
-//! runner can take that else branch because its css front-end is a Python module it imports; a
-//! core-only extension embeds no front-end at all (sql/09_css.sql is deliberately not embedded),
-//! so BOTH branches refuse here and a registry lookup is what says so. That is what
-//! sql/01_catalog.sql asks for in as many words: "a text selector is then refused by a lookup
-//! that finds no parser instead of by a hardcoded branch".
-void RefuseTextSelector(Connection &con, const string &language) {
+//! The registry is the FRONT-END SEAM, so this reads the seam rather than deciding anything:
+//! `tree_catalog.selector_languages.parser` holds a macro name, and a build can parse exactly the
+//! languages whose row carries one. Three outcomes, and they are three different conditions to
+//! the caller -- no row at all, a row with no parser, a row naming one.
+//!
+//! run.py's counterpart is the second half of `rewrite_selectors`, and the two now have one shape:
+//! resolve the language, read the parser out of the registry, wrap the selector's text in a call
+//! to it. The runner's own table maps `tree_parse_treeql` to the macro itself, inlined where the
+//! IR literal would go (test/run.py:51); this hands the name back so MatchBind can write that
+//! same call. What still differs is which languages each side can serve -- the runner imports a
+//! Python css front-end, while a core-only extension embeds none at all (sql/09_css.sql is
+//! deliberately not embedded), so `language := 'css'` reaches the first refusal here. That is
+//! what sql/01_catalog.sql asks for in as many words: "a text selector is then refused by a
+//! lookup that finds no parser instead of by a hardcoded branch".
+//!
+//! Until 10_treeql.sql was embedded every path through here threw: the NULL-parser arm was
+//! treeql's, because IR needs no parsing, and the arm that found a parser was unreachable. The
+//! TREEQL reader filled that column, which is what turns the third outcome from a
+//! NotImplementedException into a return.
+string ParserForTextSelector(Connection &con, const string &language) {
 	auto row = con.Query("SELECT parser FROM tree_catalog.selector_languages WHERE language = " +
 	                     KeywordHelper::WriteQuoted(language, '\'') + " LIMIT 1");
 	if (row->HasError()) {
@@ -206,15 +221,13 @@ void RefuseTextSelector(Connection &con, const string &language) {
 	}
 	const Value parser = row->GetValue(0, 0);
 	if (!parser.IsNull()) {
-		// Unreachable in a core-only build: the only row with a parser is css's, and the file
-		// that inserts it is the file this extension does not embed. Kept, and kept distinct from
-		// the refusal below, because a front-end extension registering its parser is the whole
-		// point of the registry, and the day one does the refusal has to name what is missing --
-		// the DISPATCH -- rather than claim nothing is registered.
-		throw NotImplementedException("tree_match: selector language '%s' registers the parser %s in "
-		                              "tree_catalog.selector_languages, but this build has no front-end dispatch for a "
-		                              "selector given as text; pass tree_steps(...) to hand over IR. Registered: %s",
-		                              language, parser.ToString(), registered);
+		// The dispatch. This arm used to raise NotImplementedException, because the only row that
+		// carried a parser was css's and the file inserting it is the one this extension does not
+		// embed -- so it was unreachable, and kept distinct from the refusal below only so that
+		// the day a front-end registered one, the message would name what was missing (the
+		// DISPATCH) rather than claim nothing was registered. 10_treeql.sql is that day: treeql's
+		// own parser column stopped being NULL, and this is now the path a bare `MATCH` takes.
+		return parser.ToString();
 	}
 	throw InvalidInputException(
 	    "tree_match: selector language '%s' has no parser in tree_catalog.selector_languages, so a "
@@ -325,7 +338,7 @@ unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInpu
 
 	auto result = make_uniq<MatchBindData>();
 	Connection con(*context.db);
-	const string selector = SelectorText(input);
+	string selector = SelectorText(input);
 
 	// The IR-or-text decision, in ONE place. run.py reads the argument's syntax; the selector
 	// arrives here as a one-column relation, so that column's type answers the same question:
@@ -334,7 +347,32 @@ unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInpu
 	// was never parsed and goes through untouched, with the treeql provenance the compiler's
 	// COALESCE gives it.
 	if (!input.input_table_types.empty() && input.input_table_types[0].id() == LogicalTypeId::VARCHAR) {
-		RefuseTextSelector(con, ResolveSelectorLanguage(con, input));
+		// TEXT, so a front-end has to read it first. The parser is a MACRO returning IR, and IR is
+		// what the compile call below wants in the selector's place, so the dispatch is a wrap:
+		// `tree_parse_treeql(<the selector's text>)` goes exactly where the text went, and
+		// tree_compile_match sees IR either way. It decides nothing about trees -- it marshals.
+		//
+		// The TEXT, read once, and not the expression that produces it. SelectorText hands back a
+		// scalar SUBQUERY, and a scalar macro is textual substitution at bind time:
+		// tree_parse_treeql names its parameter SIX times across its CTEs, so splicing the
+		// subquery would inline six copies of it and evaluate the selector six times. Reading the
+		// value here leaves six copies of a LITERAL instead -- which is also what run.py's own
+		// table splices (test/run.py:51), so both front-ends hand the macro the same shape and
+		// 48_treeql_parse.test measures one thing rather than two.
+		//
+		// This evaluates the selector at bind time, which is no new restriction: the compile call
+		// below already executes it in bind, so an expression that cannot be read here could not
+		// have been compiled there either.
+		const string parser = ParserForTextSelector(con, ResolveSelectorLanguage(con, input));
+		const Value text = ScalarOf(con, "SELECT " + selector);
+		// A NULL selector takes the SQL keyword and not a quoted literal: WriteQuoted would hand
+		// the parser the four-character string NULL and it would go looking for a selector by that
+		// name. tree_parse_treeql(NULL) is NULL, which the compiled-to-NULL guard below reports.
+		const string argument = text.IsNull() ? "NULL" : KeywordHelper::WriteQuoted(text.ToString(), '\'');
+		// WriteOptionallyQuoted and not raw concatenation: the macro's name comes out of a TABLE
+		// that any front-end extension can insert into, so it is untrusted identifier text on its
+		// way into SQL this function composes.
+		selector = KeywordHelper::WriteOptionallyQuoted(parser) + "(" + argument + ")";
 	}
 
 	// `SELECT tree_compile_match(?, ?, <selector>[, semantic := ?][, language := ?])`, with the

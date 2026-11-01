@@ -36,9 +36,11 @@ import argparse, hashlib, os, sys
 OMITTED = {"09_css.sql"}
 
 # .test files that exist only in this repo (no counterpart in the plan repo's
-# test/sql/): the C++ verb-executor tests, and the two files that prove the
-# extension loads its statically-linked dependencies and embedded macros at all.
-EXTENSION_ONLY_TESTS = {"12_verb_executor.test", "90_loads.test", "91_macros_load.test"}
+# test/sql/): the C++ verb-executor tests, the two files that prove the
+# extension loads its statically-linked dependencies and embedded macros at all,
+# and the front-end dispatch suite, which tests C++ the plan repo does not have.
+EXTENSION_ONLY_TESTS = {"12_verb_executor.test", "90_loads.test", "91_macros_load.test",
+                        "49_treeql_dispatch.test"}
 
 # The reverse direction, which the first version of this check did not have: plan-repo
 # .test files this repo deliberately does NOT mirror. Everything here belongs to the
@@ -61,6 +63,17 @@ NOT_MIRRORED_TESTS = {
     "43_representation.test",
     "44_parsers.test",
     "45_duck_blocks.test",
+    # The reader's own proof, and the one entry here that is NOT a front-end this build lacks --
+    # 10_treeql.sql IS embedded, so this repo can run the macro that suite exercises. It is listed
+    # for two measured reasons, and test/sql/49_treeql_dispatch.test carries the part that matters
+    # here. FOUR classes of its records cannot mirror: the registry record that also asserted
+    # css's row, the list_transform records whose expected text is a LIST as run.py's Python
+    # formats it rather than as a SQL cast renders it, and two that assert run.py's own refusal
+    # wording. AND IT COSTS 218m30s HERE against 657s there -- same file, same macros, same
+    # pinned 1.5.5, while this repo's other 21 suites total 224s. Cause unknown: contention,
+    # thread count, query verification, the optimizer and the memory limit were each eliminated by
+    # measurement. If that is ever found and fixed, this line and 49's preamble come out together.
+    "48_treeql_parse.test",
 }
 
 # The two escape hatches for test/mutants/, deliberately empty: every file in the plan

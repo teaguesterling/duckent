@@ -1,0 +1,165 @@
+-- test/mutants/MN32_split_quote_blind.control.sql
+-- THIS IS THE CONTROL: the same copy with NO planted edit, so applying it is a no-op
+-- CREATE OR REPLACE of the macro the mutant copies. test/run_mutants.py --verify applies
+-- it and requires the mutant's expect_fail suites to PASS, which is what makes the kill
+-- evidence about the EDIT rather than about the copy having drifted from the source.
+-- vvv GENERATED BELOW by test/mutants/regen.py from sql/10_treeql.sql -- do not edit by hand vvv
+-- Regenerate with: python3 test/mutants/regen.py   (--check verifies, writes nothing)
+-- A clause list split on `sep` at BRACKET depth 0 and outside a quoted region, where "bracket"
+-- means `( )`, `[ ]` and `{ }` alike -- see THE DEPTH COUNTS THREE PAIRS below.
+--
+-- THE SEPARATORS OCCUR INSIDE THE BODIES. The printer emits ATTR and WHERE bodies unquoted and
+-- unescaped, so `(TYPE 'x', WHERE name IN ('a', 'b'))` contains a ", " that is not a separator
+-- and a ")" that is not the step's. A split on ', ' mis-parses it, and so do the other cases in
+-- 48_treeql_parse.test.
+--
+-- THE DEPTH COUNTS THREE PAIRS, not one, and this is F1's fix. The scan counted `(` and `)` only,
+-- so a comma at PAREN depth zero but inside a list or struct literal was read as a clause
+-- separator. A WHERE body is raw host SQL and DuckDB spells both of those with brackets and
+-- braces, so the shape is reachable from an ordinary legal predicate -- MEASURED, and it is
+-- printer output from the ordinary constructor:
+--
+--     tree_steps([{"where": '[1, 2] = [1, 2]'}])          printed  (WHERE [1, 2] = [1, 2])
+--       -> was REFUSED `cannot read 2]`;          now parses back to that IR, EXACT true
+--     tree_steps([{"where": '{a: 1, b: 2} = {a: 1, b: 2}'}])
+--       -> was REFUSED `cannot read b: 2}`;       now parses back to that IR, EXACT true
+--
+-- A PARSER THAT REFUSES ITS OWN PRINTER'S OUTPUT is what the Global Constraint forbids, which is
+-- why this is a fix and not a widening. Both inputs were pinned as `statement error` records in
+-- the FIX ROUND 3 block of test/sql/48_treeql_parse.test, labelled there as behaviour that is
+-- known wrong with "Task 7 owns the fix"; those two records are now EXACT assertions.
+--
+-- WHAT IS DELIBERATELY NOT CHANGED, because a record measures the boundary: brackets and braces
+-- are counted for SEPARATOR SUPPRESSION ONLY and are NOT required to BALANCE. An unmatched one is
+-- host SQL's business, and refusing it here would reject text the parser accepts today. The
+-- boundary record beside F1 pins that a bracket or a brace ALONE was never the problem -- only a
+-- comma inside one was -- so `x[1] = 1` and `{a: 1} = {a: 1}` round-trip exactly, before and
+-- after.
+--
+-- WHAT THIS DOES NOT REACH, stated so the fix is not read as wider than it is: a raw body whose
+-- top-level comma is enclosed by NOTHING. `(WHERE a = 1, b = 2)` still comes apart HERE -- this
+-- macro cuts on every unenclosed depth-0 comma, measured:
+--
+--     tree_treeql_split_parts('WHERE a = 1, b = 2', ',')  ->  'WHERE a = 1' and 'b = 2'
+--
+-- and the TEXT is nonetheless ACCEPTED, because tree_treeql_clause_parts puts a raw body's own
+-- separators back by SPAN after this split has run. Measured at this commit, duckdb 1.5.5:
+--
+--     tree_treeql_clause_parts('WHERE a = 1, b = 2')  ->  ONE part, the whole body
+--     tree_parse_treeql('(WHERE a = 1, b = 2)')       ->  one `where` clause, value `a = 1, b = 2`
+--     tree_selector_to_treeql(that)                   ->  `(WHERE a = 1, b = 2)`, byte-identical
+--
+-- THE SENTENCE THAT STOOD HERE SAID THE OPPOSITE, and both halves were false: "still splits into
+-- two parts and still refuses ... test/sweep_treeql.py carries it as a declared divergence". That
+-- shape is `b55`, CLOSED in fix round 2 by tree_treeql_clause_parts -- a fix that touched this
+-- same file and left this header standing behind it. This sentence then named a COUNT of DIVERGENT
+-- entries, which went stale the next time that table gained one; the table itself is the place to
+-- read it. The reachability argument it rested on ("not reachable from a legal predicate") is still
+-- true about SQL validity and was never the point: EXACT quantifies over the printer's image, not
+-- over bodies that are legal host SQL.
+--
+-- THE OTHER HALF OF THE SPLITTER'S BLIND SPOT IS NOW CLOSED TOO, and the paragraph that stood
+-- here is withdrawn rather than deleted, because it was wrong in a way worth keeping. It said:
+-- the quote scan reads every `'` as a delimiter and knows nothing of `"..."`, so a raw body
+-- holding a double-quoted identifier still mis-splits -- "not fixed here because the scan is a
+-- WINDOW SUM over one delimiter, which has a closed form, while two delimiters that can nest need
+-- sequential state". That is R41.
+--
+-- THE FIRST HALF OF THAT WAS TRUE AND IS STRONGER THAN IT CLAIMED -- no window in the count family
+-- can do it, because the state maps generate a non-abelian group; see tree_treeql_quote_mask.
+-- THE SECOND HALF WAS FALSE: it concluded that DuckDB could not express the scan, having never
+-- tested one. RE2 alternation inside a single scalar call does it, and it binds everywhere R22
+-- names. The scan now reads the mask and `(WHERE "a,b" = 1)` round-trips.
+--
+-- ALSO WRONG IN THAT PARAGRAPH: it blamed the APOSTROPHE. MEASURED -- `(WHERE "a,b" = 1)` and
+-- `(ATTR a = "b,c")` are both printer output and both failed with NO APOSTROPHE ANYWHERE. The
+-- cause was never the apostrophe; it was having no notion of a `"..."` region at all, of which the
+-- apostrophe was one symptom and the comma another. A fix scoped to the apostrophe would have left
+-- the comma shapes failing.
+--
+-- "INSIDE A QUOTE" IS READ FROM tree_treeql_quote_mask, not counted here. It used to be the
+-- PARITY of quote characters strictly before a position, which made the '' escape free but knew
+-- nothing of `"..."` regions; that is R41 and the macro above carries the reason and the fix. The
+-- depth is now ONE window over the mask instead of a second window over a column the first
+-- produced, so the `quoted` CTE is gone -- a masked character is inert to the depth CASE because
+-- chr(1) is none of the six bracket characters.
+--
+-- `sep` IS ONE CHARACTER. The scan compares `c = sep` per character, so a two-character separator
+-- never matches and the input comes back silently as one part -- a wrong answer, not an error.
+-- Every separator this parser needs is one character: ',' between clauses, and the combinator
+-- characters between steps. Whoever needs a longer one changes `c = sep` to a slice comparison.
+-- There is deliberately NO test pinning the current multi-character behaviour: a test would
+-- enshrine the wrong answer as the intended one.
+-- R22: WHY THE BOUNDARIES COME FROM A WINDOW AND NOT FROM A LOOKUP. This scan worked on a
+-- literal and died on a correlated reference:
+--
+--     FROM (VALUES (1, 'TYPE ''a'', CLASS ''b''')) s(id, t), LATERAL tree_treeql_split(s.t, ',')
+--     INTERNAL Error: Failed to bind column reference "" : inequal types (BIGINT != VARCHAR)
+--
+-- raised by the binder before the query ran, in the table shape and in a scalar list-returning
+-- variant of the same body alike. The CAUSE was isolated to one expression, not to correlation as
+-- such -- a correlated `generate_series`, `range(1, length(s) + 1)` and `string_split` all bind:
+--
+--     COALESCE((SELECT min(i) FROM seps WHERE i > b.lo), length(s) + 1)
+--
+-- an inner CORRELATED SUBQUERY, looking each part's end up per row, which the decorrelator could
+-- not rewrite once `s` was itself correlated. So the ends now come from `lead()` over the
+-- boundary positions and there is no inner subquery left. That is not a tidying: every caller of
+-- this family from Task 4 on reads a COLUMN -- Task 6's registry dispatch parses selector text
+-- out of a table -- and until this bound, the whole parser was literal-only.
+--
+-- The 0 and the length(s) + 1 are SENTINEL boundaries, which is what lets one window serve both
+-- ends: each part runs from one boundary + 1 to the next boundary - 1, and the sentinel row's own
+-- `lead()` is NULL and is dropped. Part count is therefore separators + 1 always, so an empty
+-- trailing part survives ('TYPE ''x'',' plus whitespace still answers two parts, the second
+-- empty) and the empty input answers one empty part rather than none. Measured, both.
+--
+-- The LIST form is the one implementation and the TABLE form is derived from it below, rather
+-- than two copies of the scan that are free to drift. The list is what Task 4's assembly reads,
+-- because `unnest()` of it over a relation needs no LATERAL at all.
+--
+-- `unnest(range(...))` AND NOT `FROM generate_series(...)`, which is the OTHER way this scan can
+-- be called and the other way it did not bind. generate_series is a TABLE FUNCTION, and a table
+-- function's argument may not contain a subquery; every scalar macro here IS a subquery once it
+-- is inlined, so splitting the PRINTER's own output -- the first thing the assembly has to do --
+-- raised `Binder Error: Table function cannot contain subqueries`. `range(1, n)` is a SCALAR
+-- returning BIGINT[], so unnesting it in the select list binds with a subquery bound and leaves
+-- no table function in the scan at all.
+--
+-- Measured, and it is why the gate in the test file uses a MACRO argument: a bare `(SELECT ...)`
+-- argument binds either way, because the binder folds it before the table function sees it. Only
+-- an inlined macro body reaches it unfolded.
+CREATE OR REPLACE MACRO tree_treeql_split_parts(s, sep) AS (
+  WITH chars AS (SELECT i, qmask[i:i] AS c
+                 FROM (SELECT unnest(range(1, length(s) + 1)) AS i),
+                      (SELECT tree_treeql_quote_mask(s) AS qmask)),
+  depthed AS (
+    SELECT i, c,
+           sum(CASE WHEN c IN ('(', '[', '{') THEN 1
+                    WHEN c IN (')', ']', '}') THEN -1 ELSE 0 END)
+             OVER (ORDER BY i) AS depth
+    FROM chars),
+  bounds AS (SELECT 0 AS p
+             UNION ALL SELECT i FROM depthed WHERE c = sep AND depth = 0
+             UNION ALL SELECT length(s) + 1),
+  spans AS (SELECT p + 1 AS lo, lead(p) OVER (ORDER BY p) - 1 AS hi FROM bounds),
+  -- The part TEXT and the part BOUNDARIES are the two whitespace-sensitive things here, and only
+  -- one of them turned out to be sensitive: the boundaries come from separator position alone,
+  -- and whitespace moves neither the quote parity nor the paren depth. Measured over whitespace
+  -- after a separator, before a separator, at both ends of the input, and alone in a trailing
+  -- part: the full character set on this one trim answers all four.
+  -- `lo` AND `hi` ARE CARRIED OUT WITH THE PART, and they are b55's fix in one line. `part` is
+  -- TRIMMED, which loses the spacing around a separator; the printer passes a raw body through
+  -- verbatim, so `(WHERE a = 1,b = 2)` with no space is itself printer output and a reader that
+  -- re-joined trimmed parts would reprint it with a space. tree_treeql_clause_parts merges a raw
+  -- body's parts by SPAN instead, slicing `s` from the first part's `lo` to the last part's `hi`.
+  -- The offsets are the UNTRIMMED span, which is what makes that slice the text's own bytes.
+  --
+  -- ADDITIVE, so no caller had to change: the struct gains two fields and every reader names the
+  -- fields it wants. MEASURED -- the TABLE form and all seven `tree_treeql_split` records in
+  -- test/sql/48_treeql_parse.test select `ord, part` and are untouched.
+  parts AS (
+    SELECT CAST(row_number() OVER (ORDER BY lo) AS INTEGER) AS ord,
+           trim(s[lo:hi], tree_treeql_ws()) AS part, lo, hi
+    FROM spans WHERE hi IS NOT NULL)
+  SELECT list({ord: ord, part: part, lo: lo, hi: hi} ORDER BY ord) FROM parts);

@@ -236,6 +236,40 @@ SPEC = {
          " lambda x: (x).prefix IS NULL), lambda x: (x).name)))"
          " <> len(list_filter(COALESCE((sem).predicate, []), lambda x: (x).prefix IS NULL))", 1)]),
 
+    # --- Task 8 (the TREEQL reader): the first two mutants that point at sql/10_treeql.sql. Until this task
+    # --- no mutant named that file at all -- MEASURED over the DECLARATIONS: this SPEC, the
+    # --- manifest, and all 49 .sql files beside it each answered 0 for `grep -c 10_treeql`. Not
+    # --- over the gate's OUTPUT, which cannot see the property either way. So the gate was mute
+    # --- about the parser Task 7 registered. One mutant per half of what the parser is: the
+    # --- TOKENIZER, and the canonical NUMBERING.
+    "MN32": ("sql/10_treeql.sql", ["tree_treeql_split_parts"], [
+        ("                      (SELECT tree_treeql_quote_mask(s) AS qmask)),",
+         "                      -- the mutation: the scan reads the TEXT and not the quote mask, so\n"
+         "                      -- there is no notion of a quoted region anywhere in the splitter.\n"
+         "                      -- A separator inside a literal separates and a bracket inside one\n"
+         "                      -- moves the depth -- the naive split this header rules out.\n"
+         "                      (SELECT s AS qmask)),", 1)]),
+
+    "MN33": ("sql/10_treeql.sql", ["tree_parse_treeql"], [
+        ("sl0 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 0 ELSE 1 END, n) AS INTEGER) AS a0",
+         "sl0 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0\n"
+         "            -- the mutation, at each of the three levels: a step's parts are numbered\n"
+         "            -- GROUPS FIRST and clauses second, against requirement 2. The shape does not\n"
+         "            -- move -- a part's parent path pins its own `a` component to 0 -- so only the\n"
+         "            -- NODE IDS change, and only on a step carrying a clause AND a group.\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 1 ELSE 0 END, n) AS INTEGER) AS a0", 1),
+        ("sl1 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0, a0, i1\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 0 ELSE 1 END, n) AS INTEGER) AS a1",
+         "sl1 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0, a0, i1\n"
+         "            -- the mutation, half two: the same flip at the first group level\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 1 ELSE 0 END, n) AS INTEGER) AS a1", 1),
+        ("sl2 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0, a0, i1, a1, i2\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 0 ELSE 1 END, n) AS INTEGER) AS a2",
+         "sl2 AS (SELECT *, CAST(row_number() OVER (PARTITION BY i0, a0, i1, a1, i2\n"
+         "            -- the mutation, half three: and at the second\n"
+         "            ORDER BY CASE WHEN gkind IS NULL THEN 1 ELSE 0 END, n) AS INTEGER) AS a2", 1)]),
+
 }
 
 
