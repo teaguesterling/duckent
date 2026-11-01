@@ -47,7 +47,6 @@ both are worth stating because they are the same mistake in two costumes.
 """
 import re, sys
 
-EXPECTED_FILES = 18
 EXPECTED_ASSERTIONS = 495  # a FLOOR, asserted with >=
 
 DUCKENT_SUITES = {
@@ -61,7 +60,19 @@ DUCKENT_SUITES = {
     # others do: this gate exists because a suite dropping out of the glob would otherwise
     # read as a smaller green number instead of as a failure.
     "46_slot_registry", "47_new_combinators",
+    # The front-end dispatch (duckent-plan#69's consequence here), and the one suite in this set
+    # that tests C++ rather than only the embedded macros: src/duckent_match.cpp reads
+    # tree_catalog.selector_languages.parser and wraps the selector's text in a call to it.
+    # Extension-only on purpose -- the plan repo's 48_treeql_parse.test proves the READER and is
+    # not mirrored, for the two reasons scripts/check_macro_identity.py records beside it.
+    "49_treeql_dispatch",
 }
+
+# Not a constant: it was one, it was never compared against anything, and it fed only the success
+# message -- so a suite added to the set above would have left that message claiming the old
+# number. That is the same defect the docstring's Check 5 describes, one layer out, and this file
+# has no business carrying an unread number after saying so.
+EXPECTED_FILES = len(DUCKENT_SUITES)
 
 # Catch2's ConsoleReporter::printTotals (duckdb/third_party/catch/catch.hpp:16921-16954)
 # emits one of FOUR shapes, not two. In source order:

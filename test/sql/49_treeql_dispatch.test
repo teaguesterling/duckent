@@ -1,0 +1,166 @@
+# name: test/sql/49_treeql_dispatch.test
+# description: the front-end dispatch -- a selector handed over as TEXT, read through the registry
+
+# WHY THIS FILE EXISTS, AND WHY IT IS NOT A COPY OF 48_treeql_parse.test.
+#
+# The plan repo's 48_treeql_parse.test proves the READER: 3234 lines over tree_treeql_split,
+# tree_treeql_quote_mask, tree_parse_treeql and the parse(print(ir)) == ir theorems. This repo
+# embeds that macro and could in principle run its proof, and the mirroring rule elsewhere in this
+# corpus says it should. It does not, for two MEASURED reasons, and both are recorded here rather
+# than in a commit message because this file is the consequence.
+#
+#   1. FOUR CLASSES OF RECORD IN 48 CANNOT MIRROR. Its registry record asserted `css tree_css_lower`
+#      beside treeql's row, and 09_css.sql is not embedded here (duckent-plan#70 narrowed that one).
+#      Its list_transform records compare a LIST rendered as text -- `["a CHILD b"]` under the plan
+#      repo's run.py, which formats the list in Python, against `['"a CHILD b"']` here, where
+#      sqllogictest casts the list to VARCHAR and the leading `"` earns single quotes. And its last
+#      block asserts run.py's OWN refusal text ("the test runner cannot drive the parser 'nope'")
+#      and run.py's wording for a NULL parser column, neither of which this build produces.
+#   2. IT COSTS 218m30s HERE AND ~11m THERE. Measured, same file, same macros, same pinned DuckDB
+#      1.5.5: 218m30s under this repo's sqllogictest binary against 657s under run.py. The rest of
+#      this corpus -- 21 suites, 1347 assertions -- is 224s. Contention, thread count, query
+#      verification, the optimizer and the memory limit were each eliminated by measurement; the
+#      cause is not known. A single round-trip record is 5s on the CLI and ~60s under the runner.
+#
+# So the reader's proof stays where it is cheap and whole, and THIS file proves the one thing that
+# exists only here: the dispatch in src/duckent_match.cpp, which resolves the language, reads
+# `tree_catalog.selector_languages.parser`, and wraps the selector's text in a call to that macro.
+# Seven records in 48 covered that; they are reproduced below, with the registry's own behaviour
+# tested directly rather than assumed.
+#
+# CONSEQUENCE, STATED SO IT IS NOT DISCOVERED LATER: MN32 and MN33 name 48_treeql_parse.test in
+# their expect_fail, and that suite is not in this repo's increment, so test/run_mutants.py
+# reports them OUT OF SCOPE by name. The two mutants are still copied here byte-identically,
+# because scripts/check_macro_identity.py requires every mutant to be, and because the copies are
+# what prove the two repositories plant the same defect under the same id.
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(tree_shape(
+  root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+  semantic := tree_semantic(type := 'type', key := 'name')),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# THE ASSERTION THIS INCREMENT EXISTS FOR: a TREEQL selector handed over as TEXT matches rows.
+# The bar is ROWS and not "no error": an empty answer is also what a mis-dispatched selector
+# returns, and absence of signal is not success.
+query I
+FROM tree_match('main', 'app', '(TYPE ''function_definition'')', language := 'treeql') SELECT count(*) > 0;
+----
+true
+
+# THE SAME SELECTOR AS TEXT AND AS IR RETURN THE SAME ROWS. The second conjunct is what makes this
+# a test: `[] = []` is true, so without it two empty answers would pass for agreement.
+query I
+SELECT (SELECT list(node_id ORDER BY node_id)
+          FROM tree_match('main', 'app', '(TYPE ''function_definition'')', language := 'treeql'))
+     = (SELECT list(node_id ORDER BY node_id)
+          FROM tree_match('main', 'app', tree_steps([{type: 'function_definition'}])))
+   AND (SELECT count(*) FROM tree_match('main', 'app', tree_steps([{type: 'function_definition'}]))) > 0;
+----
+true
+
+# THE BARE FORM, which is the one the README's caveat was about. No `language :=`, so the dispatch
+# resolves the default through tree_catalog.settings. In THIS build that default is treeql
+# (01_catalog.sql) precisely because 09_css.sql is not embedded to take it, so a bare MATCH is the
+# dispatch's own path rather than css's.
+query I
+FROM tree_match('main', 'app', '(TYPE ''function_definition'')') SELECT count(*) > 0;
+----
+true
+
+# THE PROVENANCE THE COMPILER STAMPS, read back through the match's own column.
+query I
+SELECT DISTINCT _match_language FROM tree_match('main', 'app', '(TYPE ''function_definition'')');
+----
+treeql
+
+# tree_explain WITH TEXT IS NOT DISPATCHED, and this record PINS that rather than omitting it.
+# Doctrine 5: unknowns are preserved, excluded and reported, and a gap left out of the corpus is
+# a gap nobody finds twice.
+#
+# The dispatch lives in MatchBind -- the bind of the duckent_match TABLE FUNCTION -- and
+# tree_explain is a scalar MACRO that never passes through it. Both work in the plan repo because
+# run.py rewrites the selector argument of `tree_match(` AND `tree_explain(` before either macro
+# sees text, so the macro layer has never had to read text itself. This build has no rewriter, so
+# tree_explain still needs IR. When that is closed, this record fails and is replaced by the
+# obvious one.
+statement error
+SELECT (tree_explain('main', 'app', '(TYPE ''function_definition'')', language := 'treeql')).treeql;
+----
+UNNEST() for correlated expressions is not supported yet
+
+# THE IR FORM OF THE SAME CALL, so the record above reads as "text is not dispatched into
+# tree_explain" and never as "tree_explain is broken". MEASURED: this returns the printed selector.
+query I
+SELECT (tree_explain('main', 'app', tree_steps([{type: 'function_definition'}]))).treeql;
+----
+(TYPE 'function_definition')
+
+# QUOTES IN THE SELECTOR'S TEXT. The dispatch reads the text out of the deparsed CTE and writes it
+# back as a SQL literal, so every `'` in it has to be doubled on the way. This selector carries
+# two of them; an unescaped write would be a syntax error rather than a wrong answer, which is why
+# one record is enough.
+query I
+FROM tree_match('main', 'app', '(TYPE ''function_definition'', ATTR name = ''greet'')', language := 'treeql')
+SELECT count(*);
+----
+1
+
+# AN EMPTY SELECTOR REACHES THE PARSER RATHER THAN THE LITERAL `NULL`. The dispatch writes the SQL
+# keyword for a NULL text, because quoting it would hand the parser the four-character string NULL
+# and it would go looking for a selector by that name. The macro's own refusal is what should
+# surface.
+statement error
+FROM tree_match('main', 'app', NULL::VARCHAR, language := 'treeql');
+----
+tree_parse_treeql: selector has no steps
+
+# THE REGISTRY IS READ, NOT HARDCODED -- the whole point of the seam. Point the parser column at a
+# macro that does not exist and the failure names it. A dispatch with `tree_parse_treeql` written
+# into the C++ would pass every record above this one and fail this one.
+statement ok
+UPDATE tree_catalog.selector_languages SET parser = 'nope' WHERE language = 'treeql';
+
+statement error
+FROM tree_match('main', 'app', '(TYPE ''function_definition'')', language := 'treeql');
+----
+Scalar Function with name nope does not exist
+
+statement ok
+UPDATE tree_catalog.selector_languages SET parser = 'tree_parse_treeql' WHERE language = 'treeql';
+
+# A ROW WITH NO PARSER, which is what treeql's own row held before 10_treeql.sql was embedded.
+# Distinct from the refusal below it: a language registered without a parser is a front-end that
+# has none to offer, and the message says so rather than claiming nothing is registered.
+statement ok
+UPDATE tree_catalog.selector_languages SET parser = NULL WHERE language = 'treeql';
+
+statement error
+FROM tree_match('main', 'app', '(TYPE ''function_definition'')', language := 'treeql');
+----
+has no parser in tree_catalog.selector_languages
+
+statement ok
+UPDATE tree_catalog.selector_languages SET parser = 'tree_parse_treeql' WHERE language = 'treeql';
+
+# A LANGUAGE NOTHING REGISTERED AT ALL, which on this build is css: 09_css.sql is the file that
+# inserts its row and the file this extension does not embed. The two refusals are deliberately
+# different, and this record is what holds them apart.
+statement error
+FROM tree_match('main', 'app', '.fn', language := 'css');
+----
+is not registered in tree_catalog.selector_languages
+
+# THE REFUSAL QUOTES THE REGISTRY RATHER THAN A LIST WRITTEN IN THE C++, so that a front-end
+# extension loaded at runtime changes the message without anyone editing it.
+statement error
+FROM tree_match('main', 'app', '.fn', language := 'css');
+----
+Registered: treeql (parser tree_parse_treeql)
+
+# IR STILL GOES THROUGH UNTOUCHED. The dispatch is gated on the selector relation's column type
+# being VARCHAR, so a list of structs must not reach the parser at all.
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition'}])) SELECT count(*) > 0;
+----
+true

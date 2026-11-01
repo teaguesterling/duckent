@@ -27,23 +27,29 @@ override in the root Makefile exists to avoid.
 python3 test/run_mutants.py --increment mvp
 ```
 
-`mutants/` holds 23 planted defects copied from the plan repo (`scripts/check_macro_identity.py`
+`mutants/` holds 27 planted defects copied from the plan repo (`scripts/check_macro_identity.py`
 holds them byte-identical to it, in both directions), each a `CREATE OR REPLACE MACRO` overlay
-with a manifest claim about which suites must fail when it is applied. It is how this repo knows
-its corpus has teeth rather than merely being large.
+with a manifest claim about which suites must fail when it is applied. 26 carry a control; MN08
+has none, because its mutation is in the plan repo's runner rather than a macro. It is how this
+repo knows its corpus has teeth rather than merely being large.
+
+Count these from `mutants/` or from the harness's own last line, never from this paragraph — the
+numbers here were stale twice before being written down this way.
 
 Applying one needs no rebuild. The harness writes a copy of `test_config.json` with the overlay
 SQL added as `on_init` — which DuckDB's sqllogictest executes on the test's own connection, after
 the statically linked extensions have loaded and so after duckent has created the base macros —
-and runs the already-built binary over that mutant's suites. 17 mutants and their 17 controls cost
-one build, not 34, and about five minutes.
+and runs the already-built binary over that mutant's suites. 19 mutants and their 19 controls cost
+one build, not 38 — measured at 11m41s on a 36-core machine, against 3m54s for `make test` itself.
 
 Scope is derived, not marked: an increment is a set of suites (`INCREMENTS` in `run_mutants.py`,
 taken from the gate's own `DUCKENT_SUITES`), and an entry is in scope exactly when one of its
-`expect_fail` suites is in it. Six entries name only front-end suites this repo does not carry and
-are reported out of scope with a count; two (MN04, MN24) straddle the boundary and are run against
-their in-scope suites with the rest named. Nothing per-entry is written down, so moving a suite
-into or out of the gate cannot leave a stale marking behind.
+`expect_fail` suites is in it. Eight entries are out of scope and reported with a count: six name
+only front-end suites this repo does not carry, and MN32/MN33 name `48_treeql_parse.test`, the
+reader's own proof, which is not mirrored here for the reasons
+`scripts/check_macro_identity.py` records beside it. Two (MN04, MN24) straddle the boundary and
+are run against their in-scope suites with the rest named. Nothing per-entry is written down, so
+moving a suite into or out of the gate cannot leave a stale marking behind.
 
 `mutants/regen.py` is the plan repo's generator, copied so the harness can import it and rebuild
 each in-scope mutant from `src/sql_macros/` to prove the copy is still its source plus the planted

@@ -139,11 +139,28 @@ mutant without rebuilding.
 
 ## Not in this increment
 
-- **No text selector front-end.** CSS-style selectors are a separate extension, as above.
+- **One text selector front-end, not two.** TREEQL text is read here:
+  `src/sql_macros/10_treeql.sql` is embedded, `tree_catalog.selector_languages` carries its
+  parser, and `tree_match` dispatches through that registry, so a selector handed over as text in
+  the default language is parsed and a bare `MATCH` resolves. CSS-style selectors remain a
+  separate extension, as above: `09_css.sql` is deliberately not embedded, so `language := 'css'`
+  refuses by a lookup that finds no row for it. `tree_explain` is the one asymmetry: the dispatch
+  is in the bind of the `duckent_match` table function, and `tree_explain` is a scalar macro that
+  does not pass through it, so it still needs IR. `test/sql/49_treeql_dispatch.test` pins that as
+  a refusal rather than leaving it undocumented.
 - **No sequence or representation layer.** The reference implementation's `40_corpus`,
   `41_differential_sitting_duck`, `42_second_differential`, `43_representation`, `44_parsers` and
   `45_duck_blocks` suites are not carried here, and the 6 mutants they guard are reported as out
   of scope by name rather than silently skipped.
+- **The reader's own proof stays in the plan repo.** `48_treeql_parse.test` exercises the macro
+  this repo embeds, so it could run here, and it is still not mirrored: measured at **218m30s**
+  under this repo's sqllogictest binary against **657s** under the plan repo's `run.py`, while
+  every other suite here totals 224s. Four classes of its records are runner-specific as well —
+  the registry record that also asserted css's row, two whose expected text is a LIST as Python
+  formats it rather than as a SQL cast renders it, and two asserting `run.py`'s own refusal
+  wording. MN32 and MN33 name it, so they join the out-of-scope list, by name. The cause of the
+  slowdown is not known: contention, thread count, query verification, the optimizer and the
+  memory limit were each eliminated by measurement.
 
 ### One unexplained observation
 
