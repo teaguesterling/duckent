@@ -23,7 +23,7 @@ struct VerbGlobalState : public GlobalTableFunctionState {
 //! would have compiled `SELECT (?, ...)`) and because a hidden named parameter that changes
 //! which macro runs is worse than one wrapper per verb.
 unique_ptr<FunctionData> VerbBind(const char *verb, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                                  vector<string> &names) {
+                                  vector<Identifier> &names) {
 	auto result = make_uniq<VerbBindData>();
 	result->verb = verb;
 	result->macro_name = DuckentCompileMacroName(result->verb);
@@ -69,42 +69,42 @@ void VerbScan(ClientContext &context, TableFunctionInput &data_p, DataChunk &out
 // Task 6 adds the other six on this pattern.
 
 unique_ptr<FunctionData> BindTreeDdlCreate(ClientContext &, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_ddl_create", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeDdlDrop(ClientContext &, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_ddl_drop", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeDdlAlter(ClientContext &, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_ddl_alter", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeInsert(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_insert", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeReplace(ClientContext &, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_replace", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeDelete(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_delete", input, return_types, names);
 }
 
 unique_ptr<FunctionData> BindTreeCheck(ClientContext &, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return VerbBind("tree_check", input, return_types, names);
 }
 
 TableFunction MakeVerb(const string &name, const vector<LogicalType> &arg_types, table_function_bind_t bind) {
-	return TableFunction(name, arg_types, VerbScan, bind, VerbInit);
+	return TableFunction(Identifier(name), arg_types, VerbScan, bind, VerbInit);
 }
 
 } // namespace

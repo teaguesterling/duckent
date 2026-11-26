@@ -5,7 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
@@ -92,14 +92,14 @@ constexpr const char *MATCH_SELECTOR_CTE = "__duckent_selector";
 struct MatchBindData : public TableFunctionData {
 	string compiled_sql;
 	vector<LogicalType> types;
-	vector<string> names;
+	vector<Identifier> names;
 };
 
 struct MatchGlobalState : public GlobalTableFunctionState {
 	//! The connection is kept because it owns the ClientContext the result was produced on, and
 	//! the result outlives the call that made it.
 	unique_ptr<Connection> con;
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 	//! The output chunk is handed a REFERENCE to this one, so it has to stay alive until the next
 	//! call replaces it rather than dying with the call that fetched it.
 	unique_ptr<DataChunk> chunk;
@@ -127,7 +127,7 @@ Value ScalarOf(Connection &con, const string &sql) {
 	if (result->RowCount() == 0) {
 		return Value();
 	}
-	return result->GetValue(0, 0);
+	return result->Collection().GetValue(0, 0);
 }
 
 //! The language a selector argument is written in: the `language :=` named argument when the call
@@ -171,8 +171,8 @@ string RegisteredLanguages(Connection &con) {
 	}
 	string out;
 	for (idx_t i = 0; i < result->RowCount(); i++) {
-		const Value parser = result->GetValue(1, i);
-		out += (out.empty() ? "" : ", ") + result->GetValue(0, i).ToString() +
+		const Value parser = result->Collection().GetValue(1, i);
+		out += (out.empty() ? "" : ", ") + result->Collection().GetValue(0, i).ToString() +
 		       (parser.IsNull() ? " (no parser)" : " (parser " + parser.ToString() + ")");
 	}
 	return out.empty() ? "none" : out;
@@ -219,7 +219,7 @@ string ParserForTextSelector(Connection &con, const string &language) {
 		    "registers it. Registered: %s",
 		    language, registered);
 	}
-	const Value parser = row->GetValue(0, 0);
+	const Value parser = row->Collection().GetValue(0, 0);
 	if (!parser.IsNull()) {
 		// The dispatch. This arm used to raise NotImplementedException, because the only row that
 		// carried a parser was css's and the file inserting it is the one this extension does not
@@ -274,8 +274,8 @@ string SelectorText(TableFunctionBindInput &input) {
 		RefuseInternalsCall();
 	}
 	auto &call = input.ref.function->Cast<FunctionExpression>();
-	if (call.children.size() <= MATCH_SELECTOR_ARG ||
-	    call.children[MATCH_SELECTOR_ARG]->GetExpressionClass() != ExpressionClass::SUBQUERY) {
+	if (call.GetArguments().size() <= MATCH_SELECTOR_ARG ||
+	    call.GetArguments()[MATCH_SELECTOR_ARG].GetExpression().GetExpressionClass() != ExpressionClass::SUBQUERY) {
 		// UNREACHABLE in this build, and kept anyway. DuckDB's overload matcher rejects a
 		// non-subquery third argument before bind runs at all -- `duckent_match('main','a','abc')`,
 		// `(..., t)` and `(..., 1)` all give "No function matches duckent_match(...)" -- because a
@@ -284,13 +284,13 @@ string SelectorText(TableFunctionBindInput &input) {
 		// condition a user CAN take is the missing-CTE one below.
 		RefuseInternalsCall();
 	}
-	auto &subquery = call.children[MATCH_SELECTOR_ARG]->Cast<SubqueryExpression>();
-	for (auto &cte : subquery.subquery->node->cte_map.map) {
-		if (!StringUtil::CIEquals(cte.first, MATCH_SELECTOR_CTE) || !cte.second || !cte.second->query) {
+	auto &subquery = call.GetArguments()[MATCH_SELECTOR_ARG].GetExpression().Cast<SubqueryExpression>();
+	for (auto &cte : subquery.Subquery()->node->cte_map.map) {
+		if (!(cte.first == MATCH_SELECTOR_CTE) || !cte.second || !cte.second->query_node) {
 			continue;
 		}
 		try {
-			return "(" + cte.second->query->node->ToString() + ")";
+			return "(" + cte.second->query_node->ToString() + ")";
 		} catch (const std::exception &ex) {
 			// The deparse is the one place the whole mechanism's assumption is load-bearing, so it
 			// is the one place worth labelling. An unreferenced CTE is never BOUND on this DuckDB,
@@ -328,7 +328,7 @@ string SelectorText(TableFunctionBindInput &input) {
 //! literal-only restriction on the selector: the query text is COMPUTED here, not read out of a
 //! constant.
 unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInput &input,
-                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Guarded HERE as well as in MatchInit, because the side connection opened on the next line is
 	// its own hazard: this is where the selector is compiled, and a compile against the
 	// pre-transaction snapshot is a stale SCHEMA and a stale query, which EXPLAIN would print and
@@ -401,7 +401,7 @@ unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInpu
 		// for the reason CompileStatements gives: refusal text is contract.
 		prepared->GetErrorObject().Throw();
 	}
-	auto compiled = prepared->Execute(bound, false);
+	auto compiled = prepared->Execute(bound);
 	if (compiled->HasError()) {
 		compiled->GetErrorObject().Throw();
 	}
@@ -477,8 +477,8 @@ void RegisterDuckentMatch(ExtensionLoader &loader) {
 	TableFunction tf("duckent_match", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TABLE}, nullptr,
 	                 MatchBind, MatchInit);
 	tf.in_out_function = MatchInOut;
-	tf.named_parameters["semantic"] = LogicalType::ANY;
-	tf.named_parameters["language"] = LogicalType::VARCHAR;
+	tf.GetSignature().AddKeywordOnly("semantic", LogicalType::ANY, Value());
+	tf.GetSignature().AddKeywordOnly("language", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	loader.RegisterFunction(tf);
 
 	// tree_match(sch, nm, sel, semantic := ..., language := ...) mirrors

@@ -119,7 +119,7 @@ vector<string> CompileStatements(ClientContext &context, const string &macro_nam
 		// contract. Pass it through untouched; the corpus matches on what the error SAYS.
 		prepared->GetErrorObject().Throw();
 	}
-	auto result = prepared->Execute(bound, false);
+	auto result = prepared->Execute(bound);
 	if (result->HasError()) {
 		// The macro's refusal is the product. Unwrapped, verbatim.
 		result->GetErrorObject().Throw();
