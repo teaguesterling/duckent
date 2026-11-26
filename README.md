@@ -105,18 +105,11 @@ gated on, all measured on the committed tree:
 
 | Gate | What it proves | State |
 |---|---|---|
-| `make test` | the 18 reference suites plus 5 extension-only ones | **23 cases, 1377 assertions, 0 failures, 0 skipped** (DuckDB v2.0.1) |
+| `make test` | the 18 reference suites plus 5 extension-only ones | **23 cases, 1380 assertions, 0 failures, 0 skipped** (DuckDB v2.0.1) |
 | `test/check_gate.py` | that the corpus **ran**, not merely that nothing failed | all 20 declared suites present by run marker; floor of 495 assertions; no crash signature |
 | `scripts/check_macro_identity.py` | no drift in the embedded macros, the copied suites, or the copied mutants — in both directions | green |
-| `test/compile_differential.py` | the two implementations compile identical SQL from identical arguments | 26 macro cases + 2 of 3 verb cases agree; **1 diverges**, see below |
+| `test/compile_differential.py` | the two implementations compile identical SQL from identical arguments | 26 macro cases + 3 verb cases agree |
 | `test/run_mutants.py --increment mvp` | the corpus has teeth | **19 of 27 planted defects in scope, all 19 killed, 19/19 controls pass**, 8 reported out of scope by name |
-
-**The one divergence, open.** `CALL tree_ddl_alter` with a `NULL::STRUCT(abstract BOOLEAN)`
-semantic. On DuckDB 2.0.1 the plan repo's `tree_compile_alter` fails at bind time with
-`Could not find key "predicate" in struct`: `sql/03_ddl.sql` reads `(semantic).predicate`
-before its NULL refusal can run, and 2.0 checks a struct key at bind. This extension compiles the
-NULL without its type, so it still refuses with `semantic is NULL; nothing to alter`. The fix
-belongs in the plan repo; it is not yet decided, so the differential stays red here on purpose.
 
 Two of these exist because the corpus alone cannot see certain bugs:
 
