@@ -506,11 +506,11 @@ void RegisterDuckentMatch(ExtensionLoader &loader) {
 	// 1.5.5 resolves a table function's NAME at CREATE MACRO time (the constraint sql/09_css.sql
 	// records for parse_ast_list_table), so duckent_match is registered above, first.
 	Connection con(loader.GetDatabaseInstance());
-	auto created =
-	    con.Query(string("CREATE OR REPLACE MACRO tree_match(sch, nm, sel, semantic := NULL, language := NULL) "
-	                     "AS TABLE WITH ") +
-	              MATCH_SELECTOR_CTE + " AS (SELECT sel AS s) SELECT * FROM duckent_match(sch, nm, (SELECT sel AS s), " +
-	              "semantic := semantic, language := language)");
+	auto created = con.Query(
+	    string("CREATE OR REPLACE MACRO tree_match(sch, nm, sel, semantic := NULL, language := NULL) "
+	           "AS TABLE WITH ") +
+	    MATCH_SELECTOR_CTE + " AS (SELECT sel AS s) SELECT * FROM duckent_match(sch, nm, (SELECT sel AS s), " +
+	    "semantic := semantic, language := language)");
 	if (created->HasError()) {
 		throw InvalidInputException("duckent: failed to create the tree_match macro: %s", created->GetError());
 	}
