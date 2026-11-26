@@ -53,11 +53,18 @@ test_reldebug:
 # which ARE ours -- are not format-gated. format.py's --directories is per-directory, so there is
 # no way to include those three while excluding their copied neighbours, and a forked corpus is
 # much worse than three unformatted scripts.
+#
+# The recipes go through the submodule's own targets, as the submodule's versions do, and pass
+# only the directory list through T. On DuckDB v2.0 that matters: duckdb/Makefile runs format.py
+# from its own venv, which pins clang_format==11.0.1, and format.py puts its interpreter's folder
+# first on PATH. Called as plain `python3`, that folder is /usr/bin on the CI runner, whose
+# clang-format is 14, and format.py stops at its version check before it formats anything
+# (MainDistributionPipeline's Format Check, measured on the 2.0.1 port).
 format-check:
-	python3 duckdb/scripts/format.py --all --check --directories src
+	$(MAKE) -C duckdb format-check T="--workdir $$PWD --directories src"
 
 format:
-	python3 duckdb/scripts/format.py --all --fix --noconfirm --directories src
+	$(MAKE) -C duckdb format-fix T="--workdir $$PWD --directories src"
 
 format-fix:
-	python3 duckdb/scripts/format.py --all --fix --noconfirm --directories src
+	$(MAKE) -C duckdb format-fix T="--workdir $$PWD --directories src"
