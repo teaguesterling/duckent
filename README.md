@@ -105,11 +105,18 @@ gated on, all measured on the committed tree:
 
 | Gate | What it proves | State |
 |---|---|---|
-| `make test` | the 18 reference suites plus 3 extension-only ones | **21 cases, 1347 assertions, 0 failures, 0 skipped** |
-| `test/check_gate.py` | that the corpus **ran**, not merely that nothing failed | all 18 suites present by run marker; floor of 495 assertions; no crash signature |
+| `make test` | the 18 reference suites plus 5 extension-only ones | **23 cases, 1377 assertions, 0 failures, 0 skipped** (DuckDB v2.0.1) |
+| `test/check_gate.py` | that the corpus **ran**, not merely that nothing failed | all 20 declared suites present by run marker; floor of 495 assertions; no crash signature |
 | `scripts/check_macro_identity.py` | no drift in the embedded macros, the copied suites, or the copied mutants — in both directions | green |
-| `test/compile_differential.py` | the two implementations compile identical SQL from identical arguments | 26 macro cases + 3 verb cases agree |
-| `test/run_mutants.py --increment mvp` | the corpus has teeth | **19 of 25 planted defects in scope, all 19 killed, 19/19 controls pass**, 6 reported out of scope by name |
+| `test/compile_differential.py` | the two implementations compile identical SQL from identical arguments | 26 macro cases + 2 of 3 verb cases agree; **1 diverges**, see below |
+| `test/run_mutants.py --increment mvp` | the corpus has teeth | **19 of 27 planted defects in scope, all 19 killed, 19/19 controls pass**, 8 reported out of scope by name |
+
+**The one divergence, open.** `CALL tree_ddl_alter` with a `NULL::STRUCT(abstract BOOLEAN)`
+semantic. On DuckDB 2.0.1 the plan repo's `tree_compile_alter` fails at bind time with
+`Could not find key "predicate" in struct`: `sql/03_ddl.sql` reads `(semantic).predicate`
+before its NULL refusal can run, and 2.0 checks a struct key at bind. This extension compiles the
+NULL without its type, so it still refuses with `semantic is NULL; nothing to alter`. The fix
+belongs in the plan repo; it is not yet decided, so the differential stays red here on purpose.
 
 Two of these exist because the corpus alone cannot see certain bugs:
 
@@ -187,7 +194,9 @@ If you hit it, the reproduction is worth more than the workaround.
 
 ## Building
 
-DuckDB 1.5.5. `core_functions` and `json` must be statically linked ahead of duckent —
+DuckDB v2.0.1. On 2.0, an extension is linked into the CLI only when `extension_config.cmake`
+lists it with `duckdb_extension_statically_link()`; duckent, `core_functions` and `json` are all
+listed. `core_functions` and `json` must be statically linked ahead of duckent —
 autoload is not sufficient, because `TryAutoLoadAvailableExtension` resolves from
 `~/.duckdb/extensions/<version>/<platform>/` and silently no-ops in a from-source build.
 `extension_config.cmake` is the only guarantee, and the `from-source-load` CI job is the only
