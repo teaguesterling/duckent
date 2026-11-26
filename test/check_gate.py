@@ -66,6 +66,10 @@ DUCKENT_SUITES = {
     # Extension-only on purpose -- the plan repo's 48_treeql_parse.test proves the READER and is
     # not mirrored, for the two reasons scripts/check_macro_identity.py records beside it.
     "49_treeql_dispatch",
+    # The DuckDB 2.0 selector hand-off. MatchBind finds the selector by CTE NAME, so a wrong
+    # selector shows only with two calls in one statement, and this is the only suite that
+    # makes them. Extension-only, like 49, and for the same reason it belongs in the set.
+    "14_selector_handoff",
 }
 
 # Not a constant: it was one, it was never compared against anything, and it fed only the success
