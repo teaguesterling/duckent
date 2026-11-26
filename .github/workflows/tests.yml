@@ -65,11 +65,11 @@ jobs:
           path: .plan
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      # pyyaml: run_mutants.py reads the mutant manifest below. duckdb==1.5.5: the
+      # pyyaml: run_mutants.py reads the mutant manifest below. duckdb==2.0.1: the
       # compile-differential step drives the plan repo's pure-Python implementation
       # through the `duckdb` package, as the other half of the differential against
       # the compiled extension.
-      - run: pip install pyyaml duckdb==1.5.5
+      - run: pip install pyyaml duckdb==2.0.1
       - name: build
         id: build
         run: make
