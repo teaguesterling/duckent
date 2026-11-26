@@ -318,6 +318,30 @@ FROM __duckent_selector, duckent_match('main', 'guarded', (SELECT tree_steps([{t
 ----
 duckent: tree_match could not read its selector, because this DuckDB has already bound the CTE that holds it
 
+# ---- a NULL argument keeps the caller's type through the CALL path ----------------------
+# CompileStatements (src/duckent_sql.cpp) turns a verb's arguments into a call of the compile
+# macro. A NULL must reach the macro with the type the caller gave it, because the macro binds
+# against that type: on DuckDB 2.0, NULL::STRUCT(abstract BOOLEAN) has no `predicate` key, and
+# tree_compile_alter's `(semantic).predicate` fails at bind, exactly as the plan repo's run.py
+# reports. Dropping the type turned that type error into "nothing to alter" -- a refusal for an
+# argument that was never a semantic. The other two records are the controls: a bare NULL and a
+# NULL of the right type are a NULL semantic, and both must still be refused as one.
+
+statement error
+CALL tree_ddl_alter('main', 't1', NULL::STRUCT(abstract BOOLEAN));
+----
+Could not find key "predicate" in struct
+
+statement error
+CALL tree_ddl_alter('main', 't1', NULL::TREE_SEMANTIC);
+----
+nothing to alter
+
+statement error
+CALL tree_ddl_alter('main', 't1', NULL);
+----
+nothing to alter
+
 # ---- atomicity: the first statement must not survive a later one raising ----------------
 # The compile macro is overridden for this file only, reproducing the rollback probe the plan
 # repo's 00_smoke.test uses for the same property. Without the executor's own BEGIN/COMMIT the
