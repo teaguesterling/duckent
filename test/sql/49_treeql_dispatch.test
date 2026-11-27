@@ -83,11 +83,12 @@ treeql
 # run.py rewrites the selector argument of `tree_match(` AND `tree_explain(` before either macro
 # sees text, so the macro layer has never had to read text itself. This build has no rewriter, so
 # tree_explain still needs IR. When that is closed, this record fails and is replaced by the
-# obvious one.
+# obvious one. The error is the IR path meeting the text: DuckDB 1.5 worded it "UNNEST() for
+# correlated expressions is not supported yet"; 2.0 names the VARCHAR it was handed, as below.
 statement error
 SELECT (tree_explain('main', 'app', '(TYPE ''function_definition'')', language := 'treeql')).treeql;
 ----
-UNNEST() for correlated expressions is not supported yet
+UNNEST() can only be applied to lists, structs and NULL, not VARCHAR
 
 # THE IR FORM OF THE SAME CALL, so the record above reads as "text is not dispatched into
 # tree_explain" and never as "tree_explain is broken". MEASURED: this returns the printed selector.

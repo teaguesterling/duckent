@@ -40,7 +40,10 @@ OMITTED = {"09_css.sql"}
 # extension loads its statically-linked dependencies and embedded macros at all,
 # and the front-end dispatch suite, which tests C++ the plan repo does not have.
 EXTENSION_ONLY_TESTS = {"12_verb_executor.test", "90_loads.test", "91_macros_load.test",
-                        "49_treeql_dispatch.test"}
+                        "49_treeql_dispatch.test",
+                        # the extension's own selector hand-off (src/duckent_match.cpp); the
+                        # plan repo has no hand-off, because run.py reads the selector's text
+                        "14_selector_handoff.test"}
 
 # The reverse direction, which the first version of this check did not have: plan-repo
 # .test files this repo deliberately does NOT mirror. Everything here belongs to the

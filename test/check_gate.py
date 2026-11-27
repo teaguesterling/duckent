@@ -66,6 +66,10 @@ DUCKENT_SUITES = {
     # Extension-only on purpose -- the plan repo's 48_treeql_parse.test proves the READER and is
     # not mirrored, for the two reasons scripts/check_macro_identity.py records beside it.
     "49_treeql_dispatch",
+    # The DuckDB 2.0 selector hand-off. MatchBind finds the selector by CTE NAME, so a wrong
+    # selector shows only with two calls in one statement, and this is the only suite that
+    # makes them. Extension-only, like 49, and for the same reason it belongs in the set.
+    "14_selector_handoff",
 }
 
 # Not a constant: it was one, it was never compared against anything, and it fed only the success
@@ -103,10 +107,16 @@ ASSERTIONS_LINE_RE = re.compile(r"^assertions:\s*(\d+)\s*\|(.*)$", re.MULTILINE)
 CASES_LINE_RE = re.compile(r"^test cases:\s*(\d+)\s*\|", re.MULTILINE)
 COLUMN_RE = re.compile(r"(\d+)\s+(passed|failed|skipped)")
 
-# The runner's own progress line, emitted as it starts each file:
+# The runner's own progress line. DuckDB 1.5's runner emitted one as it started each file:
 #   [17/19] (89%): test/sql/02_catalog.test
+# DuckDB 2.0's runner emits that start line for the first file only, and a completion line
+# for every file (measured on v2.0.1, extension-ci-tools v2.0):
+#   [5/22] (22%): test/sql/02_catalog.test took 0.445s
+# Both are accepted. The line stays anchored at both ends, so prose that names a file
+# (Check 5) still cannot pass for a marker.
 RUN_MARKER_RE = re.compile(
-    r"^\[(\d+)/(\d+)\]\s+\(\d+%\):\s+test/sql/([^\s/]+)\.test\s*$", re.MULTILINE
+    r"^\[(\d+)/(\d+)\]\s+\(\d+%\):\s+test/sql/([^\s/]+)\.test(?:\s+took\s+[\d.]+s)?\s*$",
+    re.MULTILINE,
 )
 
 # Signatures of the process dying rather than finishing. Deliberately limited to things

@@ -5,14 +5,12 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
-#include "duckdb/parser/common_table_expression_info.hpp"
-#include "duckdb/parser/expression/function_expression.hpp"
-#include "duckdb/parser/expression/subquery_expression.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/query_node.hpp"
-#include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/table_binding.hpp"
 
 namespace duckdb {
 
@@ -51,28 +49,50 @@ namespace duckdb {
 // VALUE and must be known at bind time. DuckDB gives a table function a bind-time value only by
 // constant-folding the argument -- which is the path that refuses the subquery.
 //
-// Three facts, each checked against this DuckDB (d8cdaa33fda), open the only door:
+// Four facts, each checked against DuckDB v2.0.1 (8d78114e90), open the only door:
 //
 //   1. A TABLE MACRO's body is bound by an ORDINARY binder (Binder::BindTableMacro), so the
 //      macro's arguments -- tree_steps and all -- bind without complaint, and the argument
-//      EXPRESSIONS are substituted into the body's parse tree.
+//      EXPRESSIONS are substituted into the body's parse tree, its WITH clause included
+//      (ParsedExpressionIterator::EnumerateQueryNodeChildren walks node.cte_map).
 //   2. An argument that is syntactically a subquery takes a different path in
 //      Binder::BindTableFunctionParameters: given a LogicalType::TABLE parameter it is bound as
 //      a relation by an ordinary binder instead of by TableFunctionBinder.
-//   3. An UNREFERENCED CTE is never bound (`WITH u AS (SELECT no_such_function()) SELECT 1`
-//      succeeds), while macro parameter substitution DOES descend into one
-//      (ParsedExpressionIterator::EnumerateQueryNodeChildren walks node.cte_map).
+//   3. CTEs are bound LAZILY. Binder::PrepareCTE (bind_cte_node.cpp) records a CTEBindState
+//      holding the CTE's parse tree (`cte_def`) and binds it only when a query first reads the
+//      CTE; an UNREFERENCED CTE is never bound, so its parse tree is still parse tree while
+//      every table function in its scope binds. Binder::GetCTEBinding finds it by name from
+//      any binder in that scope.
+//   4. The only way from a CTEBinding to its CTEBindState is the member
+//      `CTEBinding::bind_state`, which is PRIVATE and has no accessor (planner/table_binding.hpp).
+//      SelectorText reads it through an explicit template instantiation, which the language
+//      exempts from access checking ([temp.spec.general]/6 in C++20); see CTEBindStateOf below.
 //
-// So `tree_match` is a table macro that hands the selector to `duckent_match` twice inside one
-// subquery: once in the projection, where binding it yields its TYPE for the IR-or-text decision,
-// and once in an unreferenced CTE, where it stays unbound and so can still be deparsed. Fact 3 is
-// what the second copy is for: binding REPLACES a parsed expression with an emptied
-// BoundExpression in place, so by the time bind runs, every bound copy raises
+// So `tree_match` is a table macro that hands the selector over twice: once in the subquery it
+// passes as duckent_match's TABLE argument, where binding it yields its TYPE for the IR-or-text
+// decision, and once in an unreferenced CTE of the macro's OWN query, which wraps that call.
+// The CTE copy stays unbound (fact 3), so bind can deparse it. Binding REPLACES a parsed
+// expression with an emptied BoundExpression in place, so every bound copy raises
 // "ToString(): BoundExpression does not have a child". Deparsing is not a trick played on the
 // reference implementation but the same move it makes: test/run.py's `rewrite_match` also works
 // from the selector's TEXT, splicing the call's argument text into
 // `SELECT tree_compile_match({args})`. The runner can read that text before SQL sees the call;
 // the unbound CTE copy is the earliest place here with the same information.
+//
+// WHY THE CTE IS IN THE MACRO'S OWN QUERY, AND NOT IN THE SUBQUERY ARGUMENT (the 1.5 shape).
+// On 1.5 the CTE sat inside the TABLE argument's subquery, and bind read it from
+// `ref.function`'s argument list. DuckDB 2.0 moves the argument expressions out of
+// `ref.function` before any bind callback runs (bind_table_function.cpp, the
+// `children.push_back(std::move(child.GetExpressionMutable()))` loop ahead of
+// BindTableFunctionInternal), so on 2.0 that argument is a null pointer by bind time. The
+// subquery's own binder is also gone by then. A CTE of the ENCLOSING query is still in scope
+// of the binder that binds duckent_match -- `input.binder` -- which is what fact 3 needs.
+//
+// What breaks this, and how it shows. If DuckDB renames or drops `CTEBinding::bind_state`, or
+// changes its type, duckent stops COMPILING: the explicit instantiation names the member and its
+// type exactly. If DuckDB starts to bind an unreferenced CTE before table functions bind,
+// SelectorText sees a bound state and refuses with a duckent message that names this note. In
+// neither case does a query get a wrong answer.
 //
 // The selector argument is therefore evaluated twice: once by the relation DuckDB plans for the
 // TABLE parameter (whose rows this scan ignores -- only its type was wanted) and once inside the
@@ -82,8 +102,6 @@ namespace duckdb {
 
 namespace {
 
-//! Position of the selector relation in `duckent_match`'s argument list.
-constexpr idx_t MATCH_SELECTOR_ARG = 2;
 //! Name of the CTE in the table macro below that keeps the selector expression unbound. Lower
 //! case because the parser folds unquoted identifiers, and prefixed because it shares a namespace
 //! with nothing but itself.
@@ -92,14 +110,14 @@ constexpr const char *MATCH_SELECTOR_CTE = "__duckent_selector";
 struct MatchBindData : public TableFunctionData {
 	string compiled_sql;
 	vector<LogicalType> types;
-	vector<string> names;
+	vector<Identifier> names;
 };
 
 struct MatchGlobalState : public GlobalTableFunctionState {
 	//! The connection is kept because it owns the ClientContext the result was produced on, and
 	//! the result outlives the call that made it.
 	unique_ptr<Connection> con;
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 	//! The output chunk is handed a REFERENCE to this one, so it has to stay alive until the next
 	//! call replaces it rather than dying with the call that fetched it.
 	unique_ptr<DataChunk> chunk;
@@ -127,7 +145,7 @@ Value ScalarOf(Connection &con, const string &sql) {
 	if (result->RowCount() == 0) {
 		return Value();
 	}
-	return result->GetValue(0, 0);
+	return result->Collection().GetValue(0, 0);
 }
 
 //! The language a selector argument is written in: the `language :=` named argument when the call
@@ -171,8 +189,8 @@ string RegisteredLanguages(Connection &con) {
 	}
 	string out;
 	for (idx_t i = 0; i < result->RowCount(); i++) {
-		const Value parser = result->GetValue(1, i);
-		out += (out.empty() ? "" : ", ") + result->GetValue(0, i).ToString() +
+		const Value parser = result->Collection().GetValue(1, i);
+		out += (out.empty() ? "" : ", ") + result->Collection().GetValue(0, i).ToString() +
 		       (parser.IsNull() ? " (no parser)" : " (parser " + parser.ToString() + ")");
 	}
 	return out.empty() ? "none" : out;
@@ -219,7 +237,7 @@ string ParserForTextSelector(Connection &con, const string &language) {
 		    "registers it. Registered: %s",
 		    language, registered);
 	}
-	const Value parser = row->GetValue(0, 0);
+	const Value parser = row->Collection().GetValue(0, 0);
 	if (!parser.IsNull()) {
 		// The dispatch. This arm used to raise NotImplementedException, because the only row that
 		// carried a parser was css's and the file inserting it is the one this extension does not
@@ -246,8 +264,8 @@ string ParserForTextSelector(Connection &con, const string &language) {
 //! renders as "This error signals an assertion failure within DuckDB" over a 35-frame stack
 //! trace, which tells a caller who merely used the wrong function name that they have found a
 //! DuckDB bug. BINDER because every OTHER way of misusing duckent_match is already a Binder Error
-//! -- DuckDB's overload matcher answers `duckent_match('main','a','abc')` with "No function
-//! matches duckent_match(VARCHAR, VARCHAR, VARCHAR)" -- so a caller who got the argument's SHAPE
+//! -- DuckDB answers `duckent_match('main','a','abc')` with 'Table function "duckent_match"
+//! requires a subquery as its TABLE parameter' (v2.0.1) -- so a caller who got the argument's SHAPE
 //! wrong rather than its TYPE should not be told something categorically different.
 //!
 //! BINDER is also one of the six types Exception::InvalidatesTransaction exempts
@@ -260,63 +278,53 @@ string ParserForTextSelector(Connection &con, const string &language) {
 	                      "tree_match macro builds. Call tree_match(sch, nm, sel) instead.");
 }
 
+//! CTEBinding::bind_state, read past its `private`. An explicit instantiation may name a
+//! private member ([temp.spec.general]/6 in C++20), and a friend function the instantiation
+//! defines hands the member pointer out. This is the whole of duckent's reach into DuckDB
+//! internals for tree_match; fact 4 in the note at the top of this file says why there is no
+//! public route and what happens when DuckDB changes the member.
+struct CTEBindStateTag {
+	using type = shared_ptr<CTEBindState> CTEBinding::*;
+	friend type CTEBindStateOf(CTEBindStateTag);
+};
+template <typename TAG, typename TAG::type MEMBER>
+struct CTEBindStateAccess {
+	friend typename TAG::type CTEBindStateOf(TAG) {
+		return MEMBER;
+	}
+};
+template struct CTEBindStateAccess<CTEBindStateTag, &CTEBinding::bind_state>;
+
 //! The selector argument as written, deparsed from the unbound copy the table macro parks in a
-//! CTE, and returned as a scalar subquery ready to splice into the compile call. See the
-//! mechanism note at the top of this file for why it has to come from there.
+//! CTE of its own query, and returned as a scalar subquery ready to splice into the compile
+//! call. See the mechanism note at the top of this file for why it has to come from there.
 string SelectorText(TableFunctionBindInput &input) {
-	if (!input.ref.function) {
-		// DuckDB treats ref.function as nullable and checks it itself (GetAlias in
-		// bind_table_function.cpp): Binder::BindTableFunction(TableFunction &, vector<Value>)
-		// builds a default TableFunctionRef with a null `function`. That path is reached only from
-		// Binder::Bind(ExtensionStatement), i.e. a parser extension, so nothing in this build can
-		// reach it -- but a null here would be a segfault rather than a message, and a call with
-		// no readable argument text is a call that cannot have come from the macro.
+	if (!input.binder) {
+		// Binder::BindTableFunctionInternal always passes itself. A bind with no binder is a
+		// call that did not come through a FROM clause, so it cannot have come from the macro.
 		RefuseInternalsCall();
 	}
-	auto &call = input.ref.function->Cast<FunctionExpression>();
-	if (call.children.size() <= MATCH_SELECTOR_ARG ||
-	    call.children[MATCH_SELECTOR_ARG]->GetExpressionClass() != ExpressionClass::SUBQUERY) {
-		// UNREACHABLE in this build, and kept anyway. DuckDB's overload matcher rejects a
-		// non-subquery third argument before bind runs at all -- `duckent_match('main','a','abc')`,
-		// `(..., t)` and `(..., 1)` all give "No function matches duckent_match(...)" -- because a
-		// subquery is the only thing admitted against a LogicalType::TABLE parameter. So this
-		// branch is a guard on the shape SelectorText needs, not a path a user can take; the
-		// condition a user CAN take is the missing-CTE one below.
+	auto binding = input.binder->GetCTEBinding(BindingAlias(Identifier(MATCH_SELECTOR_CTE)));
+	if (!binding) {
+		// REACHABLE: a hand-written `duckent_match('main','app',(SELECT 1))` lands here, because
+		// nothing around it declares the selector CTE. Before this was a refusal it was an
+		// InternalException, which told the user they had hit a DuckDB assertion failure and
+		// invalidated their transaction on the way out.
 		RefuseInternalsCall();
 	}
-	auto &subquery = call.children[MATCH_SELECTOR_ARG]->Cast<SubqueryExpression>();
-	for (auto &cte : subquery.subquery->node->cte_map.map) {
-		if (!StringUtil::CIEquals(cte.first, MATCH_SELECTOR_CTE) || !cte.second || !cte.second->query) {
-			continue;
-		}
-		try {
-			return "(" + cte.second->query->node->ToString() + ")";
-		} catch (const std::exception &ex) {
-			// The deparse is the one place the whole mechanism's assumption is load-bearing, so it
-			// is the one place worth labelling. An unreferenced CTE is never BOUND on this DuckDB,
-			// which is why its text is still there to read (fact 3 in the note at the top of this
-			// file). On a DuckDB that binds it, binding replaces the parsed expression in place
-			// with a BoundExpression whose ToString() unconditionally throws -- so the failure is
-			// loud and the answer is never wrong, but the message is DuckDB's internal one and
-			// reads as a DuckDB bug. It is not: it is duckent's assumption no longer holding.
-			throw InvalidInputException(
-			    "duckent: tree_match could not deparse its selector, which means this DuckDB binds "
-			    "unreferenced CTEs. tree_match reads the selector's text out of an unreferenced CTE "
-			    "*because* such a CTE is never bound; once it is bound there is no text left to "
-			    "read. This is a duckent incompatibility with this DuckDB version, not a DuckDB "
-			    "bug: the mechanism needs rework, see the note at the top of src/duckent_match.cpp. "
-			    "Underlying error: %s",
-			    // RawMessage(), not what(): a DuckDB exception's what() is the JSON envelope,
-			    // stack-trace pointers and all, and the diagnosis worth keeping is the one line
-			    // inside it ("ToString(): BoundExpression does not have a child").
-			    ErrorData(ex).RawMessage());
-		}
+	auto &state = (*binding).*CTEBindStateOf(CTEBindStateTag());
+	if (!state || state->IsBound()) {
+		// CTEBinding::Reference() binds the CTE and then resets bind_state, so either condition
+		// means the CTE was bound before this bind ran, and its parse tree is gone. The macro
+		// never reads the CTE, so only a DuckDB that binds unreferenced CTEs gets here (fact 3).
+		throw InvalidInputException(
+		    "duckent: tree_match could not read its selector, because this DuckDB has already bound "
+		    "the CTE that holds it. tree_match reads the selector's text out of an unreferenced CTE "
+		    "*because* such a CTE is not bound; once it is bound there is no text left to read. This "
+		    "is a duckent incompatibility with this DuckDB version, not a DuckDB bug: the mechanism "
+		    "needs rework, see the note at the top of src/duckent_match.cpp.");
 	}
-	// REACHABLE: a hand-written `duckent_match('main','app',(SELECT 1))` lands here, because a
-	// subquery passes the shape check above and carries no __duckent_selector CTE. Before this was
-	// a refusal it was an InternalException, which told the user they had hit a DuckDB assertion
-	// failure and invalidated their transaction on the way out.
-	RefuseInternalsCall();
+	return "(" + state->cte_def.ToString() + ")";
 }
 
 //! Compile the selector into a SQL query and take the result schema from it.
@@ -328,7 +336,7 @@ string SelectorText(TableFunctionBindInput &input) {
 //! literal-only restriction on the selector: the query text is COMPUTED here, not read out of a
 //! constant.
 unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInput &input,
-                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Guarded HERE as well as in MatchInit, because the side connection opened on the next line is
 	// its own hazard: this is where the selector is compiled, and a compile against the
 	// pre-transaction snapshot is a stale SCHEMA and a stale query, which EXPLAIN would print and
@@ -401,7 +409,7 @@ unique_ptr<FunctionData> MatchBind(ClientContext &context, TableFunctionBindInpu
 		// for the reason CompileStatements gives: refusal text is contract.
 		prepared->GetErrorObject().Throw();
 	}
-	auto compiled = prepared->Execute(bound, false);
+	auto compiled = prepared->Execute(bound);
 	if (compiled->HasError()) {
 		compiled->GetErrorObject().Throw();
 	}
@@ -477,8 +485,8 @@ void RegisterDuckentMatch(ExtensionLoader &loader) {
 	TableFunction tf("duckent_match", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TABLE}, nullptr,
 	                 MatchBind, MatchInit);
 	tf.in_out_function = MatchInOut;
-	tf.named_parameters["semantic"] = LogicalType::ANY;
-	tf.named_parameters["language"] = LogicalType::VARCHAR;
+	tf.GetSignature().AddKeywordOnly("semantic", LogicalType::ANY, Value());
+	tf.GetSignature().AddKeywordOnly("language", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	loader.RegisterFunction(tf);
 
 	// tree_match(sch, nm, sel, semantic := ..., language := ...) mirrors
@@ -491,14 +499,18 @@ void RegisterDuckentMatch(ExtensionLoader &loader) {
 	// the embedded SQL where tree_compile_match is, and this text stays out of sql/ so that every
 	// embedded file remains byte-identical to the plan repo's.
 	//
+	// The selector CTE wraps the duckent_match call rather than sitting inside its subquery
+	// argument: on DuckDB 2.0 the argument is gone by bind time, and the enclosing query's CTE is
+	// what the bind can still reach (see the mechanism note at the top of this file).
+	//
 	// 1.5.5 resolves a table function's NAME at CREATE MACRO time (the constraint sql/09_css.sql
 	// records for parse_ast_list_table), so duckent_match is registered above, first.
 	Connection con(loader.GetDatabaseInstance());
-	auto created =
-	    con.Query(string("CREATE OR REPLACE MACRO tree_match(sch, nm, sel, semantic := NULL, language := NULL) "
-	                     "AS TABLE SELECT * FROM duckent_match(sch, nm, (WITH ") +
-	              MATCH_SELECTOR_CTE + " AS (SELECT sel AS s) SELECT sel AS s), " +
-	              "semantic := semantic, language := language)");
+	auto created = con.Query(
+	    string("CREATE OR REPLACE MACRO tree_match(sch, nm, sel, semantic := NULL, language := NULL) "
+	           "AS TABLE WITH ") +
+	    MATCH_SELECTOR_CTE + " AS (SELECT sel AS s) SELECT * FROM duckent_match(sch, nm, (SELECT sel AS s), " +
+	    "semantic := semantic, language := language)");
 	if (created->HasError()) {
 		throw InvalidInputException("duckent: failed to create the tree_match macro: %s", created->GetError());
 	}

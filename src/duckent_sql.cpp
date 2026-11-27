@@ -79,31 +79,48 @@ void RequireAutoCommitForRead(ClientContext &context, const string &reader) {
 }
 
 vector<string> CompileStatements(ClientContext &context, const string &macro_name, const vector<Value> &args) {
-	// One placeholder per argument, except a NULL argument, which is written as the literal NULL.
+	// One placeholder per argument, except a NULL argument, which is written as a NULL literal:
+	// `NULL` for a NULL of type INTEGER, `NULL::<type>` for every other type.
 	//
-	// run.py splices every argument's TEXT into `SELECT {macro}({args})`, so a caller's `NULL`
-	// reaches the macro as a NULL literal, which is typeless. Here it does not: DuckDB folds a
-	// table function's arguments to Values, and a bare `NULL` against a LogicalType::ANY
-	// parameter arrives as a NULL of type INTEGER -- SQLNULL only in the `arguments` list DuckDB
-	// matched the overload on, not in the Value it hands over. Bound as a parameter, that INTEGER
-	// is what the macro inlines against, and `CALL tree_ddl_alter('main', 'bare', NULL)` reports
-	// "UNNEST() for correlated expressions is not supported yet" instead of the refusal
-	// 11_ddl.test pins. Measured, on this build, with the compile macro called directly:
+	// run.py splices every argument's TEXT into `SELECT {macro}({args})`, so a caller's NULL
+	// reaches the macro with exactly the type the caller wrote. Here DuckDB folds a table
+	// function's arguments to Values first, and a bare `NULL` against a LogicalType::ANY parameter
+	// arrives as a NULL of type INTEGER -- SQLNULL only in the `arguments` list DuckDB matched the
+	// overload on, not in the Value it hands over. Bound as a parameter, that INTEGER is what the
+	// macro inlines against, and `CALL tree_ddl_alter('main', 'bare', NULL)` misbinds instead of
+	// giving the refusal 11_ddl.test pins (on DuckDB 1.5.5: "UNNEST() for correlated expressions
+	// is not supported yet"). So an INTEGER NULL is written as the bare literal `NULL`.
+	//
+	// Every other type is the caller's, and the macro binds against it, so it is kept. Measured on
+	// DuckDB v2.0.1, with the compile macro called directly:
 	//
 	//     tree_compile_alter('main', 'bare', NULL)                           -> nothing to alter
 	//     tree_compile_alter('main', 'bare', NULL::TREE_SEMANTIC)            -> nothing to alter
-	//     tree_compile_alter('main', 'bare', NULL::STRUCT(abstract BOOLEAN)) -> nothing to alter
-	//     tree_compile_alter('main', 'bare', NULL::INTEGER)                  -> UNNEST() ... error
+	//     tree_compile_alter('main', 'bare', NULL::STRUCT(abstract BOOLEAN)) -> Binder Error:
+	//         Could not find key "predicate" in struct
+	//     tree_compile_alter('main', 'bare', NULL::INTEGER)                  -> Binder Error:
+	//         Cannot extract field 'predicate' from expression "CAST(NULL AS INTEGER)"
 	//
-	// So writing `NULL` restores what the caller wrote and the reference passes on. The type of a
-	// NULL is dropped rather than respelled as `NULL::<type>` because it is not the caller's: an
-	// INTEGER is the one case that misbinds, and it is the one DuckDB invented.
+	// An earlier version dropped the type of EVERY NULL. That turned the STRUCT case's type error
+	// into "nothing to alter", a refusal for an argument that was never a semantic, and the
+	// compile differential caught it (12_verb_executor.test pins it now). On DuckDB 1.5.5 the
+	// STRUCT case also gave "nothing to alter", so the difference did not show there.
+	//
+	// The one known cost: a caller who writes NULL::INTEGER explicitly gets the bare-NULL
+	// behaviour, because the Value cannot tell that INTEGER from the one DuckDB invents. Measured
+	// on v2.0.1: `CALL tree_ddl_alter('main', 'bare', NULL::INTEGER)` gives "nothing to alter",
+	// where the macro called directly gives the Binder Error above.
 	string placeholders;
 	vector<Value> bound;
 	for (idx_t i = 0; i < args.size(); i++) {
 		placeholders += (i ? ", " : "");
 		if (args[i].IsNull()) {
-			placeholders += "NULL";
+			const auto &type = args[i].type();
+			if (type.id() == LogicalTypeId::INTEGER || type.id() == LogicalTypeId::SQLNULL) {
+				placeholders += "NULL";
+			} else {
+				placeholders += "NULL::" + type.ToString();
+			}
 			continue;
 		}
 		placeholders += "?";
@@ -119,7 +136,7 @@ vector<string> CompileStatements(ClientContext &context, const string &macro_nam
 		// contract. Pass it through untouched; the corpus matches on what the error SAYS.
 		prepared->GetErrorObject().Throw();
 	}
-	auto result = prepared->Execute(bound, false);
+	auto result = prepared->Execute(bound);
 	if (result->HasError()) {
 		// The macro's refusal is the product. Unwrapped, verbatim.
 		result->GetErrorObject().Throw();

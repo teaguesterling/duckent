@@ -7,9 +7,15 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
-# Override test_release_internal, test_debug_internal, and test_reldebug_internal (all three
-# defined above, in the submodule's Makefile) to pass --test-config. The unittest binary's
-# runtime extension list comes from TestConfiguration::ExtensionToBeLoadedOnLoad()
+# Override test_release, test_debug, and test_reldebug (all three defined above, in the
+# submodule's Makefile) to run the unittest binary directly and pass --test-config. Up to
+# extension-ci-tools v1.5 these targets called test_*_internal, and this file overrode those. From
+# v2.0 they call duckdb/scripts/ci/run_tests.py instead, which passes no --test-config, so the
+# _internal overrides became dead code and no suite loaded duckent. run_tests.py is also a parallel
+# wrapper whose output is not one Catch2 summary, and test/check_gate.py reads that summary. Calling
+# the binary directly keeps both: the extension list below, and the summary the gate reads. The
+# SKIP_TESTS guard is copied from the v2.0 recipe. The unittest binary's runtime extension list
+# comes from TestConfiguration::ExtensionToBeLoadedOnLoad()
 # (duckdb/test/helpers/test_config.cpp), which defaults to {"core_functions"} alone; the "Tests
 # loaded for extensions: [duckent]" message produced by LOAD_TESTS in extension_config.cmake is a
 # build-log line only (see extension/extension_build_tools.cmake) and does not populate that
@@ -22,12 +28,15 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 # All three build configurations get this override, not just release: without it, a debug or
 # reldebug run resolves extensions differently than release does, so a debug-only test failure
 # (or pass) can be an artifact of that difference rather than of the change actually under test.
-test_release_internal:
-	./build/release/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json
-test_debug_internal:
-	./build/debug/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json
-test_reldebug_internal:
-	./build/reldebug/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json
+test_release:
+	@if [ "$(SKIP_TESTS)" = "1" ]; then echo "Tests are skipped in this run..."; else \
+		./build/release/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json; fi
+test_debug:
+	@if [ "$(SKIP_TESTS)" = "1" ]; then echo "Tests are skipped in this run..."; else \
+		./build/debug/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json; fi
+test_reldebug:
+	@if [ "$(SKIP_TESTS)" = "1" ]; then echo "Tests are skipped in this run..."; else \
+		./build/reldebug/$(TEST_PATH) "$(TESTS_BASE_DIRECTORY)*" --test-config test/test_config.json; fi
 
 # Override the three format targets (also defined in the submodule's Makefile) to format `src`
 # ONLY, dropping `test` from the directory list.
@@ -44,11 +53,18 @@ test_reldebug_internal:
 # which ARE ours -- are not format-gated. format.py's --directories is per-directory, so there is
 # no way to include those three while excluding their copied neighbours, and a forked corpus is
 # much worse than three unformatted scripts.
+#
+# The recipes go through the submodule's own targets, as the submodule's versions do, and pass
+# only the directory list through T. On DuckDB v2.0 that matters: duckdb/Makefile runs format.py
+# from its own venv, which pins clang_format==11.0.1, and format.py puts its interpreter's folder
+# first on PATH. Called as plain `python3`, that folder is /usr/bin on the CI runner, whose
+# clang-format is 14, and format.py stops at its version check before it formats anything
+# (MainDistributionPipeline's Format Check, measured on the 2.0.1 port).
 format-check:
-	python3 duckdb/scripts/format.py --all --check --directories src
+	$(MAKE) -C duckdb format-check T="--workdir $$PWD --directories src"
 
 format:
-	python3 duckdb/scripts/format.py --all --fix --noconfirm --directories src
+	$(MAKE) -C duckdb format-fix T="--workdir $$PWD --directories src"
 
 format-fix:
-	python3 duckdb/scripts/format.py --all --fix --noconfirm --directories src
+	$(MAKE) -C duckdb format-fix T="--workdir $$PWD --directories src"

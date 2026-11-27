@@ -204,7 +204,11 @@ SPEC = {
          "              -- declares an S group that holds no predicates and every `:name` its\n"
          "              -- author meant to mint is silently unknown\n", 1)]),
 
-    "MN28": ("sql/00_types.sql", ["tree_sql_purity"], [
+    # The parse-ability arm moved from tree_sql_purity into tree_sql_purity_expr in the 2.0.0
+    # port (the decision had to stop being a subquery). The mutation is unchanged -- the arm is
+    # still what is removed -- so this points at the macro that now holds it. MN28 must still
+    # fail 36_pseudo.test; if it survives, the port weakened the check rather than moving it.
+    "MN28": ("sql/00_types.sql", ["tree_sql_purity_expr"], [
         ("    WHEN NOT tree_sql_expr_parses(expr) THEN 'malformed'\n",
          "    -- the mutation: parse-ability is never asked, and a malformed body contains no\n"
          "    -- resolvable function calls -- so 'no calls' reads exactly like purity and the\n"

@@ -68,8 +68,13 @@ CREATE OR REPLACE MACRO tree_shape_merge(p, c) AS
 -- merged/inherited one -- breaks the tie: shared only when the tree did not itself ask for that
 -- literal prefix. purity is computed by tree_sql_purity (M4): pure, impure, unknown or
 -- malformed, with the first two decidable and refused by tree_sql_check_purity before this runs.
--- Built over the list's INDICES rather than with list_transform, because tree_sql_purity is a
--- subquery macro and DuckDB refuses a subquery inside a lambda. `ORDER BY i` keeps the emission
+-- Built over the list's INDICES rather than with list_transform, because tree_sql_purity WAS a
+-- subquery macro and DuckDB refuses a subquery inside a lambda. The purity decision is now the
+-- relational-free tree_sql_purity_expr, so a lambda could call it; the index form is kept because
+-- `ORDER BY i` is what pins the emission order, not because the lambda is still refused.
+-- The two lookups are cross-joined in and bound ONCE. Calling tree_sql_purity per index read
+-- duckdb_functions() per predicate, which on 2.0.0 raised INTERNAL Error "Conflicting or cyclic
+-- column binding replacement" as soon as `predicate` came from an outer column. `ORDER BY i` keeps the emission
 -- order identical to the list's, which list_aggregate gave for free -- the expanded list is not
 -- name-ordered (the shared tier is, the local entries are as written), so ordering by name here
 -- would have quietly reordered what the catalog records.
@@ -85,8 +90,9 @@ CREATE OR REPLACE MACRO tree_sql_predicate_insert(db, sch, nm, predicate, explic
         || CASE WHEN (predicate[i]).prefix IS NULL THEN '''local'''
                 WHEN (predicate[i]).prefix = tree_shared_predicate_prefix() AND NOT explicit_sel_prefix THEN '''shared'''
                 ELSE '''prefix''' END || ', '
-        || tree_sql_lit(tree_sql_purity((predicate[i]).body)) || ')' AS r
-      FROM generate_series(1, len(predicate)) t(i))) END;
+        || tree_sql_lit(tree_sql_purity_expr((predicate[i]).body, k.vf, k.mb)) || ')' AS r
+      FROM generate_series(1, len(predicate)) t(i),
+           (SELECT tree_sql_volatile_fns() AS vf, tree_sql_macro_bodies() AS mb) k)) END;
 
 -- The attribute_columns artifact: the projection's non-canonical columns -- name AND declared
 -- type -- in projection order, as a JSON list of `{"name": ..., "type": ...}` objects. Recorded

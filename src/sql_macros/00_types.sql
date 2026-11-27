@@ -192,11 +192,49 @@ CREATE OR REPLACE MACRO tree_sql_object_name(kind, sch, nm) AS
 CREATE OR REPLACE MACRO tree_sql_expr_parses(expr) AS
   NOT COALESCE(json_serialize_sql('SELECT ' || COALESCE(expr, 'NULL')) ->> '$.error' = 'true', false);
 
-CREATE OR REPLACE MACRO tree_sql_expr_functions(expr) AS (
-  SELECT COALESCE(list(DISTINCT lower(regexp_extract(m, '"function_name":"([^"]+)"', 1))), [])
-  FROM (SELECT unnest(regexp_extract_all(
-                 json_serialize_sql('SELECT ' || COALESCE(expr, 'NULL')),
-                 '"function_name":"[^"]+"')) AS m));
+-- A LIST EXPRESSION, not a subquery, and that is load-bearing rather than tidier. DuckDB 2.0.0
+-- refuses a lateral join inside a correlated subquery, and every purity caller passes a value
+-- that varies per row, so each subquery level here became one lateral level there. The old form
+-- was `SELECT list(DISTINCT ...) FROM (SELECT unnest(...))`, which list_distinct + list_transform
+-- compute with no relation at all. Measured equal on 9 bodies including malformed and NULL.
+CREATE OR REPLACE MACRO tree_sql_expr_functions(expr) AS
+  COALESCE(list_distinct(list_transform(
+    regexp_extract_all(json_serialize_sql('SELECT ' || COALESCE(expr, 'NULL')),
+                       '"function_name":"[^"]+"'),
+    lambda m: lower(regexp_extract(m, '"function_name":"([^"]+)"', 1)))), []);
+
+-- THE TWO CATALOG READS, TAKEN ONCE. Both are zero-argument, so neither depends on the row being
+-- judged: DuckDB evaluates each once and nothing becomes a lateral. This is the whole of the
+-- 2.0.0 fix. Reading duckdb_functions() per predicate -- which is what a subquery macro called
+-- from a lambda or from a per-row CTE does -- is what 2.0.0 refuses, in two different ways:
+-- `tree_sql_check_purity` over a correlated column raised "Nested lateral joins or lateral joins
+-- in correlated subqueries are not (yet) supported", and `tree_sql_predicate_insert` over one
+-- raised INTERNAL Error "Conflicting or cyclic column binding replacement". Both passed on 1.5.5.
+CREATE OR REPLACE MACRO tree_sql_volatile_fns() AS (
+  SELECT COALESCE(list(DISTINCT lower(function_name)), []) FROM duckdb_functions()
+  WHERE stability IN ('VOLATILE', 'CONSISTENT_WITHIN_QUERY'));
+
+-- name -> EVERY body that name has, so level 2 resolves by map lookup instead of a per-row join.
+-- A LIST of bodies and not one body: the old form joined `lvl1` to duckdb_functions() on the
+-- name, which fans out to every overload, so level 2 saw the calls of all of them. Taking one
+-- body with min() would lose an overload -- and if that is the volatile one, a predicate the old
+-- code refused as 'impure' would be recorded 'pure', which is a safety check getting quieter
+-- during a port. MEASURED: this DuckDB has 4 built-in macro names whose overloads have differing
+-- bodies (json_copy_strftime_if_date, json_copy_strftime_if_timestamp, pg_get_constraintdef,
+-- assert_true), so the case is real and not hypothetical.
+CREATE OR REPLACE MACRO tree_sql_macro_bodies() AS (
+  SELECT COALESCE(map(list(fn), list(bodies)), MAP {}) FROM (
+    SELECT lower(function_name) AS fn, list(DISTINCT macro_definition) AS bodies
+    FROM duckdb_functions() WHERE function_type = 'macro' AND macro_definition IS NOT NULL
+    GROUP BY 1));
+
+-- The functions every level-1 macro call reaches through its own body, over all overloads.
+-- Factored out because the purity arms below ask for it twice and a duplicated expression of
+-- this size is where the two copies drift apart.
+CREATE OR REPLACE MACRO tree_sql_expr_functions_lvl2(expr, macro_bodies) AS
+  flatten(list_transform(
+    list_filter(tree_sql_expr_functions(expr), lambda f: map_contains(macro_bodies, f)),
+    lambda f: flatten(list_transform(macro_bodies[f], lambda b: tree_sql_expr_functions(b)))));
 
 -- VOLATILE and CONSISTENT_WITHIN_QUERY are both impure here: the first differs within one query,
 -- the second between queries, and a predicate that moves between queries is the same defect.
@@ -206,34 +244,52 @@ CREATE OR REPLACE MACRO tree_sql_expr_functions(expr) AS (
 -- body nothing resolved is the false-positive verdict, and refusing it would reject a predicate
 -- that is very likely fine. Transitive resolution is the obvious extension and would turn some of
 -- today's 'unknown' into 'impure'.
-CREATE OR REPLACE MACRO tree_sql_purity(expr) AS (
-  WITH fns AS (SELECT DISTINCT function_name, function_type, stability, macro_definition FROM duckdb_functions()),
-       d AS (SELECT unnest(tree_sql_expr_functions(expr)) AS fn),
-       lvl1 AS (SELECT d.fn, f.function_type AS ft, f.stability AS st, f.macro_definition AS body
-                FROM d LEFT JOIN fns f ON lower(f.function_name) = d.fn),
-       lvl2 AS (SELECT unnest(tree_sql_expr_functions(body)) AS fn FROM lvl1
-                WHERE ft = 'macro' AND body IS NOT NULL),
-       lvl2c AS (SELECT l.fn, f.function_type AS ft, f.stability AS st
-                 FROM lvl2 l LEFT JOIN fns f ON lower(f.function_name) = l.fn)
-  SELECT CASE
+
+-- The purity decision as a PURE EXPRESSION over pre-bound lookups. Taking the two lists as
+-- parameters is what lets a lambda call it: DuckDB refuses a subquery inside a lambda (the same
+-- refusal `tree_sql_predicate_insert` works around with generate_series), so the lookups are
+-- bound by the caller, once, and this stays relational-free.
+CREATE OR REPLACE MACRO tree_sql_purity_expr(expr, volatile_fns, macro_bodies) AS
+  CASE
     WHEN NOT tree_sql_expr_parses(expr) THEN 'malformed'
-    WHEN (SELECT count(*) FROM lvl1  WHERE st IN ('VOLATILE', 'CONSISTENT_WITHIN_QUERY')) > 0 THEN 'impure'
-    WHEN (SELECT count(*) FROM lvl2c WHERE st IN ('VOLATILE', 'CONSISTENT_WITHIN_QUERY')) > 0 THEN 'impure'
-    WHEN (SELECT count(*) FROM lvl2c WHERE ft = 'macro') > 0 THEN 'unknown'
-    ELSE 'pure' END);
+    WHEN len(list_intersect(tree_sql_expr_functions(expr), volatile_fns)) > 0 THEN 'impure'
+    -- level 2: a macro reports stability NULL whatever it calls, so its own body is resolved one
+    -- level deep. The old form did this with lvl2/lvl2c CTEs over duckdb_functions(); the map
+    -- lookup answers the same question without a relation.
+    WHEN len(list_intersect(tree_sql_expr_functions_lvl2(expr, macro_bodies), volatile_fns)) > 0
+      THEN 'impure'
+    -- a level-2 call that is ITSELF a macro is where resolution stops: recorded, never guessed
+    WHEN len(list_filter(tree_sql_expr_functions_lvl2(expr, macro_bodies),
+                         lambda g: map_contains(macro_bodies, g))) > 0 THEN 'unknown'
+    ELSE 'pure' END;
+
+-- The one-argument form, kept because it is the surface the suites and the catalog's recorded
+-- purity already read. It binds the lookups itself, which is safe wherever `expr` does not vary
+-- per row -- a literal, or a macro argument. A per-row caller must NOT use it: it calls
+-- tree_sql_purity_expr and binds the two lookups once in its own scope, which is what
+-- tree_sql_check_purity and tree_sql_predicate_insert now do.
+CREATE OR REPLACE MACRO tree_sql_purity(expr) AS (
+  WITH k AS (SELECT tree_sql_volatile_fns() AS vf, tree_sql_macro_bodies() AS mb)
+  SELECT tree_sql_purity_expr(expr, k.vf, k.mb) FROM k);
 
 -- Refuses the two decidable failures and lets 'unknown' through. Reads the EXPANDED list, so a
 -- macro- or prefix-bound entry is checked on the body it actually compiles to.
 CREATE OR REPLACE MACRO tree_sql_check_purity(sem, verb) AS (
-  WITH p AS (SELECT unnest(COALESCE((sem).predicate, [])) AS e),
-       bad AS (SELECT (p.e).name AS nm, tree_sql_purity((p.e).body) AS pur FROM p
-               WHERE tree_sql_purity((p.e).body) IN ('impure', 'malformed'))
-  SELECT CASE WHEN (SELECT count(*) FROM bad) = 0 THEN true
-              ELSE tree_err(verb || ': PREDICATE ' || (SELECT min(nm) FROM bad)
-                   || CASE WHEN (SELECT min(pur) FROM bad) = 'malformed'
+  WITH k AS (SELECT tree_sql_volatile_fns() AS vf, tree_sql_macro_bodies() AS mb),
+       b AS (SELECT list_filter(
+               list_transform(COALESCE((sem).predicate, []),
+                 lambda e: {nm: (e).name, pur: tree_sql_purity_expr((e).body, k.vf, k.mb)}),
+               lambda x: (x).pur IN ('impure', 'malformed')) AS bad
+             FROM k)
+  -- list_min over the names, not `SELECT min(nm) FROM bad`: the refusal must name the same
+  -- predicate the old form named, and the old form took the alphabetically first of the bad ones.
+  SELECT CASE WHEN len(b.bad) = 0 THEN true
+              ELSE tree_err(verb || ': PREDICATE ' || list_min(list_transform(b.bad, lambda x: (x).nm))
+                   || CASE WHEN list_min(list_transform(b.bad, lambda x: (x).pur)) = 'malformed'
                            THEN ' does not parse'
                            ELSE ' is not pure: its body reads a VOLATILE or CONSISTENT_WITHIN_QUERY'
-                                || ' function, so the same selector would not answer the same twice' END) END);
+                                || ' function, so the same selector would not answer the same twice' END) END
+  FROM b);
 
 -- The alphabetically first name bound more than once in an EXPANDED predicate list, or NULL
 -- when every name is unique. Exists so the S-coherence refusal can say WHICH predicate: a

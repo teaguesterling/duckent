@@ -275,13 +275,14 @@ FROM duckent_match('main', 'guarded', (SELECT 1));
 duckent_match is duckent internals: its selector argument has to be the relation the tree_match macro builds
 
 # it is a Binder Error, and it is one on purpose: every OTHER way of getting duckent_match's third
-# argument wrong is already a Binder Error from DuckDB's own overload matcher, so a caller who got
-# the argument's shape wrong rather than its type should not be told something categorically
-# different. This record is the comparison.
+# argument wrong is already a Binder Error from DuckDB itself, so a caller who got the argument's
+# shape wrong rather than its type should not be told something categorically different. This
+# record is the comparison. DuckDB 1.5 worded it "No function matches duckent_match(...)"; 2.0
+# words it as below. The record pins the CLASS with the "Binder Error:" prefix.
 statement error
 FROM duckent_match('main', 'guarded', 'abc');
 ----
-No function matches
+Binder Error: Table function "duckent_match" requires a subquery as its TABLE parameter
 
 # ORDER, pinned: inside a transaction the same by-hand call gets the TRANSACTION refusal, not the
 # internals one, because RequireAutoCommitForRead runs before the selector is ever looked at. That
@@ -299,28 +300,47 @@ duckent: tree_match cannot run inside an explicit transaction
 statement ok
 ROLLBACK;
 
-# ---- the deparse assumption fails as OURS, not as a DuckDB bug -------------------------------
-# tree_match reads the selector's text out of an UNREFERENCED CTE because such a CTE is never
-# bound, and binding replaces a parsed expression in place with a BoundExpression whose ToString()
-# throws. Referencing the CTE is the one way to make this DuckDB bind it, which is how an
-# eager-binding DuckDB is simulated here: the mechanism fails loudly, never quietly and never with
-# a wrong answer. What this record pins is the LABEL -- a reader hitting it must be sent to
-# duckent's assumption rather than to DuckDB's issue tracker -- and that the underlying message
-# survives in the rethrow.
+# ---- the lazy-CTE assumption fails as OURS, not as a DuckDB bug -----------------------------
+# tree_match reads the selector's text out of an UNREFERENCED CTE of the macro's own query,
+# because such a CTE is not bound (fact 3 at the top of src/duckent_match.cpp). Reading the CTE
+# BEFORE duckent_match in the same FROM clause is the one way to make this DuckDB bind it first,
+# which is how an eager-binding DuckDB is simulated here: the mechanism fails loudly, never quietly
+# and never with a wrong answer. What this record pins is the LABEL -- a reader hitting it must be
+# sent to duckent's assumption rather than to DuckDB's issue tracker.
+#
+# On DuckDB 1.5 the CTE sat inside duckent_match's subquery argument, and this record referenced it
+# there. On 2.0 that CTE is out of the bind's reach, so the same text now gets the internals
+# refusal above, which is right: it is no longer the macro's shape.
 
 statement error
-FROM duckent_match('main', 'guarded',
-  (WITH __duckent_selector AS (SELECT tree_steps([{type: 'function_definition'}]) AS s)
-   SELECT s FROM __duckent_selector));
+WITH __duckent_selector AS (SELECT tree_steps([{type: 'function_definition'}]) AS s)
+FROM __duckent_selector, duckent_match('main', 'guarded', (SELECT tree_steps([{type: 'function_definition'}]) AS s));
 ----
-duckent: tree_match could not deparse its selector, which means this DuckDB binds unreferenced CTEs
+duckent: tree_match could not read its selector, because this DuckDB has already bound the CTE that holds it
+
+# ---- a NULL argument keeps the caller's type through the CALL path ----------------------
+# CompileStatements (src/duckent_sql.cpp) turns a verb's arguments into a call of the compile
+# macro. A NULL must reach the macro with the type the caller gave it, because the macro binds
+# against that type: on DuckDB 2.0, NULL::STRUCT(abstract BOOLEAN) has no `predicate` key, and
+# tree_compile_alter's `(semantic).predicate` fails at bind, exactly as the plan repo's run.py
+# reports. Dropping the type turned that type error into "nothing to alter" -- a refusal for an
+# argument that was never a semantic. The other two records are the controls: a bare NULL and a
+# NULL of the right type are a NULL semantic, and both must still be refused as one.
 
 statement error
-FROM duckent_match('main', 'guarded',
-  (WITH __duckent_selector AS (SELECT tree_steps([{type: 'function_definition'}]) AS s)
-   SELECT s FROM __duckent_selector));
+CALL tree_ddl_alter('main', 't1', NULL::STRUCT(abstract BOOLEAN));
 ----
-Underlying error: ToString(): BoundExpression does not have a child
+Could not find key "predicate" in struct
+
+statement error
+CALL tree_ddl_alter('main', 't1', NULL::TREE_SEMANTIC);
+----
+nothing to alter
+
+statement error
+CALL tree_ddl_alter('main', 't1', NULL);
+----
+nothing to alter
 
 # ---- atomicity: the first statement must not survive a later one raising ----------------
 # The compile macro is overridden for this file only, reproducing the rollback probe the plan

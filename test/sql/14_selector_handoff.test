@@ -1,0 +1,53 @@
+# name: test/sql/14_selector_handoff.test
+# description: each tree_match call reads its OWN selector from the macro's selector CTE (the DuckDB 2.0 hand-off)
+
+# WHY THIS FILE EXISTS. On DuckDB 2.0, MatchBind finds the selector by NAME: it asks the binder
+# for the nearest CTE called __duckent_selector (see the note at the top of src/duckent_match.cpp).
+# A lookup by name can find the wrong CTE: another tree_match call's, or one the user wrote. The
+# plan repo's suites run one call per statement, so they cannot see that failure. These records
+# put two calls with DIFFERENT selectors in one statement. If one call read the other's selector,
+# its rows would change, and the expected rows below would not match.
+
+statement ok
+CALL tree_ddl_create('main', 'app', tree_spec(
+  tree_shape(root := 'file_path', "order" := 'node_id', level := 'depth', size := 'descendant_count',
+             semantic := tree_semantic(type := 'type', key := 'name', tags := '[CAST(semantic_type AS VARCHAR)]',
+                                       predicate := [{name: 'leaf', body: 'descendant_count = 0'}, {name: 'def', body: '(flags & 6) = 6'}])),
+  source := 'read_parquet(''test/data/app.parquet'')'));
+
+# the two selectors alone, as the control: 'a' gives greet and shout, 'b' gives greet only
+query I rowsort
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}, {comb: 'child', type: 'identifier'}])) SELECT name;
+----
+greet
+shout
+
+query I
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f'}, {comb: 'desc', type: 'string'}])) SELECT DISTINCT f.name;
+----
+greet
+
+# both in one UNION: each branch keeps its own rows
+query II rowsort
+SELECT 'a', name FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}, {comb: 'child', type: 'identifier'}]))
+UNION ALL
+SELECT 'b', f.name FROM (FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f'}, {comb: 'desc', type: 'string'}])) SELECT DISTINCT f);
+----
+a	greet
+a	shout
+b	greet
+
+# one call inside a user CTE, joined with a second call outside it
+query I
+WITH x AS (FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}, {comb: 'child', type: 'identifier'}])) SELECT name)
+SELECT count(*) FROM x JOIN (FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def', "as": 'f'}, {comb: 'desc', type: 'string'}])) SELECT DISTINCT f.name AS n) y ON x.name = y.n;
+----
+1
+
+# a user CTE with the macro's CTE name does not capture the call: the macro's own CTE is nearer
+query I rowsort
+WITH __duckent_selector AS (SELECT 'bogus' AS s)
+FROM tree_match('main', 'app', tree_steps([{type: 'function_definition', pseudo: 'def'}, {comb: 'child', type: 'identifier'}])) SELECT name;
+----
+greet
+shout

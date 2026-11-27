@@ -202,7 +202,10 @@ def via_plan_repo(plan_repo, setup, macro, args):
 def via_extension(duckdb_bin, setup, macro, args):
     sql = "\n".join(setup) + ("\n" if setup else "") + \
         "SELECT to_json(%s(%s));" % (macro, ", ".join(args))
-    out = subprocess.run([duckdb_bin, "-noheader", "-list", "-c", sql],
+    # -no-agent: on a failed run the DuckDB 2.0 CLI adds a "hint: -agent ..." line to stderr,
+    # but only when no AI-agent variable (CLAUDECODE, AI_AGENT, ...) is set. The error text
+    # is compared verbatim, so without the flag the result depends on the environment.
+    out = subprocess.run([duckdb_bin, "-no-agent", "-noheader", "-list", "-c", sql],
                          capture_output=True, text=True)
     if out.returncode != 0:
         return {"error": error_message(out.stderr.strip())}
@@ -258,7 +261,8 @@ def via_plan_repo_call(plan_repo, setup, verb, args):
 
 def via_extension_call(duckdb_bin, setup, verb, args):
     sql = (setup + "\n" if setup else "") + "CALL %s(%s);" % (verb, ", ".join(args))
-    out = subprocess.run([duckdb_bin, "-noheader", "-list", "-c", sql],
+    # -no-agent: see via_extension.
+    out = subprocess.run([duckdb_bin, "-no-agent", "-noheader", "-list", "-c", sql],
                          capture_output=True, text=True)
     if out.returncode != 0:
         return {"error": error_message(out.stderr.strip())}
